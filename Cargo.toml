@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "groth-sahai"]
+members = ["."]
 
 [package]
 name = "arkworks_groth16"
@@ -11,20 +11,17 @@ name = "arkworks_groth16"
 crate-type = ["rlib"]  # Add rlib for testing
 
 [dependencies]
-# Arkworks ecosystem (0.5 for groth-sahai compatibility)
+# Arkworks ecosystem (0.5 for PVUGC compatibility)
 ark-bls12-381 = "0.5"
 ark-ec = "0.5"
 ark-ff = "0.5"
-ark-groth16 = "0.5"
+ark-groth16 = { path = "ark-groth16-pvugc" }
 ark-r1cs-std = "0.5"
 ark-relations = "0.5"
 ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
 ark-crypto-primitives = { version = "0.5", features = ["r1cs", "crh"] }
-
-# Groth-Sahai proofs
-groth-sahai = { path = "groth-sahai" }
 
 # Crypto primitives for KEM and Schnorr
 secp256k1 = { version = "0.28", features = ["rand", "recovery"] }
