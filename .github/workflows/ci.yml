@@ -35,7 +35,7 @@ jobs:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C link-arg=-fuse-ld=lld -Cunsafe-allow-abi-mismatch=sanitizer
           RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
           ASAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --all --locked
+        run: cargo +nightly -Z build-std test --target $(rustc -vV | sed -n 's|host: ||p') --all --locked
 
   fuzz-smoke:
     runs-on: ubuntu-latest
