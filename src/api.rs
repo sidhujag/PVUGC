@@ -12,6 +12,7 @@ use crate::{
 };
 pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
 use crate::dlrep::{verify_b_msm, verify_tie_aggregated};
+use crate::ppe::validate_gamma_structure;
 use crate::ppe::validate_groth16_vk_subgroups;
 
 /// Complete PVUGC bundle
@@ -63,6 +64,14 @@ impl OneSidedPvugc {
         // 0. Basic guards
         if !validate_pvugc_vk_subgroups(pvugc_vk) { 
             return false; 
+        }
+        // Gamma structure sanity (at least one non-zero per row; rectangular shape)
+        if gamma.is_empty() || gamma[0].is_empty() {
+            return false;
+        }
+        // min_nonzero_per_row = 1; columns coverage not enforced in prototype; no rank test here
+        if !validate_gamma_structure::<E>(gamma, 1, false, false) {
+            return false;
         }
         if !validate_groth16_vk_subgroups(vk) {
             return false;
@@ -116,6 +125,14 @@ impl OneSidedPvugc {
         y_bases.extend_from_slice(&pvugc_vk.b_g2_query);
         
         let rows: RowBases<E> = build_row_bases_from_vk(&y_bases, pvugc_vk.delta_g2, gamma.to_vec());
+        // Length checks to avoid silent truncation in zips
+        if bundle.gs_commitments.c_rows.len() != rows.u_rows.len() {
+            return false;
+        }
+        // δ-side is single-row in current build path; allow any theta length ≥ 1
+        if bundle.gs_commitments.theta.is_empty() {
+            return false;
+        }
         
         // Initialize with ONE (multiplicative identity), not zero!
         let mut lhs = PairingOutput::<E>(One::one());

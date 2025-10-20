@@ -28,12 +28,12 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
       - name: Install LLVM tools (for sanitizers)
         run: sudo apt-get update && sudo apt-get install -y clang lld
-      - name: Cargo test with ${{ matrix.sanitizer }}
+      - name: Cargo test with ${{ matrix.sanitizer }} (build std)
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C panic=abort -C link-arg=-fuse-ld=lld
           RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }}
           ASAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly test --all --locked
+        run: cargo +nightly -Z build-std test -Zbuild-std=std,panic_abort --all --locked
 
   fuzz-smoke:
     runs-on: ubuntu-latest
