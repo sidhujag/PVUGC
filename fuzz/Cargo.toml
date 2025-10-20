@@ -1,0 +1,95 @@
+[package]
+name = "arkworks_groth16-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-std = "0.5"
+arkworks_groth16 = { path = ".." }
+ark-groth16 = { path = "../ark-groth16-pvugc" }
+ark-relations = "0.5"
+ark-r1cs-std = { version = "0.5", features = ["std"] }
+ark-snark = "0.5"
+once_cell = "1"
+
+
+
+[workspace]
+members = []
+resolver = "2"
+
+[[bin]]
+name = "arm_rows"
+path = "fuzz_targets/arm_rows.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "build_row_bases_from_vk"
+path = "fuzz_targets/build_row_bases_from_vk.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "decap"
+path = "fuzz_targets/decap.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "statement_k_collision"
+path = "fuzz_targets/statement_k_collision.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "proof_agnostic_same_statement"
+path = "fuzz_targets/proof_agnostic_same_statement.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "cross_circuit_k_difference"
+path = "fuzz_targets/cross_circuit_k_difference.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gt_span_small_coeff"
+path = "fuzz_targets/gt_span_small_coeff.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gs_malleation_binding"
+path = "fuzz_targets/gs_malleation_binding.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gs_linear_recomb_dlrep"
+path = "fuzz_targets/gs_linear_recomb_dlrep.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gs_random_recomb_budget"
+path = "fuzz_targets/gs_random_recomb_budget.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gamma_vk_grinding"
+path = "fuzz_targets/gamma_vk_grinding.rs"
+test = false
+bench = false
+
+
