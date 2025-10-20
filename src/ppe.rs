@@ -149,7 +149,7 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             };
             row.push(sf);
         }
-        // Avoid all-zero rows
+        // Avoid all-zero rows and duplicate rows
         let mut nonzero = false;
         for c in &row {
             if !c.is_zero() {
@@ -158,7 +158,10 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             }
         }
         if nonzero {
-            gamma.push(row);
+            let is_duplicate = gamma.iter().any(|existing| existing == &row);
+            if !is_duplicate {
+                gamma.push(row);
+            }
         }
         ctr += 1;
     }

@@ -101,7 +101,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     }
     
     /// Create DLREP proof for B coefficients
-    /// Proves: B - β - query[0] = s·δ + Σ b_j·query[1..]
+    /// Proves: B - β = s·δ + Σ b_j·query[j]
     pub fn create_dlrep_b<R: ark_std::rand::RngCore>(
         &self,
         pvugc_vk: &crate::api::PvugcVk<E>,
@@ -113,8 +113,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let b_coeffs = &self.b_coeffs;  // These correspond to query[1..]
         let s = self.s.expect("s not recorded");
         
-        // B'' = s·δ + Σ b_j·query[1..]
-        // (NOT including β or query[0] - those are constants)
+        // Variable part: s·δ + Σ b_j·query[1..] (β and query[0] handled separately)
         let mut b_var = pvugc_vk.delta_g2.into_group() * s;
         for (b_j, y_j) in b_coeffs.iter().zip(&pvugc_vk.b_g2_query[1..]) {
             b_var += y_j.into_group() * b_j;
@@ -199,9 +198,9 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let a_group = a.into_group();
         
         // Full coefficient vector includes constants
-        // [1 for β, 1 for query[0], b_1, b_2, ...]
+        // [1 for β, 1 for query[0], b_1, ...] where b_j are the G2 MSM scalars
         let mut full_coeffs = vec![E::ScalarField::one()];  // β coefficient
-        full_coeffs.push(E::ScalarField::one());  // query[0] coefficient
+        full_coeffs.push(E::ScalarField::one());  // query[0]
         full_coeffs.extend(self.b_coeffs.iter().copied());  // Variable coefficients
         
         // For each row ℓ in Γ:

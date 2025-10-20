@@ -2,7 +2,7 @@
 
 use arkworks_groth16::*;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
-use arkworks_groth16::ppe::PvugcVk;
+use arkworks_groth16::ppe::{PvugcVk, derive_gamma_rademacher};
 use arkworks_groth16::{PoceAcrossProof};
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_std::{UniformRand, rand::rngs::StdRng, rand::SeedableRng};
@@ -63,15 +63,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // Generate ρ
     let rho = Fr::rand(&mut rng);
     
-    // Gamma: identity for tests
-    let gamma = {
-        let n = pvugc_vk.b_g2_query.len() + 1;
-        (0..n).map(|i| {
-            let mut row = vec![Fr::from(0u64); n];
-            row[i] = Fr::from(1u64);
-            row
-        }).collect::<Vec<_>>()
-    };
+    // Gamma: canonical Rademacher-derived matrix
+    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, pvugc_vk.b_g2_query.len() + 1);
     
     // Use the API for setup and arming
     let (rows, arms, _r, k_expected) = OneSidedPvugc::setup_and_arm(
@@ -196,17 +189,8 @@ fn test_delta_sign_sanity() {
     let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
     let rho = Fr::rand(&mut rng);
     
-    // Gamma: identity for tests
-    let gamma = {
-        let n = pvugc_vk.b_g2_query.len() + 1;
-        (0..n)
-            .map(|i| {
-                let mut row = vec![Fr::from(0u64); n];
-                row[i] = Fr::from(1u64);
-                row
-            })
-            .collect::<Vec<_>>()
-    };
+    // Gamma: canonical Rademacher-derived matrix
+    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, pvugc_vk.b_g2_query.len() + 1);
     
     // Use API for setup and arming
     let (_rows, arms, _r, k_expected) = OneSidedPvugc::setup_and_arm(
@@ -327,15 +311,8 @@ fn test_witness_independence() {
     
     let rho = Fr::rand(&mut rng);
     
-    // Gamma: identity for tests
-    let gamma = {
-        let n = pvugc_vk.b_g2_query.len() + 1;
-        (0..n).map(|i| {
-            let mut row = vec![Fr::from(0u64); n];
-            row[i] = Fr::from(1u64);
-            row
-        }).collect::<Vec<_>>()
-    };
+    // Gamma: canonical Rademacher-derived matrix
+    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, pvugc_vk.b_g2_query.len() + 1);
     
     let (_, arms, _, k_expected) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_x, &rho, gamma.clone());
     

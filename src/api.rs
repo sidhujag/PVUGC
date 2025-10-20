@@ -12,7 +12,7 @@ use crate::{
 };
 pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
 use crate::dlrep::{verify_b_msm, verify_tie_aggregated};
-use crate::ppe::validate_gamma_structure;
+use crate::ppe::{validate_gamma_structure, derive_gamma_rademacher};
 use crate::ppe::validate_groth16_vk_subgroups;
 use crate::poce::{PoceAcrossProof, prove_poce_across, verify_poce_across};
 use ark_std::rand::RngCore;
@@ -103,6 +103,17 @@ impl OneSidedPvugc {
         if !validate_gamma_structure::<E>(gamma, 1, false, false) {
             return false;
         }
+        // Canonicalize Γ: derive deterministically from vk/pvugc_vk and insist on equality
+        let canonical_gamma = derive_gamma_rademacher::<E>(pvugc_vk, vk, gamma.len());
+        if *gamma != canonical_gamma {
+            return false;
+        }
+        // Reject duplicate rows in Γ to avoid degenerate ties
+        for i in 0..gamma.len() {
+            for j in (i+1)..gamma.len() {
+                if gamma[i] == gamma[j] { return false; }
+            }
+        }
         if !validate_groth16_vk_subgroups(vk) {
             return false;
         }
@@ -119,7 +130,6 @@ impl OneSidedPvugc {
         }
         
         // 2. Verify DLREP_B against B' = B - β₂ - query[0]
-        
         // Subtract BOTH constants (β₂ and query[0])
         let b_prime = (bundle.groth16_proof.b.into_group()
                      - pvugc_vk.beta_g2.into_group()
