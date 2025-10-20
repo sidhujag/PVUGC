@@ -170,3 +170,42 @@ fn test_different_witnesses_same_statement() {
     
 }
 
+#[test]
+fn test_verify_rejects_mismatched_statement() {
+    let mut rng = StdRng::seed_from_u64(13);
+
+    let circuit = TestCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+
+    let vault_utxo = vec![Fr::from(25u64)];
+    let wrong_vault_utxo = vec![Fr::from(49u64)];
+
+    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+
+    // Deterministic identity Γ for clarity
+    let gamma = {
+        let n = pvugc_vk.b_g2_query.len() + 1;
+        (0..n)
+            .map(|i| {
+                let mut row = vec![Fr::from(0u64); n];
+                row[i] = Fr::from(1u64);
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut recorder = SimpleCoeffRecorder::<E>::new();
+    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
+
+    let commitments = recorder.build_commitments(&pvugc_vk, &gamma);
+    let bundle = PvugcBundle {
+        groth16_proof: proof,
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_tie: recorder.create_dlrep_tie(&gamma, &mut rng),
+        gs_commitments: commitments,
+    };
+
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo, &gamma));
+    assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &wrong_vault_utxo, &gamma));
+}
+
