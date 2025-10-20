@@ -33,3 +33,6 @@ pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, deri
 pub use decap::{decap_one_sided, OneSidedCommitments};
 pub use poce::{PoceAcrossProof, prove_poce_across, verify_poce_across};
 pub use api::{OneSidedPvugc, PvugcBundle};
+pub mod nonzero;
+pub mod ct;
+pub mod pvugc_aead;
