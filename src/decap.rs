@@ -4,6 +4,8 @@
 
 use ark_ec::pairing::{Pairing, PairingOutput};
 use crate::arming::Arms;
+use ark_ec::AffineRepr;
+use ark_std::Zero;
 
 /// GS commitments for one-sided PPE
 #[derive(Clone, Debug)]
@@ -13,9 +15,6 @@ pub struct OneSidedCommitments<E: Pairing> {
     
     /// Theta proofs (for randomness cancellation)
     pub theta: Vec<(E::G1Affine, E::G1Affine)>,
-    
-    /// C commitment (for delta term)
-    pub c_delta: (E::G1Affine, E::G1Affine),
 }
 
 /// Decapsulate to get K = R^ρ
@@ -26,6 +25,26 @@ pub fn decap_one_sided<E: Pairing>(
     commitments: &OneSidedCommitments<E>,
     arms: &Arms<E>,
 ) -> PairingOutput<E> {
+    // Guard: shape and subgroup checks (zipped δ-side)
+    use ark_ff::PrimeField;
+    let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+    let is_good_g1 = |g: &E::G1Affine| {
+        if g.is_zero() { return true; }
+        g.mul_bigint(order).is_zero()
+    };
+    let is_good_g2 = |g: &E::G2Affine| {
+        // Allow identity per-row; enforce subgroup only for non-identity points
+        if g.is_zero() { return true; }
+        g.mul_bigint(order).is_zero()
+    };
+    if commitments.c_rows.len() != arms.u_rows_rho.len() { panic!("|C_rows| != |U^rho|"); }
+    if commitments.theta.len() != arms.w_rows_rho.len() { panic!("|Theta| != |W^rho|"); }
+    if arms.u_rows_rho.iter().all(|u| u.is_zero()) { panic!("all U^rho rows are identity"); }
+    if arms.w_rows_rho.iter().all(|w| w.is_zero()) { panic!("all W^rho rows are identity"); }
+    if arms.u_rows_rho.iter().any(|u| !is_good_g2(u)) { panic!("Invalid U^rho"); }
+    if arms.w_rows_rho.iter().any(|w| !is_good_g2(w)) { panic!("Invalid W^rho"); }
+    for (a,b) in &commitments.c_rows { if !is_good_g1(a) || !is_good_g1(b) { panic!("Invalid C limb"); } }
+    for (a,b) in &commitments.theta { if !is_good_g1(a) || !is_good_g1(b) { panic!("Invalid theta limb"); } }
     // Initialize with ONE (multiplicative identity)
     use ark_std::One;
     let mut k = PairingOutput::<E>(One::one());
@@ -36,16 +55,10 @@ pub fn decap_one_sided<E: Pairing>(
         k += E::pairing(c_row.1, *u_rho);  // Second limb
     }
     
-    // Theta/C-side: Pair Theta commitments (both limbs) with single W^ρ = δ^ρ
-    if let Some(w_rho) = arms.w_rows_rho.first() {
-        // θ = -C
-        for theta in &commitments.theta {
-            k += E::pairing(theta.0, *w_rho);
-            k += E::pairing(theta.1, *w_rho);
-        }
-        
-        k += E::pairing(commitments.c_delta.0, *w_rho);
-        k += E::pairing(commitments.c_delta.1, *w_rho);
+    // Theta/C-side: strict zip of θ with W^ρ
+    for ((t0, t1), w_rho) in commitments.theta.iter().zip(&arms.w_rows_rho) {
+        k += E::pairing(*t0, *w_rho);
+        k += E::pairing(*t1, *w_rho);
     }
     
     // K = R(vk,x)^ρ
@@ -64,9 +77,9 @@ mod tests {
     fn test_decap_structure() {
         let mut rng = test_rng();
         
-        // Create mock armed bases
+        // Create mock armed bases (match ranks with commitments)
         let u_rows_rho = vec![G2Affine::rand(&mut rng); 2];
-        let w_rows_rho = vec![G2Affine::rand(&mut rng)];
+        let w_rows_rho = vec![G2Affine::rand(&mut rng); 2];
         
         let arms: Arms<E> = Arms { u_rows_rho, w_rows_rho };
         
@@ -80,7 +93,6 @@ mod tests {
                 (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
                 (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
             ],
-            c_delta: (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
         };
         
         // Decap

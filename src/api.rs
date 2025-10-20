@@ -12,6 +12,7 @@ use crate::{
 };
 pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
 use crate::dlrep::{verify_b_msm, verify_tie_aggregated};
+use crate::ppe::validate_groth16_vk_subgroups;
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
@@ -62,6 +63,9 @@ impl OneSidedPvugc {
         // 0. Basic guards
         if !validate_pvugc_vk_subgroups(pvugc_vk) { 
             return false; 
+        }
+        if !validate_groth16_vk_subgroups(vk) {
+            return false;
         }
         
         // 1. Verify Groth16 proof (standard)
@@ -123,10 +127,6 @@ impl OneSidedPvugc {
             lhs += E::pairing(*theta_limb0, pvugc_vk.delta_g2);
             lhs += E::pairing(*theta_limb1, pvugc_vk.delta_g2);
         }
-        
-        // This provides e(+sA, δ) to cancel -sA in e(-C, δ)
-        lhs += E::pairing(bundle.gs_commitments.c_delta.0, pvugc_vk.delta_g2);
-        lhs += E::pairing(bundle.gs_commitments.c_delta.1, pvugc_vk.delta_g2);
         
         // Guard: LHS should not be identity
         if lhs == PairingOutput::<E>(One::one()) { 

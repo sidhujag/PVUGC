@@ -37,6 +37,25 @@ pub fn arm_rows<E: Pairing>(
     rows: &RowBases<E>,
     rho: &E::ScalarField,
 ) -> Arms<E> {
+    // Subgroup/identity guards on inputs
+    use ark_ff::PrimeField;
+    if rho.is_zero() { panic!("rho must be non-zero"); }
+    let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+    let in_prime_subgroup_g2 = |g: &E::G2Affine| {
+        if g.is_zero() { return true; }
+        g.mul_bigint(order).is_zero()
+    };
+    // Per-row: identity allowed, but any non-identity must be in the prime-order subgroup
+    for u in &rows.u_rows {
+        if !in_prime_subgroup_g2(u) { panic!("U row not in subgroup"); }
+    }
+    for w in &rows.w_rows {
+        if !in_prime_subgroup_g2(w) { panic!("W row not in subgroup"); }
+    }
+    // Global non-degeneracy: at least one non-identity on each side
+    if rows.u_rows.iter().all(|u| u.is_zero()) { panic!("all U rows are identity"); }
+    if rows.w_rows.is_empty() || rows.w_rows.iter().all(|w| w.is_zero()) { panic!("all W rows are identity"); }
+
     // Arm U rows
     let u_rows_rho: Vec<E::G2Affine> = rows.u_rows
         .iter()

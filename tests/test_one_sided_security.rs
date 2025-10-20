@@ -61,7 +61,7 @@ fn test_cannot_compute_k_from_arms_alone() {
         .map(|_| (G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake)))
         .collect();
     let fake_theta = vec![(G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake))];
-    let fake_commitments = OneSidedCommitments { c_rows: fake_c_rows, theta: fake_theta, c_delta: (G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake)) };
+    let fake_commitments = OneSidedCommitments { c_rows: fake_c_rows, theta: fake_theta };
     let k_fake = decap_one_sided(&fake_commitments, &arms);
     assert_ne!(k_fake, k_expected);
 }

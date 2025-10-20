@@ -177,21 +177,15 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             .map(|c| (*c, <E as Pairing>::G1Affine::zero()))
             .collect();
         
-        // θ = -C (to get e(-C, δ))
-        let neg_c = self.get_neg_c().expect("C not recorded");
-        let theta = vec![(neg_c, <E as Pairing>::G1Affine::zero())];
-        
-        // This cancels the -sA part in e(-C, δ)!
+        // δ-side bucket: fold both -C and +sA into theta (rank = 1)
+        // theta row is (-C + sA, 0)
+        let neg_c = self.get_neg_c().expect("C not recorded").into_group();
         let a = self.a.expect("A not recorded").into_group();
         let s = self.s.expect("s not recorded");
-        let s_a = (a * s).into_affine();
-        let c_delta = (s_a, <E as Pairing>::G1Affine::zero());
+        let theta0 = (neg_c + a * s).into_affine();
+        let theta = vec![(theta0, <E as Pairing>::G1Affine::zero())];
         
-        crate::decap::OneSidedCommitments {
-            c_rows,
-            theta,
-            c_delta,
-        }
+        crate::decap::OneSidedCommitments { c_rows, theta }
     }
     
     /// Get aggregated X^(B) values for GS

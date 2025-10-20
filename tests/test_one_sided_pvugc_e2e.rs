@@ -62,8 +62,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // Generate ρ
     let rho = Fr::rand(&mut rng);
     
-    // Generate gamma (identity for tests - simple and deterministic)
-    // TODO: Production should use derive_gamma_rademacher for compression
+    // Gamma: identity for tests
     let gamma = {
         let n = pvugc_vk.b_g2_query.len() + 1;
         (0..n).map(|i| {
@@ -200,7 +199,7 @@ fn test_delta_sign_sanity() {
     let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
     let rho = Fr::rand(&mut rng);
     
-    // Setup gamma (identity matrix)
+    // Gamma: identity for tests
     let gamma = {
         let n = pvugc_vk.b_g2_query.len() + 1;
         (0..n)
@@ -331,8 +330,7 @@ fn test_witness_independence() {
     
     let rho = Fr::rand(&mut rng);
     
-    // Generate gamma (identity for tests - simple and deterministic)
-    // TODO: Production should use derive_gamma_rademacher for compression
+    // Gamma: identity for tests
     let gamma = {
         let n = pvugc_vk.b_g2_query.len() + 1;
         (0..n).map(|i| {
