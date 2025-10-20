@@ -1,175 +1,220 @@
-# PVUGC - Proof-Agnostic Verifiable Unique Group Commitments
+# PVUGC: Proof-Agnostic Verifiable Unique Group Commitments
 
-**EXPERIMENTAL RESEARCH CODE**
+**Status:** Experimental Research Implementation
 
-This repository contains experimental cryptographic research code implementing PVUGC: a protocol for extracting Key Encapsulation Mechanism (KEM) secrets from Groth-Sahai attestations in a proof-agnostic manner.
+## 1. Overview
 
-## Overview
+This repository contains an implementation of PVUGC, a cryptographic protocol for extracting Key Encapsulation Mechanism (KEM) secrets from zero-knowledge proofs in a statement-dependent, proof-agnostic manner. The protocol enables decentralized key extraction without requiring trusted committees or knowledge of the masking secret.
 
-PVUGC enables conditional cryptographic operations where a shared secret can be extracted from any valid proof of a given statement, without requiring the extractor to know the secret masking scalar. The protocol uses Groth-Sahai commitments to create attestations of proof validity, which can then be used to extract KEM keys.
+The implementation specializes the Groth-Sahai commitment framework to Groth16 verification, yielding a simplified one-sided construction that achieves comparable security guarantees with reduced computational overhead.
 
-**Key Properties:**
-- Proof-Agnostic: Different proofs for the same statement yield the same key
-- Offline Setup: One-time generation of armed bases, then offline forever
-- Randomized Commitments: Full witness-indistinguishability via GS proof system
-- General PPE Support: Works with any pairing product equation
-- Groth16 Integration: Specialized support for SNARK proofs
 
-## Protocol Architecture
+## 2. Protocol Properties
 
-PVUGC uses a three-role architecture:
+PVUGC satisfies the following cryptographic properties:
 
-### 1. ARMER (Offline, One-Time)
-- Generates secret scalar ρ
-- Publishes "armed bases" = bases^ρ
-- Goes offline permanently
-- ρ never leaves the ARMER
+- **Proof-Agnosticism:** Different valid proofs π₁, π₂ for the same statement extract identical keys K₁ = K₂
+- **Witness-Independence:** Extracted keys depend only on the statement (vk, public_inputs), not on witness values
+- **Gating:** Key extraction is impossible without a valid proof
+- **Permissionless Extraction:** No committee, threshold cryptography, or additional coordination required at extraction time
+- **Statement-Only Setup:** Armed bases depend only on public verification keys and a single secret scalar ρ
+- **Offline Arming:** One-time setup phase; armer goes offline permanently
 
-### 2. PROVER (Runtime, Repeatable)
-- Generates proof π (Groth16, R1CS, or other)
-- Creates Groth-Sahai attestation
-- Does NOT know ρ
+## 3. Technical Approach
 
-### 3. DECAPPER (Runtime, Repeatable)
-- Receives attestation from PROVER
-- Extracts K = target^ρ using armed bases
-- Does NOT know ρ (GT-XPDH security)
-- Proof-agnostic: same K from all proofs of same statement
+### 3.1 One-Sided Groth-Sahai Framework
 
-## Technical Foundation
+The protocol employs a specialized Groth-Sahai construction optimized for Groth16 verification. Unlike traditional two-sided approaches requiring rank decomposition of coefficient matrices, the one-sided variant leverages the fact that Groth16 verifying key components (β, δ, and b_g2_query) can serve as statement-only pairing bases.
 
-The protocol builds on Groth-Sahai proofs for Pairing Product Equations (PPE):
+The verification equation becomes:
 
 ```
-Σ_{i,j} Γ_{i,j} · e(X_i, Y_j) = target
+∑_ℓ e(C_ℓ, U_ℓ) + e(θ, δ) = R(vk, x)
 ```
 
-Where verification uses four pairing buckets that cancel randomness:
+where C_ℓ are commitments to proof elements, U_ℓ are aggregations of VK bases, and δ is the Groth16 discrete logarithm base.
+
+### 3.2 Three-Phase Execution
+
+**Phase 1: Offline Arming (Deposit)**
+- ARMER generates secret ρ, derives statement-only bases from Groth16 VK
+- Computes armed bases: U_ℓ^ρ, δ^ρ
+- Publishes armed bases; ρ never leaves ARMER
+
+**Phase 2: Online Proving (Spend)**
+- PROVER generates valid Groth16 proof π
+- Creates proof elements commitments with randomness
+- Generates Schnorr proofs demonstrating coefficient consistency
+- Publishes complete attestation
+
+**Phase 3: Key Extraction (Runtime)**
+- DECAPPER receives attestation, validates all proofs
+- Extracts K = R^ρ using paired commitment and armed bases
+- No knowledge of ρ required; security via pairing hardness
+
+### 3.3 Comparison with Traditional Two-Sided Approach
+
+| Property | One-Sided | Two-Sided |
+|----------|-----------|-----------|
+| **Setup** | VK-derived, statement-only | CRS-based, per-statement |
+| **Coefficient Matrix** | Thin aggregation | Full rank decomposition |
+| **Bases Required** | O(n) | O(rank²) |
+| **Proof Elements** | Single (θ) | Multiple (θ, π per rank) |
+| **Integration** | Native to Groth16 | Via auxiliary recomposition |
+| **Randomness Cancellation** | Possible | Not Possible |
+
+## 4. Mathematical Foundation
+
+For the complete mathematical specification including theorems, proofs, security analysis, and design rationale, see [TECHNICAL.md](TECHNICAL.md).
+
+Key results:
+
+- **Soundness:** Discrete log hardness in G₂ ensures K cannot be computed without valid proof
+- **Completeness:** Every valid Groth16 proof enables extraction of K = target^ρ
+- **Proof-Agnosticism:** Extraction depends only on PPE verification result, not proof structure
+
+## 5. Implementation Architecture
+
+### 5.1 Core Modules
+
 ```
-M = Σ e(C¹[i], U[i]) + Σ e(V[i], C²[i]) + 
-    Σ e(θ[a], W[a]) + Σ e(Z[j], π[j])
+src/
+  ├── lib.rs                  # Crate root; module declarations
+  ├── arming.rs              # Base aggregation and arming logic
+  ├── ppe.rs                 # PPE target computation from Groth16 VK
+  ├── api.rs                 # High-level verification and extraction API
+  ├── decap.rs               # Decapsulation algorithm
+  ├── dlrep.rs               # Schnorr proofs for coefficient consistency
+  ├── coeff_recorder.rs      # Hook for coefficient capture in Groth16 prover
+  ├── poce.rs                # Proof of consistent encryption across arms
+  └── ctx.rs                 # Context binding utilities
+
+ark-groth16-pvugc/           # Modified Groth16 implementation with coefficient hooks
 ```
 
-PVUGC arms these bases with ρ:
-- Publish: U^ρ, V^ρ, W^ρ, Z^ρ
-- Extract: K = M^ρ = target^ρ
-
-## Documentation
-
-### Protocol Specification
-
-**See [`specs/PVUGC.md`](specs/PVUGC.md) for the complete protocol specification**, including Bitcoin integration, security model, and cryptographic assumptions.
-
-### Implementation Guide
-
-**See [`groth-sahai/PVUGC_PROTOCOL.md`](groth-sahai/PVUGC_PROTOCOL.md) for the implementation details**, including:
-
-- Phase 1: Per-slot CRS with binding structure
-- Phase 2: Rank decomposition for Γ matrices
-- Phase 3: Four-bucket verifier with randomness cancellation
-- Phase 4: PVUGC arming (ρ-powered bases)
-- Phase 5: PVUGC decapping (key extraction)
-- Phase 6: Soundness validation
-- Phase 7: Groth16 integration with 4-term auxiliary recomposition
-
-
-## Building
-
-Requires Rust 1.70+
+### 5.2 Build and Test
 
 ```bash
-cd arkworks_groth16
 cargo build --release
-cargo test
-```
-
-## Usage Examples
-
-### Example 1: General PPE (Rank-Decomposition)
-
-```rust
-use groth_sahai::generator::CRS;
-use groth_sahai::statement::PPE;
-use groth_sahai::rank_decomp::RankDecomp;
-use groth_sahai::base_construction::RankDecompPpeBases;
-use groth_sahai::pvugc::{pvugc_arm, pvugc_decap};
-
-// ARMER: One-time setup
-let crs = CRS::<Bls12_381>::generate_crs_per_slot(&mut rng, m, n);
-let ppe = PPE { gamma, a_consts, b_consts, target };
-let decomp = RankDecomp::decompose(&ppe.gamma);
-let bases = RankDecompPpeBases::build(&crs, &ppe, &decomp);
-
-let rho = Fr::rand(&mut rng);
-let armed_bases = pvugc_arm(&bases, &rho);
-// Publish: (crs, armed_bases, target)
-// Secret: rho
-
-// PROVER: Generate attestation
-let proof = ppe.commit_and_prove_rank_decomp(&x_vars, &y_vars, &crs, &mut rng);
-
-// DECAPPER: Extract key
-let k = pvugc_decap(&proof, &armed_bases);
-assert_eq!(k, target * rho);  // K = target^ρ
-```
-
-### Example 2: Groth16 Integration (Full-GS)
-
-```rust
-// PROVER: Groth16 proof → GS attestation
-let x_vars = vec![A, C, L_x];
-let y_vars = vec![B, delta_inv, gamma_inv];
-let r = vec![random, random, zero];  // Randomize witnesses only
-let s = vec![random, zero, zero];
-
-let proof = ppe.commit_and_prove_full_gs(&x_vars, &y_vars, &r, &s, &crs, &mut rng);
-
-// DECAPPER: Verify and extract
-let (verifies, M) = ppe.verify_full_gs(&proof, &crs, &bases);
-let k = M * rho;  // K = e(α,β)^ρ
-```
-
-See `groth-sahai/src/pvugc.rs::tests` for complete working examples.
-
-## Security
-
-Based on standard assumptions:
-- SXDH assumption in pairing groups (for Groth-Sahai)  
-- Discrete log hardness
-- Groth16 knowledge soundness
-
-This implementation uses established cryptographic primitives and assumptions.
-
-## Current limitations
-
-- Simplified MuSig2 implementation (single party for testing)
-- Mock Groth16 proofs in tests (real proofs work but need circuits)
-- BLS12-381 only (other curves need porting)
-
-## Protocol spec
-
-Full specification in `specs/pvugc.md`. This implementation follows the spec closely, with some simplifications for testing.
-
-## Testing
-
-```bash
-# Run all tests
 cargo test
 
 # Run with output
 cargo test -- --nocapture
 
-# Specific test
-cargo test test_complete_adaptor_signature_flow
+# Run specific test suites
+cargo test test_one_sided_pvugc_e2e -- --nocapture
+cargo test test_one_sided_security -- --nocapture
 ```
 
-## Credits
+## 6. Usage
 
-Built on:
-- arkworks for elliptic curves and pairings
-- schnorr_fun for adaptor signatures  
-- Groth-Sahai implementation (vendored and modified)
+### 6.1 Setup and Arming
 
-## License
+```rust
+use arkworks_groth16::{OneSidedPvugc, build_row_bases_from_vk};
 
-MIT
+// Derive statement-only bases from Groth16 VK
+let y_bases = extract_y_bases(&pvugc_vk);
+
+// Aggregate bases using deterministic Γ matrix
+let rows = build_row_bases_from_vk(&y_bases, delta_g2, gamma);
+
+// Arm bases at deposit time (one-time)
+let rho = Fr::rand(&mut rng);
+let arms = arm_rows(&rows, &rho);
+
+// Publish: arms, R = target^1 (computable from vk + public_inputs)
+// Secret: rho
+```
+
+### 6.2 Verification and Extraction
+
+```rust
+// Prover generates complete attestation
+let bundle = PvugcBundle {
+    groth16_proof,
+    dlrep_b,
+    dlrep_tie,
+    gs_commitments,
+};
+
+// Verifier validates all components
+let valid = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs, &gamma);
+
+if valid {
+    // Extract key
+    let k = OneSidedPvugc::decapsulate(&bundle.gs_commitments, &arms);
+    // k = R^ρ (same for any valid proof of same statement)
+}
+```
+
+See tests for complete working examples.
+
+## 7. Security Assumptions
+
+The protocol relies on standard assumptions in pairing-based cryptography:
+
+1. **Discrete Logarithm Problem (DLP):** Hard in both G₁ and G₂
+2. **Pairing Hardness:** Computation of pairings is efficient; extracting discrete logs from pairings is hard
+3. **Groth16 Knowledge Soundness:** Only proofs generated with knowledge of witnesses are accepted
+4. **Collision Resistance:** SHA256 for Fiat-Shamir challenges
+
+For detailed security analysis including attack vectors and mitigations, see [TECHNICAL.md](TECHNICAL.md#6-security-analysis).
+
+## 8. Current State
+
+This is an experimental research implementation. Aspects include:
+
+- Complete one-sided PVUGC construction with all verification checks
+- End-to-end tests demonstrating proof-agnostic extraction
+- Security property tests validating statement-dependence
+- Hook infrastructure for capturing coefficients from Groth16 prover
+
+Known limitations and areas for future work:
+
+- Tie proof aggregation should use explicit Fiat-Shamir challenge vector
+- Extension to other SNARK schemes requires per-scheme PPE derivation
+- Performance optimization of pairing operations
+
+## 9. Testing
+
+The test suite validates both functional correctness and security properties:
+
+```bash
+# End-to-end flow: Groth16 proof generation through key extraction
+cargo test test_one_sided_pvugc_e2e
+
+# Security properties: proof-agnosticism, statement-dependence
+cargo test test_one_sided_security
+```
+
+## 10. References
+
+See [TECHNICAL.md](TECHNICAL.md#references) for complete references and background on Groth-Sahai proofs, PVUGC, and related work.
+
+### Primary Sources
+
+- Groth, J., & Sahai, A. (2008). "Efficient non-interactive proof systems for bilinear groups." *EUROCRYPT 2008*.
+- Groth, J. (2016). "On the size of pairing-based non-interactive arguments." *EUROCRYPT 2016*.
+
+### Implementation Foundation
+
+- arkworks: Elliptic curves, pairings, and zero-knowledge proof framework
+- BLS12-381: Pairing-friendly elliptic curve
+
+## 11. License
+
+MIT or Apache 2.0
+
+## 12. Citation
+
+If you use this implementation in academic work, please cite:
+
+```
+@software{pvugc_2024,
+  title={PVUGC: One-Sided Groth-Sahai Implementation},
+  author={[Contributors]},
+  year={2024},
+  url={https://github.com/[repository]}
+}
+```
