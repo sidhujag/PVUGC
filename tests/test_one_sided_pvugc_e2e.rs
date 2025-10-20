@@ -3,6 +3,7 @@
 use arkworks_groth16::*;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ppe::PvugcVk;
+use arkworks_groth16::{PoceAcrossProof};
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_std::{UniformRand, rand::rngs::StdRng, rand::SeedableRng};
 use ark_groth16::Groth16;
@@ -81,13 +82,9 @@ fn test_one_sided_pvugc_proof_agnostic() {
         gamma.clone(),
     );
     
-    // PoCE-Across for verification
-    let mut all_bases = rows.u_rows.clone();
-    all_bases.extend(&rows.w_rows);
-    let mut all_arms = arms.u_rows_rho.clone();
-    all_arms.extend(&arms.w_rows_rho);
-    let poce_proof: PoceAcrossProof<E> = prove_poce_across(&all_bases, &all_arms, &rho, &mut rng);
-    assert!(verify_poce_across(&all_bases, &all_arms, &poce_proof));
+    // PoCE-Across attestation and verification via API helpers
+    let poce_proof: PoceAcrossProof<E> = OneSidedPvugc::attest_arming(&rows, &arms, &rho, &mut rng);
+    assert!(OneSidedPvugc::verify_arming(&rows, &arms, &poce_proof));
     
     // === SPEND TIME - PROOF 1 ===
     

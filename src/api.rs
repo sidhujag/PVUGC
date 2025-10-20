@@ -14,6 +14,8 @@ pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
 use crate::dlrep::{verify_b_msm, verify_tie_aggregated};
 use crate::ppe::validate_gamma_structure;
 use crate::ppe::validate_groth16_vk_subgroups;
+use crate::poce::{PoceAcrossProof, prove_poce_across, verify_poce_across};
+use ark_std::rand::RngCore;
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
@@ -50,6 +52,34 @@ impl OneSidedPvugc {
         let k = Self::compute_r_to_rho(&r, rho);
         
         (rows, arms, r, k)
+    }
+
+    /// Produce PoCE-A attestation over all armed rows (deposit-time helper)
+    pub fn attest_arming<E: Pairing, R: RngCore>(
+        rows: &RowBases<E>,
+        arms: &Arms<E>,
+        rho: &E::ScalarField,
+        rng: &mut R,
+    ) -> PoceAcrossProof<E> {
+        // Concatenate U and W sides
+        let mut all_bases = rows.u_rows.clone();
+        all_bases.extend(rows.w_rows.clone());
+        let mut all_arms = arms.u_rows_rho.clone();
+        all_arms.extend(arms.w_rows_rho.clone());
+        prove_poce_across::<E, R>(&all_bases, &all_arms, rho, rng)
+    }
+
+    /// Verify PoCE-A attestation for an arming record
+    pub fn verify_arming<E: Pairing>(
+        rows: &RowBases<E>,
+        arms: &Arms<E>,
+        proof: &PoceAcrossProof<E>,
+    ) -> bool {
+        let mut all_bases = rows.u_rows.clone();
+        all_bases.extend(rows.w_rows.clone());
+        let mut all_arms = arms.u_rows_rho.clone();
+        all_arms.extend(arms.w_rows_rho.clone());
+        verify_poce_across::<E>(&all_bases, &all_arms, proof)
     }
     
     /// Verify complete bundle
@@ -178,6 +208,66 @@ impl OneSidedPvugc {
         
         let r_to_rho = r.0.pow(&rho.into_bigint());
         PairingOutput(r_to_rho)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bls12_381::{Bls12_381, Fr, G2Affine};
+    use ark_std::{UniformRand, rand::{SeedableRng, rngs::StdRng}};
+    use ark_ec::CurveGroup;
+
+    type E = Bls12_381;
+
+    #[test]
+    fn test_api_poce_arming_accepts_valid() {
+        let mut rng = StdRng::seed_from_u64(123);
+
+        // Simple Y bases and +δ
+        let y_bases: Vec<G2Affine> = vec![G2Affine::rand(&mut rng), G2Affine::rand(&mut rng)];
+        let delta: G2Affine = G2Affine::rand(&mut rng);
+
+        // Identity 2x2 Γ
+        let gamma = vec![
+            vec![Fr::from(1u64), Fr::from(0u64)],
+            vec![Fr::from(0u64), Fr::from(1u64)],
+        ];
+
+        // Build statement-only rows and arm them with ρ
+        let rows: RowBases<E> = build_row_bases_from_vk(&y_bases, delta, gamma);
+        let rho = Fr::rand(&mut rng);
+        let arms: Arms<E> = arm_rows(&rows, &rho);
+
+        // PoCE-A attest + verify via API helpers
+        let proof = OneSidedPvugc::attest_arming(&rows, &arms, &rho, &mut rng);
+        assert!(OneSidedPvugc::verify_arming(&rows, &arms, &proof));
+    }
+
+    #[test]
+    fn test_api_poce_arming_rejects_mixed_rho() {
+        let mut rng = StdRng::seed_from_u64(321);
+
+        let y_bases: Vec<G2Affine> = vec![G2Affine::rand(&mut rng), G2Affine::rand(&mut rng)];
+        let delta: G2Affine = G2Affine::rand(&mut rng);
+        let gamma = vec![
+            vec![Fr::from(1u64), Fr::from(0u64)],
+            vec![Fr::from(0u64), Fr::from(1u64)],
+        ];
+
+        let rows: RowBases<E> = build_row_bases_from_vk(&y_bases, delta, gamma);
+        let rho = Fr::rand(&mut rng);
+        let arms_good: Arms<E> = arm_rows(&rows, &rho);
+
+        // Create a bad arms set with one row armed using a different ρ₂
+        let rho2 = Fr::rand(&mut rng);
+        let mut arms_bad = arms_good.clone();
+        let bad_u0 = (rows.u_rows[0].into_group() * rho2).into_affine();
+        arms_bad.u_rows_rho[0] = bad_u0;
+
+        // Attempt to attest with rho over inconsistent arms → verifier must reject
+        let proof_bad = OneSidedPvugc::attest_arming(&rows, &arms_bad, &rho, &mut rng);
+        assert!(!OneSidedPvugc::verify_arming(&rows, &arms_bad, &proof_bad));
     }
 }
 

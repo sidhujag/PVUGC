@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Set up Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
+      - name: Install rust-src (for -Z build-std)
+        run: rustup component add rust-src --toolchain nightly
       - name: Install LLVM tools (for sanitizers)
         run: sudo apt-get update && sudo apt-get install -y clang lld
       - name: Cargo test with ${{ matrix.sanitizer }} (build std)
