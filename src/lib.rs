@@ -27,6 +27,7 @@ pub mod api;
 pub mod nonzero;
 pub mod ct;
 pub mod pvugc_aead;
+pub mod error;
 
 // Re-exports - Public API
 pub use arming::{ColumnBases, ColumnArms, arm_columns};
