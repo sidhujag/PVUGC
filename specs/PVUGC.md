@@ -70,7 +70,7 @@ ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || pre
 
 **`txid_template`.** A fully specified transaction template (inputs/outputs/locktime/sequence/fees) used only to define $m$. It does not include any signatures or annex. Any change to `txid_template` changes $m$ and hence `presig_pkg_hash` and `ctx_hash`. `txid_template` MUST NOT reference unknown txids (no forward/self‑references). The CPFP child is outside `ctx_hash`; only the CPFP output (scriptPubKey, index, value) is fixed in `ctx_core`.
 
-**`header_meta`.** A deterministic serialization hash of the public KEM header: share index $i$, $\{D_\ell\}$, $\{D_a\}$, $T_i$, $h_i$, $\texttt{ct}_i$, $\tau_i$, $\rho\_\text{link}$, `DEM_PROFILE`, `GS_instance_digest`, exact ordering of $Y_j$ bases, $\Gamma$ matrix digest, and $\Upsilon$ matrix digest. Use strict encodings and reject duplicates.
+**`header_meta`.** A deterministic serialization hash of the public KEM header: share index $i$, $\{D_j\}$, $D_\delta$, $T_i$, $h_i$, $\texttt{ct}_i$, $\tau_i$, $\rho\_\text{link}$, `DEM_PROFILE`, `GS_instance_digest`, exact ordering of $Y_j$ bases. Use strict encodings and reject duplicates.
 
 **Hash functions (normative).**
 
@@ -135,46 +135,41 @@ The prover forms G₁ variables from its internal coefficients:
 - **B-side variables**: $X^{(B)}_j = b_j \cdot A \in \mathbb{G}_1$ where $b_j$ are the coefficients in $B$
 - **C-side variables**: $X^{(\delta)}_i = c_i \cdot X_i \in \mathbb{G}_1$ where $c_i$ are the coefficients in $C$
 
-**Y-basis content (normative):** The $Y_j$ list for B includes $[\beta]_2$ as the first element (constant row) followed by all b_g2_query elements from the proving key. Do not deduplicate - $e(A, [\beta]_2)$ must be reconstructed on the B side of the PPE.
+**Y-basis content (normative):** The $Y_j$ list for B includes $[\beta]_2$ as the first element (constant column) followed by all b_g2_query elements from the proving key. Do not deduplicate - $e(A, [\beta]_2)$ must be reconstructed on the B side of the PPE.
 
-Choose thin aggregation matrices $\Gamma \in \mathbb{F}_r^{m \times n_B}$ and $\Upsilon \in \mathbb{F}_r^{r_\delta \times n_C}$ (Fiat-Shamir derived from VK digest), and set:
+**Column-based arming:** Directly arm each statement-only column without aggregation matrices:
 $$
-C_\ell = \sum_j \Gamma_{\ell j} X^{(B)}_j, \quad U_\ell = \sum_j \Gamma_{\ell j} Y_j
+\{Y_j^\rho\}, \quad [\delta]_2^\rho
 $$
-$$
-\Theta_a = \sum_i \Upsilon_{ai} X^{(\delta)}_i, \quad W_a = \left(\sum_i \Upsilon_{ai}\right) \cdot [\delta]_2
-$$
+Note: Unlike row-based approaches that use Γ aggregation matrices, column-based directly arms each Y_j base.
 
 The GS verifier checks the **one-sided product‑of‑pairings equation**:
 $$
-\prod_{\ell=1}^{m} e(C_\ell, U_\ell) \cdot \prod_{a=1}^{r_\delta} e(\Theta_a, W_a) = R(\mathsf{vk},x) \tag{GS-PPE}
+\prod_{j=1}^{n_B} e(X^{(B)}_j, Y_j) \cdot e(-C, [\delta]_2) = R(\mathsf{vk},x) \tag{GS-PPE}
 $$
 
-**Note**: If $r_\delta = 1$ (single $\Theta$), this degrades to the simpler form with $e(\theta, [\delta]_2)$.
-
-**Critical property**: The $U_\ell$ and $[\delta]_2$ are **statement‑only** (depend only on VK and $x$, not on the proof). For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
+**Critical property**: The $Y_j$ and $[\delta]_2$ are **statement‑only** (depend only on VK and $x$, not on the proof). For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
 
 **Binding to Groth16 Proof (DLREP proofs - MUST).** The prover MUST include succinct Schnorr-style proofs demonstrating:
 - **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that $B = \beta_2^{(\text{const})} + \sum_j b_j \cdot Y_j + s \cdot [\delta]_2$ with hidden coefficients $b_j$ and randomness $s$
-- **Same-scalar ties (MUST)**: Batched proof that the aggregated coefficients $u_\ell = \sum_j \Gamma_{\ell j} \cdot b_j$ satisfy $C_\ell = u_\ell \cdot A$ and the same $u_\ell$ is used in both G₁ and G₂ aggregations
 - **DLREP_C (MUST)**: Proof in $\mathbb{G}_1$ that $C = sA + rB_{\mathrm{G1}} - rs[\delta]_1 + \sum_i c_i X_i$ with hidden coefficients and randomness
 
 These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts either "(Groth16 verify) OR (DLREPs + GS PPE)" as valid attestation.
 
-**Target bound (non-normative)**: In one-sided encodings, $m$ (number of rows) is typically 16-32 due to aggregation.
+**Target bound (non-normative)**: In column-based encodings, $n_B$ (number of Y columns) scales with circuit size but remains manageable due to direct arming.
 
 **MUST (GS size bounds):** Reject GS attestations requiring > 48 pairings 
-total (m ≤ 48). Typical one-sided encodings require 16-32 pairings.
+total ($n_B \leq 48$). Typical column-based encodings require 16-32 pairings.
 
 **Implementation note:** For BLS12-381, 96 pairings is ~50-100ms on modern hardware - 
 acceptable for one-time decapsulation.
 
-**Independence (MUST).** The statement-only bases $\{U_\ell\}$ and $\{W_a\}$, along with the target $R(\mathsf{vk},x)$, are fixed by ($\mathsf{vk}$, $x$) before any armer chooses randomness. The bases are derived deterministically from the verifying key components via the Fiat-Shamir derived matrices $\Gamma$ and $\Upsilon$. Armers cannot choose or influence these bases. MUST NOT choose $\Gamma$, $\Upsilon$ that make $R(\mathsf{vk},x)$ lie in the public pairing span of $\{U_\ell, W_a\}$ without the committed G₁ variables.
+**Independence (MUST).** The statement-only bases $\{Y_j\}$ and $[\delta]_2$, along with the target $R(\mathsf{vk},x)$, are fixed by ($\mathsf{vk}$, $x$) before any armer chooses randomness. The bases are derived directly from the verifying key components. Armers cannot choose or influence these bases.
 **Implementation MUST NOT** allow armers to influence $\mathsf{vk}$ or $x$ once arming begins; these are fixed before any $\rho_i$ is chosen.
 
 **Encapsulation (arm‑time, per share $i$).** Choose $\rho_i \in \mathbb{Z}_r^*$ (where $r = \#\mathbb{G}_1 = \#\mathbb{G}_2 = \#\mathbb{G}_T$, non-zero). Compute:
 $$
-D_\ell=U_\ell^{\rho_i}\in \mathbb{G}_2 \text{ for } \ell \in [1,m], \quad D_a=W_a^{\rho_i}\in \mathbb{G}_2 \text{ for } a \in [1,r_\delta], \quad M_i=R(\mathsf{vk},x)^{\rho_i}\in \mathbb{G}_T \text{ (do NOT publish)}
+D_j=Y_j^{\rho_i}\in \mathbb{G}_2 \text{ for } j \in [1,n_B], \quad D_\delta=[\delta]_2^{\rho_i}\in \mathbb{G}_2, \quad M_i=R(\mathsf{vk},x)^{\rho_i}\in \mathbb{G}_T \text{ (do NOT publish)}
 $$
 $$
 K_i=\mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(M_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})
@@ -191,23 +186,45 @@ Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) 
 **Decapsulation (anyone with a valid attestation).**
 Verify GS attestation and DLREP proofs, then compute
 $$
-\tilde{M}_i = \left(\prod_{\ell=1}^{m} e(C_\ell,D_{\ell})\right) \cdot \left(\prod_{a=1}^{r_\delta} e(\Theta_a,D_a)\right) = R(\mathsf{vk},x)^{\rho_i} = M_i
+\tilde{M}_i = \left(\prod_{j=1}^{n_B} e(X^{(B)}_j,D_j)\right) \cdot e(-C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
 derive $K_i'=\mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$, decrypt $\texttt{ct}_i\to(s_i \| h_i)$, check $T_i=s_iG$, $H_\text{bytes}(s_i \| T_i \| i)=h_i$, and verify PoCE-B. Sum $\alpha=\sum_i s_i$ and finish the adaptor $s=s'+\alpha \bmod n$.
 
 **Proof‑agnostic key (the critical insight).** For any two valid GS attestations $\mathsf{Att}_1, \mathsf{Att}_2$ for the same $(\mathsf{vk},x)$, the one-sided product equals the same fixed value:
 $$
-\left(\prod_{\ell} e(C_\ell(\mathsf{Att}_1), U_\ell)\right) \cdot \left(\prod_{a} e(\Theta_a(\mathsf{Att}_1), W_a)\right) = R(\mathsf{vk},x)
+\left(\prod_{j} e(X^{(B)}_j(\mathsf{Att}_1), Y_j)\right) \cdot e(-C(\mathsf{Att}_1), [\delta]_2) = R(\mathsf{vk},x)
 $$
 $$
-\left(\prod_{\ell} e(C_\ell(\mathsf{Att}_2), U_\ell)\right) \cdot \left(\prod_{a} e(\Theta_a(\mathsf{Att}_2), W_a)\right) = R(\mathsf{vk},x)
+\left(\prod_{j} e(X^{(B)}_j(\mathsf{Att}_2), Y_j)\right) \cdot e(-C(\mathsf{Att}_2), [\delta]_2) = R(\mathsf{vk},x)
 $$
 Therefore, for any valid attestation:
 $$
-\tilde{M}_i = \left(\prod_\ell e(C_\ell, D_{\ell})\right) \cdot \left(\prod_a e(\Theta_a, D_a)\right) = R(\mathsf{vk},x)^{\rho_i}
+\tilde{M}_i = \left(\prod_j e(X^{(B)}_j, D_j)\right) \cdot e(-C, D_\delta) = R(\mathsf{vk},x)^{\rho_i}
 $$
 
 This means *every* valid attestation yields the **same** KEM key $K_i$, regardless of which proof was used.
+
+### 5.1) PoCE-A: Proof of Correct Exponentiation (Arm-time)
+
+**Purpose:** Prove that all armed columns share the same $\rho_i$ and that the published ciphertext is key-committed to the derived KEM key.
+
+**Security rationale:** Without PoCE-A, an armer could publish mixed-$\rho$ arms (some $Y_j^{\rho_1}$, some $Y_k^{\rho_2}$) which would break decapsulation, or publish a ciphertext not bound to the actual derived key.
+
+**Construction:** Multi-base Schnorr proof proving:
+- $\forall j: D_j = Y_j^{\rho_i}$ (all columns share same $\rho_i$)
+- $D_\delta = [\delta]_2^{\rho_i}$ (delta arm shares same $\rho_i$)
+- $T_i = s_i G$ (Schnorr proof for $s_i$)
+- Key-commitment: ciphertext is bound to $K_i = \mathrm{Poseidon2}(\mathrm{ser}(M_i) || \texttt{ctx\_hash} || \texttt{GS\_instance\_digest})$
+
+**Verification:** Accept arming only if PoCE-A verification passes.
+
+### 5.2) PoCE-B: Proof of Correct Exponentiation (Decap-time)
+
+**Purpose:** Decapper-local key-commitment verification to detect tampered ciphertexts.
+
+**Construction:** Recompute $K_i'$ from derived $\tilde{M}_i$ and verify the commitment tag $\tau_i$.
+
+**Verification:** Accept decapsulation only if PoCE-B verification passes.
 
 ---
 
@@ -215,26 +232,26 @@ This means *every* valid attestation yields the **same** KEM key $K_i$, regardle
 
 **Lemma 1 (GS product determinism, one-sided).** For fixed $(\mathsf{vk},x)$, any accepting GS attestation $\mathsf{Att}$ with valid DLREP proofs for the statement "Groth16 verifies $(\mathsf{vk},x)$" yields
 $$
-\left(\prod_{\ell=1}^{m} e(C_\ell(\mathsf{Att}),U_\ell)\right) \cdot \left(\prod_{a=1}^{r_\delta} e(\Theta_a(\mathsf{Att}), W_a)\right) = R(\mathsf{vk},x) \in \mathbb{G}_T
+\left(\prod_{j=1}^{n_B} e(X^{(B)}_j(\mathsf{Att}),Y_j)\right) \cdot e(-C(\mathsf{Att}), [\delta]_2) = R(\mathsf{vk},x) \in \mathbb{G}_T
 $$
-where $U_\ell$, $W_a$ are **statement-only** bases derived from VK components and $R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e(\sum_i x_i[l_i]_1,[\gamma]_2)$. The value is **independent of prover randomization** because the randomness in commitments cancels through the pairing structure, and the DLREP proofs ensure consistency with the underlying Groth16 proof.
+where $Y_j$, $[\delta]_2$ are **statement-only** bases derived from VK components and $R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e(\sum_i x_i[l_i]_1,[\gamma]_2)$. The value is **independent of prover randomization** because the randomness in commitments cancels through the pairing structure, and the DLREP proofs ensure consistency with the underlying Groth16 proof.
 
-**Lemma 2 (KEM correctness).** For share $i$ with randomness $\rho_i$, the published masks $D_\ell = U_\ell^{\rho_i}$, $D_a = W_a^{\rho_i}$ and any accepting attestation give
+**Lemma 2 (KEM correctness).** For share $i$ with randomness $\rho_i$, the published masks $D_j = Y_j^{\rho_i}$, $D_\delta = [\delta]_2^{\rho_i}$ and any accepting attestation give
 $$
-\tilde{M}_i = \left(\prod_\ell e(C_\ell,D_{\ell})\right) \cdot \left(\prod_a e(\Theta_a,D_a)\right) = R(\mathsf{vk},x)^{\rho_i} = M_i
+\tilde{M}_i = \left(\prod_j e(X^{(B)}_j,D_j)\right) \cdot e(-C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
 Hence $K_i' = \mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest}) = K_i$, and the DEM decrypts $(s_i \| h_i)$.
 
-**Lemma 3 (No‑Proof‑Spend).** Under the following assumption, given only $\{D_\ell = U_\ell^{\rho_i}\}$ and $\{D_a = W_a^{\rho_i}\}$ (where $U_\ell, W_a \in \mathbb{G}_2$) and public parameters, computing $M_i = R(\mathsf{vk},x)^{\rho_i} \in \mathbb{G}_T$ without an accepting attestation is infeasible. Thus $\alpha = \sum_i s_i$ remains hidden and the adaptor cannot be finalized.
+**Lemma 3 (No‑Proof‑Spend).** Under the following assumption, given only $\{D_j = Y_j^{\rho_i}\}$ and $D_\delta = [\delta]_2^{\rho_i}$ (where $Y_j, [\delta]_2 \in \mathbb{G}_2$) and public parameters, computing $M_i = R(\mathsf{vk},x)^{\rho_i} \in \mathbb{G}_T$ without an accepting attestation is infeasible. Thus $\alpha = \sum_i s_i$ remains hidden and the adaptor cannot be finalized.
 
-> Assumption (GT‑XPDH: External Power in $\mathbb{G}_T$). Let $e:\mathbb{G}_1\times\mathbb{G}_2\to\mathbb{G}_T$ be a non‑degenerate bilinear map over prime‑order groups of order $r$. Sample statement-only base sets $\{U_\ell\}, \{W_a\} \subset\mathbb{G}_2$, an unknown exponent $\rho\leftarrow\mathbb{Z}_r^*$, and the target $R\leftarrow\mathbb{G}_T$. Given $(\{U_\ell\},\{W_a\},\{U_\ell^{\rho}\},\{W_a^{\rho}\},R)$, it is hard for any PPT adversary to compute $R^{\rho}$ without valid commitments. In our instantiation, $R=R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the randomness; DLREP soundness prevents producing commitments without knowledge of a valid Groth16 proof.
+> Assumption (GT‑XPDH: External Power in $\mathbb{G}_T$). Let $e:\mathbb{G}_1\times\mathbb{G}_2\to\mathbb{G}_T$ be a non‑degenerate bilinear map over prime‑order groups of order $r$. Sample statement-only base sets $\{Y_j\}, [\delta]_2 \subset\mathbb{G}_2$, an unknown exponent $\rho\leftarrow\mathbb{Z}_r^*$, and the target $R\leftarrow\mathbb{G}_T$. Given $(\{Y_j\},[\delta]_2,\{Y_j^{\rho}\},[\delta]_2^{\rho},R)$, it is hard for any PPT adversary to compute $R^{\rho}$ without valid commitments. In our instantiation, $R=R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the randomness; DLREP soundness prevents producing commitments without knowledge of a valid Groth16 proof.
 
-Generic‑group note. In the bilinear generic/algebraic group model, an adversary with $q$ group/pairing operations has advantage at most $\tilde{O}(q^2/r)$ to compute $R^{\rho}$ when $R$ is independent, since available handles are confined to pairing images of $\{U_\ell^{\rho}\},\{W_a^{\rho}\}$ and do not link to $R$. Multi‑instance ($q_\text{inst}$ contexts) is captured by the standard union bound (aka $q$‑GT‑XPDH).
+Generic‑group note. In the bilinear generic/algebraic group model, an adversary with $q$ group/pairing operations has advantage at most $\tilde{O}(q^2/r)$ to compute $R^{\rho}$ when $R$ is independent, since available handles are confined to pairing images of $\{Y_j^{\rho}\},[\delta]_2^{\rho}$ and do not link to $R$. Multi‑instance ($q_\text{inst}$ contexts) is captured by the standard union bound (aka $q$‑GT‑XPDH).
 
 *Proof sketches:* (i) follows from DLREP soundness + randomness cancellation in PPE; (ii) is algebraic as written; (iii) from KEM hardness and Schnorr UF-CMA.
 
-**Statement-Only Construction:** The one-sided GS variant used here requires no CRS. The G₂ bases $\{U_\ell\}, \{W_a\}$ are derived directly from the Groth16 verifying key components (statement-only), and the target $R(\mathsf{vk},x)$ depends only on the VK and public inputs. The deterministic matrices $\Gamma$ and $\Upsilon$ are derived via Fiat-Shamir from the VK digest. 
-**SHOULD:** To mitigate potential weaknesses in Fiat-Shamir derivation, implementations MAY use multiple independent $\Gamma$, $\Upsilon$ matrix pairs (derived with different domain separators) and verify all resulting PPEs (logical AND).
+**Statement-Only Construction:** The one-sided GS variant used here requires no CRS. The G₂ bases $\{Y_j\}, [\delta]_2$ are derived directly from the Groth16 verifying key components (statement-only), and the target $R(\mathsf{vk},x)$ depends only on the VK and public inputs. Column-based arming directly arms each statement-only column without matrix aggregation. 
+**SHOULD:** To mitigate potential weaknesses, implementations MAY use multiple independent arming approaches and verify all resulting PPEs (logical AND).
 
 **Knowledge‑soundness (SHOULD).** The GS attestation SHOULD be knowledge‑sound for the relation “there exists a Groth16 proof $\pi$ such that $\textsf{Verify}_{\text{G16}}(\mathsf{vk},x,\pi)=1$.” That is, there exists an extractor that, given any accepting GS attestation, outputs a valid Groth16 proof $\pi$ for $(\mathsf{vk},x)$. Plain soundness suffices for correctness/no‑proof‑spend; knowledge‑soundness is a stronger deployment profile.
 
@@ -321,11 +338,11 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 
 **Security Sketch:**
 
-* **No proof ⇒ no spend.** Without a valid attestation, an attacker knows $D_\ell = U_\ell^{\rho}$ and $D_a = W_a^{\rho}$ (where $U_\ell, W_a \in \mathbb{G}_2$) but cannot compute $M_i = R(\mathsf{vk},x)^{\rho} \in \mathbb{G}_T$ without either:
+* **No proof ⇒ no spend.** Without a valid attestation, an attacker knows $D_j = Y_j^{\rho}$ and $D_\delta = [\delta]_2^{\rho}$ (where $Y_j, [\delta]_2 \in \mathbb{G}_2$) but cannot compute $M_i = R(\mathsf{vk},x)^{\rho} \in \mathbb{G}_T$ without either:
   - A valid attestation (Groth16 proof + DLREP proofs)
-  - Breaking GT‑XPDH: given $\{U_\ell^{\rho}\},\{W_a^{\rho}\}$ and independent $R\in\mathbb{G}_T$, compute $R^{\rho}$.
+  - Breaking GT‑XPDH: given $\{Y_j^{\rho}\},[\delta]_2^{\rho}$ and independent $R\in\mathbb{G}_T$, compute $R^{\rho}$.
   Since $M_i$ is required to derive $K_i$ and decrypt $\alpha$, the adaptor cannot be finished.
-**Independence.** $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the published bases $\{U_\ell,W_a\}$ and their $\rho$‑powers. DLREP soundness prevents crafting commitments that correlate $R(\mathsf{vk},x)$ with the published masks.
+**Independence.** $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the published bases $\{Y_j\},[\delta]_2$ and their $\rho$‑powers. DLREP soundness prevents crafting commitments that correlate $R(\mathsf{vk},x)$ with the published masks.
 * **Proof ⇒ spend (right context).** DLREP soundness + PPE verification ⇒ any verifying attestation enforces the *same* product $R(\mathsf{vk},x)$; AD/`ctx_hash` bind $(\mathsf{vk},x)$, tapleaf(+version), tx template, path tag, $T_i$, $T$, and the mask vector.
 * **Arming integrity.** Schnorr PoK ties $T_i$ to $s_i$; **PoCE‑A** proves one $\rho_i$ for both mask vectors and that $T_i$ corresponds to $s_i$; **PoCE‑B** key‑commits the ciphertext to the derived key and AD.
 * **Compartmentalization.** Unique $T$ and MuSig2 $R$ per adaptor eliminate cross‑protocol nonce reuse and Wagner‑style collisions.
@@ -354,7 +371,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 
 * Fix $\mathsf{vk}$ for that circuit; set $x := h$.
 * Build `ctx_hash` from $(\mathsf{vk\_hash}, H(x))$, your exact tapleaf(+version), and `txid_template`.
-* Arm k‑of‑k: publish $\{D_\ell\}$, $\{D_a\}$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A; verify; pre‑sign $(m,T,R)\Rightarrow s'$.
+* Arm k‑of‑k: publish $\{D_j\}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A; verify; pre‑sign $(m,T,R)\Rightarrow s'$.
 * A holder of a valid $\pi$ + GS attestation computes $\tilde{M}_i$, derives $K_i$, decrypts each $\texttt{ct}_i\to s_i$, sums $\alpha$, and outputs the final signature $s=s'+\alpha \pmod n$. Broadcast the ComputeSpend transaction.
 
 **Curve note.** For concreteness, implementers may target an asymmetric Type‑3 pairing (e.g., a BLS12 family). The spec is agnostic; choose libraries with constant‑time pairings and explicit subgroup checks.

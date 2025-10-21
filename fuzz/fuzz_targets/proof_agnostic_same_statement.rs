@@ -6,7 +6,6 @@
 use libfuzzer_sys::fuzz_target;
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
-use ark_ec::pairing::PairingOutput;
 use ark_ff::{Field, PrimeField, Zero};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
@@ -17,8 +16,8 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use ark_std::rand::SeedableRng;
 
-use arkworks_groth16::arming::{arm_rows, build_row_bases_from_vk, Arms};
-use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, derive_gamma_rademacher};
+use arkworks_groth16::api::OneSidedPvugc;
+use arkworks_groth16::ppe::{PvugcVk, derive_gamma_rademacher};
 
 // Circuit: enforce x = y^2
 #[derive(Clone)]
@@ -76,10 +75,9 @@ fuzz_target!(|data: &[u8]| {
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
 
     // Thin gamma and arming
-    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, 4);
-    let (y_bases, delta, r) = build_one_sided_ppe::<E>(&pvugc_vk, &vk, &[x]);
-    let rows = build_row_bases_from_vk::<E>(&y_bases, delta, gamma.clone());
-    let arms: Arms<E> = arm_rows::<E>(&rows, &rho);
+    let _gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, 4);
+    // Canonical column setup and arming
+    let (_bases, col_arms, _r, k_expected_from_setup) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x], &rho);
 
     // Deterministic RNGs
     let mut rng1 = ark_std::rand::rngs::StdRng::seed_from_u64(seed1);
@@ -87,36 +85,32 @@ fuzz_target!(|data: &[u8]| {
 
     // Build two independent proofs with hook to record coefficients
     let mut rec1 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-    let proof1 = Groth16::<E>::create_random_proof_with_hook(
+    let _proof1 = Groth16::<E>::create_random_proof_with_hook(
         SqCircuit { x: Some(x), y: Some(y) },
         &pk,
         &mut rng1,
         &mut rec1,
     ).unwrap();
-    let commitments1: arkworks_groth16::decap::OneSidedCommitments<E> = rec1.build_commitments(&pvugc_vk, &gamma);
+    let commitments1: arkworks_groth16::decap::OneSidedCommitments<E> = rec1.build_commitments();
 
     let mut rec2 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-    let proof2 = Groth16::<E>::create_random_proof_with_hook(
+    let _proof2 = Groth16::<E>::create_random_proof_with_hook(
         SqCircuit { x: Some(x), y: Some(y) },
         &pk,
         &mut rng2,
         &mut rec2,
     ).unwrap();
-    let commitments2: arkworks_groth16::decap::OneSidedCommitments<E> = rec2.build_commitments(&pvugc_vk, &gamma);
+    let commitments2: arkworks_groth16::decap::OneSidedCommitments<E> = rec2.build_commitments();
 
-    // Avoid unused warnings to ensure the path is exercised
-    let _ = (proof1, proof2);
-
-    // Decap both; they must be identical and equal r^rho
-    let k1 = arkworks_groth16::decap::decap_one_sided::<E>(&commitments1, &arms);
-    let k2 = arkworks_groth16::decap::decap_one_sided::<E>(&commitments2, &arms);
+    // Decap both; they must be identical and equal R^ρ
+    let k1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms);
+    let k2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms);
     if k1 != k2 {
         panic!("Proof-agnostic violation: K1 != K2 for same (vk,x,rho)");
     }
 
     // Check against target r^rho
-    let k_expected = PairingOutput::<E>(r.0.pow(rho.into_bigint()));
-    if k1 != k_expected {
+    if k1 != k_expected_from_setup {
         panic!("Decap mismatch: K != R^rho for same statement");
     }
 });

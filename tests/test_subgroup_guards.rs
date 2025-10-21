@@ -5,7 +5,7 @@ use ark_groth16::Groth16;
 use ark_snark::SNARK;
 
 use arkworks_groth16::ppe::validate_groth16_vk_subgroups;
-use arkworks_groth16::arming::{RowBases, arm_rows};
+use arkworks_groth16::arming::{ColumnBases, arm_columns};
 
 #[test]
 fn reject_zero_points_in_vk() {
@@ -22,26 +22,27 @@ fn reject_zero_points_in_vk() {
 }
 
 #[test]
-fn arm_rows_allows_some_identity_rows_but_not_all() {
-    // one identity and one non-identity row per side
+fn arm_columns_allows_some_identity_cols_but_not_all() {
+    // one identity and one non-identity column per side
     let mut rng = ark_std::test_rng();
-    let rows = RowBases::<E> {
-        u_rows: vec![G2Affine::identity(), G2Affine::rand(&mut rng)],
-        w_rows: vec![G2Affine::identity(), G2Affine::rand(&mut rng)],
-        gamma: vec![], // as needed
+    let cols = ColumnBases::<E> {
+        y_cols: vec![G2Affine::identity(), G2Affine::rand(&mut rng)],
+        delta: G2Affine::rand(&mut rng),
     };
     let rho = Fr::from(1u64);
-    let arms = arm_rows(&rows, &rho);
-    assert_eq!(arms.u_rows_rho.len(), 2);
-    assert_eq!(arms.w_rows_rho.len(), 2);
+    let arms = arm_columns(&cols, &rho);
+    assert_eq!(arms.y_cols_rho.len(), 2);
 }
 
 #[test]
 #[should_panic]
-fn arm_rows_rejects_all_identity_side() {
-    // All U rows identity → reject
-    let rows = RowBases::<E> { u_rows: vec![G2Affine::identity()], w_rows: vec![G2Affine::rand(&mut ark_std::test_rng())], gamma: vec![vec![]] };
+fn arm_columns_rejects_zero_delta() {
+    // Zero delta → reject
+    let cols = ColumnBases::<E> { 
+        y_cols: vec![G2Affine::rand(&mut ark_std::test_rng())], 
+        delta: G2Affine::identity() 
+    };
     let rho = Fr::from(1u64);
-    let _ = arm_rows(&rows, &rho);
+    let _ = arm_columns(&cols, &rho);
 }
 

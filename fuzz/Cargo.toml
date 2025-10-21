@@ -27,14 +27,14 @@ members = []
 resolver = "2"
 
 [[bin]]
-name = "arm_rows"
-path = "fuzz_targets/arm_rows.rs"
+name = "arm_columns"
+path = "fuzz_targets/arm_columns.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "build_row_bases_from_vk"
-path = "fuzz_targets/build_row_bases_from_vk.rs"
+name = "build_column_bases"
+path = "fuzz_targets/build_column_bases.rs"
 test = false
 bench = false
 

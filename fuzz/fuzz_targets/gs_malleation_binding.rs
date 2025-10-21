@@ -16,7 +16,7 @@ use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::api::{OneSidedPvugc, PvugcBundle};
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
-use arkworks_groth16::ppe::{PvugcVk, derive_gamma_rademacher};
+use arkworks_groth16::ppe::PvugcVk;
 
 #[derive(Clone)]
 struct SqCircuit { pub x: Option<Fr>, pub y: Option<Fr> }
@@ -57,32 +57,31 @@ fuzz_target!(|data: &[u8]| {
     let circuit = SqCircuit { x: Some(x), y: Some(y) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
-    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, 4);
 
     // Make one valid proof and commitments
     let mut recorder = SimpleCoeffRecorder::<E>::new();
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
-    let commitments = recorder.build_commitments(&pvugc_vk, &gamma);
+    let commitments = recorder.build_commitments();
 
     // Baseline must verify true
-    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng), dlrep_tie: recorder.create_dlrep_tie(&gamma, &mut rng), gs_commitments: commitments.clone() };
-    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x], &gamma));
+    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng), dlrep_tie: recorder.create_dlrep_tie(&mut rng), gs_commitments: commitments.clone() };
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x]));
 
     // Apply a single malleation
     let mut mal = commitments.clone();
     match op {
         0 => { // swap two row commitments if possible
-            if mal.c_rows.len() >= 2 {
-                let i = (seed as usize) % mal.c_rows.len();
-                let j = (seed as usize / 3) % mal.c_rows.len();
-                mal.c_rows.swap(i, j);
+            if mal.x_b_cols.len() >= 2 {
+                let i = (seed as usize) % mal.x_b_cols.len();
+                let j = (seed as usize / 3) % mal.x_b_cols.len();
+                mal.x_b_cols.swap(i, j);
             } else { return; }
         }
         1 => { // swap limbs in one row
-            if !mal.c_rows.is_empty() {
-                let i = (seed as usize) % mal.c_rows.len();
-                let (a, b) = mal.c_rows[i];
-                mal.c_rows[i] = (b, a);
+            if !mal.x_b_cols.is_empty() {
+                let i = (seed as usize) % mal.x_b_cols.len();
+                let (a, b) = mal.x_b_cols[i];
+                mal.x_b_cols[i] = (b, a);
             } else { return; }
         }
         2 => { // zero out one theta limb
@@ -94,18 +93,18 @@ fuzz_target!(|data: &[u8]| {
             if !mal.theta.is_empty() { mal.theta[0].0 = G1Affine::identity(); } else { return; }
         }
         _ => { // add generator to one limb
-            if !mal.c_rows.is_empty() {
-                let i = (seed as usize) % mal.c_rows.len();
-                let (a, b) = mal.c_rows[i];
+            if !mal.x_b_cols.is_empty() {
+                let i = (seed as usize) % mal.x_b_cols.len();
+                let (a, b) = mal.x_b_cols[i];
                 let a2 = (a.into_group() + <E as Pairing>::G1::generator()).into_affine();
-                mal.c_rows[i] = (a2, b);
+                mal.x_b_cols[i] = (a2, b);
             } else { return; }
         }
     }
 
     // Reuse same proofs (dlrep proofs bind to original structure). Verifier should reject.
     let bundle_bad = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_tie: bundle.dlrep_tie, gs_commitments: mal };
-    if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &[x], &gamma) {
+    if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &[x]) {
         panic!("Malleation accepted by verifier");
     }
 });

@@ -104,33 +104,22 @@ pub fn derive_gamma_rademacher<E: Pairing>(
     vk: &Groth16VK<E>,
     num_rows: usize,
 ) -> Vec<Vec<E::ScalarField>> {
-    // Seed = H("PVUGC/Γ" || vk_digest || beta || delta || hash(b_g2_query))
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(b"PVUGC/GAMMA/v1");
-    // vk digest (γ_abc_g1, α, β, γ, δ)
     let mut tmp = Vec::new();
     vk.alpha_g1.serialize_compressed(&mut tmp).unwrap();
     vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
     vk.gamma_g2.serialize_compressed(&mut tmp).unwrap();
     vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-    for g in &vk.gamma_abc_g1 {
-        g.serialize_compressed(&mut tmp).unwrap();
-    }
-    hasher.update(&tmp);
-    tmp.clear();
+    for g in &vk.gamma_abc_g1 { g.serialize_compressed(&mut tmp).unwrap(); }
     pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
     pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
+    for y in &pvugc_vk.b_g2_query { y.serialize_compressed(&mut tmp).unwrap(); }
     hasher.update(&tmp);
-    tmp.clear();
-    for y in &pvugc_vk.b_g2_query {
-        y.serialize_compressed(&mut tmp).unwrap();
-    }
-    let b_query_digest = Sha256::digest(&tmp);
-    hasher.update(&b_query_digest);
     let seed = hasher.finalize();
 
-    // Expand to Rademacher entries in {-1,0,+1}; bias sparse 0s lightly
-    let cols = 1 + pvugc_vk.b_g2_query.len(); // {β} ∪ b_g2_query
+    let cols = 1 + pvugc_vk.b_g2_query.len();
     let mut gamma: Vec<Vec<E::ScalarField>> = Vec::with_capacity(num_rows);
     let mut ctr: u64 = 0;
     while gamma.len() < num_rows {
@@ -141,7 +130,7 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             h.update(&ctr.to_le_bytes());
             h.update(&j.to_le_bytes());
             let out = h.finalize();
-            let v = out[0] % 3; // 0,1,2
+            let v = out[0] % 3;
             let sf = match v {
                 0 => E::ScalarField::from(-1i64),
                 1 => E::ScalarField::from(0u64),
@@ -149,19 +138,9 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             };
             row.push(sf);
         }
-        // Avoid all-zero rows and duplicate rows
-        let mut nonzero = false;
-        for c in &row {
-            if !c.is_zero() {
-                nonzero = true;
-                break;
-            }
-        }
-        if nonzero {
-            let is_duplicate = gamma.iter().any(|existing| existing == &row);
-            if !is_duplicate {
-                gamma.push(row);
-            }
+        // enforce non-zero and no duplicate rows
+        if row.iter().any(|c| !c.is_zero()) && !gamma.iter().any(|r| r == &row) {
+            gamma.push(row);
         }
         ctr += 1;
     }

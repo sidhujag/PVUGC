@@ -113,16 +113,14 @@ $$\boxed{e(A,B) \cdot e(-C,\delta_2) \;=\; R(\mathsf{vk},x)}$$
 
 **Build a public G₂ basis from the verifying key:**
 
-- $Y_j^{(B)}$: rows from which B is assembled (includes $\beta_2$)
+- $Y_j$: columns from which B is assembled (includes $\beta_2$ and $b_{g2\_query}$)
 - $\delta_2$: single base for the C-side term
 
-**Derive a thin deterministic matrix Γ:**
+**Column-based arming (no Γ matrix needed):**
 
-$$\Gamma \text{ via Fiat-Shamir from VK digest} \quad \Rightarrow \quad U_\ell = \sum_j \Gamma_{\ell j} Y_j^{(B)}$$
+Publish $\{Y_j^\rho\}$ and $\delta_2^\rho$ plus a single **PoCE-A** proof showing they share the same ρ ≠ 0.
 
-**Deposit-only arming:**
-
-Publish $\{U_\ell^\rho\}$ and $\delta_2^\rho$ plus a single **PoCE-Across** proof showing they share the same ρ ≠ 0.
+Note: Column approach directly arms each Y_j without aggregation, eliminating the need for Γ matrices.
 
 **These are statement-only; no anchor-arm like T₀^ρ is ever published.**
 
@@ -132,20 +130,18 @@ Publish $\{U_\ell^\rho\}$ and $\delta_2^\rho$ plus a single **PoCE-Across** proo
 
 The Groth16 prover knows the scalars used to form B and C. Without ever revealing scalars:
 
-- Compute $X_j^{(B)} := b_j A \in \mathbb{G}_1$
-- Aggregate rows: $C_\ell := \sum_j \Gamma_{\ell j} X_j^{(B)} = u_\ell A$
+- Compute $X_j^{(B)} := b_j A \in \mathbb{G}_1$ for each column
 - C-side point: $-C \in \mathbb{G}_1$
 
 **Small Schnorr/DLREP proofs** (no pairings) verify:
-- $B = \beta_2 + \sum_j b_j Y_j^{(B)}$
-- Each row coefficient: $u_\ell = \sum_j \Gamma_{\ell j} b_j$
+- $B = \beta_2 + \sum_j b_j Y_j$
 - The published point equals $-C$
 
 ---
 
 ### 3.4 Verifier Equality (One-Sided PPE)
 
-$$\boxed{\prod_\ell e(C_\ell, U_\ell) \cdot e(-C,\delta_2) \;\stackrel{?}{=}\; R(\mathsf{vk},x)}$$
+$$\boxed{\prod_j e(X_j^{(B)}, Y_j) \cdot e(-C,\delta_2) \;\stackrel{?}{=}\; R(\mathsf{vk},x)}$$
 
 **By bilinearity:** The LHS = $e(A,B) \cdot e(-C,\delta_2)$, so the equality holds if and only if Groth16 verifies.
 
@@ -153,7 +149,7 @@ $$\boxed{\prod_\ell e(C_\ell, U_\ell) \cdot e(-C,\delta_2) \;\stackrel{?}{=}\; R
 
 ### 3.5 Decapsulation (Permissionless, Proof-Agnostic, Witness-Independent)
 
-$$\boxed{K \;=\; \left(\prod_\ell e(C_\ell, U_\ell^\rho)\right) \cdot e(-C,\delta_2^\rho) \;=\; \big(R(\mathsf{vk},x)\big)^\rho}$$
+$$\boxed{K \;=\; \left(\prod_j e(X_j^{(B)}, Y_j^\rho)\right) \cdot e(-C,\delta_2^\rho) \;=\; \big(R(\mathsf{vk},x)\big)^\rho}$$
 
 **Properties:**
 

@@ -111,17 +111,16 @@ cargo test test_one_sided_security -- --nocapture
 ### 6.1 Setup and Arming
 
 ```rust
-use arkworks_groth16::{OneSidedPvugc, build_row_bases_from_vk};
+use arkworks_groth16::{OneSidedPvugc, ColumnBases, arm_columns};
 
-// Derive statement-only bases from Groth16 VK
-let y_bases = extract_y_bases(&pvugc_vk);
-
-// Aggregate bases using deterministic Γ matrix
-let rows = build_row_bases_from_vk(&y_bases, delta_g2, gamma);
+// Build column bases directly from Groth16 VK
+let mut y_cols = vec![pvugc_vk.beta_g2];
+y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
+let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
 
 // Arm bases at deposit time (one-time)
 let rho = Fr::rand(&mut rng);
-let arms = arm_rows(&rows, &rho);
+let (_bases, arms, _r, _k) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho);
 
 // Publish: arms, R = target^1 (computable from vk + public_inputs)
 // Secret: rho
@@ -139,7 +138,7 @@ let bundle = PvugcBundle {
 };
 
 // Verifier validates all components
-let valid = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs, &gamma);
+let valid = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs);
 
 if valid {
     // Extract key

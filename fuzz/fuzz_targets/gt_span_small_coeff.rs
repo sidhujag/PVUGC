@@ -6,7 +6,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use ark_bls12_381::{Bls12_381 as E, Fr};
+use ark_bls12_381::{Bls12_381 as E, Fr, G2Affine};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_std::{Zero, rand::SeedableRng};
 use ark_ff::PrimeField;
@@ -16,8 +16,8 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_snark::SNARK;
 
-use arkworks_groth16::arming::build_row_bases_from_vk;
-use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, compute_groth16_target, derive_gamma_rademacher};
+use arkworks_groth16::arming::ColumnBases;
+use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, compute_groth16_target};
 
 #[derive(Clone)]
 struct SqCircuit { pub x: Option<Fr>, pub y: Option<Fr> }
@@ -68,13 +68,12 @@ fuzz_target!(|data: &[u8]| {
     // Build PVUGC VK using vk and pk-like fields where needed; here only vk is used
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: vec![] };
 
-    // Derive small number of U rows from VK Y-bases: {β} ∪ b_g2_query; if query empty, we still have β
-    // Use derive_gamma_rademacher to get 2 rows; extract Y from pvugc_vk via build_one_sided_ppe path
+    // Derive column bases from VK Y-bases: {β} ∪ b_g2_query; if query empty, we still have β
+    // Extract Y from pvugc_vk via build_one_sided_ppe path
     let (y_bases, delta, _r_target) = build_one_sided_ppe::<E>(&pvugc_vk, &vk, &[x]);
-    let gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, 2);
-    let rows = build_row_bases_from_vk::<E>(&y_bases, delta, gamma);
-    let u_rows = rows.u_rows;
-    let delta_g2 = delta;
+    let cols: ColumnBases<E> = ColumnBases { y_cols: y_bases, delta };
+    let y_cols: Vec<G2Affine> = cols.y_cols;
+    let delta_g2: G2Affine = cols.delta;
 
     // Target R(vk, x)
     let r = compute_groth16_target::<E>(&vk, &[x]);
@@ -103,10 +102,10 @@ fuzz_target!(|data: &[u8]| {
         if a1 != 0 { a_star += b1 * Fr::from(a1 as i64); }
         let a_star = a_star.into_affine();
 
-        // Build Q* in G2 using first up to two U rows
+        // Build Q* in G2 using first up to two Y columns
         let mut q_star = <E as Pairing>::G2::zero();
-        if !u_rows.is_empty() && c0 != 0 { q_star += u_rows[0].into_group() * Fr::from(c0 as i64); }
-        if u_rows.len() > 1 && c1 != 0 { q_star += u_rows[1].into_group() * Fr::from(c1 as i64); }
+        if !y_cols.is_empty() && c0 != 0 { q_star += y_cols[0].into_group() * Fr::from(c0 as i64); }
+        if y_cols.len() > 1 && c1 != 0 { q_star += y_cols[1].into_group() * Fr::from(c1 as i64); }
         if d != 0 { q_star += delta_g2.into_group() * Fr::from(d as i64); }
         let q_star = q_star.into_affine();
 
