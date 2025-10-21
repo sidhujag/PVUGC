@@ -56,8 +56,9 @@ internal_key = xonly_even_y(Q_nums)
 Use layered hashes to bind the environment without cycles. Transcripts bind to `ctx_hash`, but are not included in these package hashes:
 
 ```
-ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || gamma_digest || upsilon_digest)
-arming_pkg_hash = H_bytes("PVUGC/ARM"      || {D_ℓ} || {D_a} || header_meta)
+y_cols_digest   = H_bytes("PVUGC/YCOLS" || ser([β]_2) || ser(b_g2_query[0]) || ...)
+ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || y_cols_digest)
+arming_pkg_hash = H_bytes("PVUGC/ARM"      || {D_j} || D_δ || header_meta)
 presig_pkg_hash = H_bytes("PVUGC/PRESIG"   || m || T || R || signer_set || musig_coeffs)
 ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || presig_pkg_hash || dlrep_transcripts)
 ```
@@ -70,7 +71,7 @@ ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || pre
 
 **`txid_template`.** A fully specified transaction template (inputs/outputs/locktime/sequence/fees) used only to define $m$. It does not include any signatures or annex. Any change to `txid_template` changes $m$ and hence `presig_pkg_hash` and `ctx_hash`. `txid_template` MUST NOT reference unknown txids (no forward/self‑references). The CPFP child is outside `ctx_hash`; only the CPFP output (scriptPubKey, index, value) is fixed in `ctx_core`.
 
-**`header_meta`.** A deterministic serialization hash of the public KEM header: share index $i$, $\{D_j\}$, $D_\delta$, $T_i$, $h_i$, $\texttt{ct}_i$, $\tau_i$, $\rho\_\text{link}$, `DEM_PROFILE`, `GS_instance_digest`, exact ordering of $Y_j$ bases. Use strict encodings and reject duplicates.
+**`header_meta`.** A deterministic serialization hash of the public KEM header: share index $i$, $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $T_i$, $h_i$, $\texttt{ct}_i$, $\tau_i$, $\rho\_\text{link}$, `DEM_PROFILE`, `GS_instance_digest`, exact ordering of $Y_j$ column bases. Use strict encodings and reject duplicates.
 
 **Hash functions (normative).**
 
@@ -83,13 +84,13 @@ Let `H_bytes = SHA-256` for byte-level context hashes (`ctx_*`) and tags like `H
 * `"PVUGC/AEAD-NONCE"` (reserved; not used in Poseidon2 profile)
 * `"BIP0340/challenge"` (BIP‑340 tagged hash)
 
-**MUST (Span independence in $\mathbb{G}_T$).** The target $R(\mathsf{vk},x) \in \mathbb{G}_T$ MUST be derived deterministically from ($\mathsf{vk}$,$x$) alone and domain‑separated from the derivations of $\{U_\ell\}$ and $\{W_a\}$. Implementations MUST freeze ($\mathsf{vk}$,$x$) before arming and pin their digests in `GS_instance_digest`. Arming participants MUST have no influence over these derivations. Intuitively, $R(\mathsf{vk},x)$ MUST NOT lie in the public pairing span of $\{U_\ell, W_a\}$ without the committed G₁ variables.
+**MUST (Span independence in $\mathbb{G}_T$).** The target $R(\mathsf{vk},x) \in \mathbb{G}_T$ MUST be derived deterministically from ($\mathsf{vk}$,$x$) alone. Implementations MUST freeze ($\mathsf{vk}$,$x$) before arming and pin their digests in `GS_instance_digest`. Arming participants MUST have no influence over these derivations. Intuitively, $R(\mathsf{vk},x)$ MUST NOT lie in the public pairing span of $\{Y_j, [\delta]_2\}$ without the committed G₁ variables.
 
 **Production Profile (MUST/SHOULD).**
 
 * **MUST:** BLS12‑381 as the pairing curve family.
 * **MUST:** DEM_PROFILE = "PVUGC/DEM-P2-v1" (SNARK‑friendly). KDF(M) = Poseidon2( ser_GT(M) || H_bytes(ctx_hash) || GS_instance_digest ); DEM keystream = Poseidon2(K_i, AD_core); ct = pt ⊕ keystream; τ = Poseidon2(K_i, AD_core, ct). Mixing profiles within a `ctx_hash` is forbidden.
-* **SHOULD:** Multi‑matrix AND‑ing: use at least two independently derived $(\Gamma, \Upsilon)$ matrix pairs with different domain separators; verify both PPEs (logical AND). For AND‑of‑2, define $M_i^{\text{AND}} := \mathrm{ser}_{\mathbb{G}_T}(M_i^{(1)}) || \mathrm{ser}_{\mathbb{G}_T}(M_i^{(2)})$ and derive $K_i = \text{Poseidon2}( M_i^{\text{AND}} || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest} )$.
+* **SHOULD:** For enhanced security, implementations MAY verify multiple independent PPE formulations (logical AND). For AND‑of‑2, define $M_i^{\text{AND}} := \mathrm{ser}_{\mathbb{G}_T}(M_i^{(1)}) || \mathrm{ser}_{\mathbb{G}_T}(M_i^{(2)})$ and derive $K_i = \text{Poseidon2}( M_i^{\text{AND}} || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest} )$.
 * **SHOULD:** Enable Timeout/Abort with $\Delta$ chosen to cover proving+network latency.
 
 ---
@@ -132,34 +133,49 @@ R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e\left(\sum_i x_i [l_i]_1,[\gam
 $$
 
 The prover forms G₁ variables from its internal coefficients:
-- **B-side variables**: $X^{(B)}_j = b_j \cdot A \in \mathbb{G}_1$ where $b_j$ are the coefficients in $B$
-- **C-side variables**: $X^{(\delta)}_i = c_i \cdot X_i \in \mathbb{G}_1$ where $c_i$ are the coefficients in $C$
+- **B-side variables**: 
+  - $X^{(B)}_0 = 1 \cdot A$ (constant for $\beta$ column)
+  - $X^{(B)}_{j+1} = b_j \cdot A$ for $j \in [0, m-1]$ where $b_j$ are coefficients from b_g2_query
+- **$\delta$-side variables**:
+  - $X^{(B)}_\delta = s \cdot A$ (the randomness $s$ from B)
+  - $C$ (the Groth16 proof element, paired with $[\delta]_2$)
 
-**Y-basis content (normative):** The $Y_j$ list for B includes $[\beta]_2$ as the first element (constant column) followed by all b_g2_query elements from the proving key. Do not deduplicate - $e(A, [\beta]_2)$ must be reconstructed on the B side of the PPE.
+**Y-basis content (normative):** The $Y_j$ list for B includes:
+- $Y_0 = [\beta]_2$ (first element, constant column)
+- $Y_{j+1} = \text{b\_g2\_query}[j]$ for all $j$ the prover uses in B
 
-**Column-based arming:** Directly arm each statement-only column without aggregation matrices:
+Do not deduplicate - $e(A, [\beta]_2)$ must be reconstructed on the B side of the PPE.
+
+**Column-based arming:** Directly arm each statement-only column:
 $$
-\{Y_j^\rho\}, \quad [\delta]_2^\rho
+\{D_j = Y_j^\rho\}_{j=0}^{n_B-1}, \quad D_\delta = [\delta]_2^\rho
 $$
-Note: Unlike row-based approaches that use Γ aggregation matrices, column-based directly arms each Y_j base.
+Column mode directly arms each base without aggregation matrices.
 
 The GS verifier checks the **one-sided product‑of‑pairings equation**:
 $$
-\prod_{j=1}^{n_B} e(X^{(B)}_j, Y_j) \cdot e(-C, [\delta]_2) = R(\mathsf{vk},x) \tag{GS-PPE}
+\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j) \cdot e(X^{(B)}_\delta, [\delta]_2) \cdot e(C, [\delta]_2) = R(\mathsf{vk},x) \tag{GS-PPE}
 $$
+
+where:
+- $X^{(B)}_0 = 1 \cdot A$ (for the $\beta$ column)
+- $X^{(B)}_{j+1} = b_j \cdot A$ (for b_g2_query coefficients)
+- $X^{(B)}_\delta = s \cdot A$ (separate $\delta$ column for the $s$ randomness)
+- $C$ is the Groth16 proof element (not negated)
 
 **Critical property**: The $Y_j$ and $[\delta]_2$ are **statement‑only** (depend only on VK and $x$, not on the proof). For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
 
 **Binding to Groth16 Proof (DLREP proofs - MUST).** The prover MUST include succinct Schnorr-style proofs demonstrating:
-- **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that $B = \beta_2^{(\text{const})} + \sum_j b_j \cdot Y_j + s \cdot [\delta]_2$ with hidden coefficients $b_j$ and randomness $s$
-- **DLREP_C (MUST)**: Proof in $\mathbb{G}_1$ that $C = sA + rB_{\mathrm{G1}} - rs[\delta]_1 + \sum_i c_i X_i$ with hidden coefficients and randomness
+- **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that $B = \beta_2 + \sum_{j=0}^{m-1} b_j \cdot \text{b\_g2\_query}[j] + s \cdot [\delta]_2$ with:
+  - Same-scalar ties: $X^{(B)}_0 = 1 \cdot A$, $X^{(B)}_{j+1} = b_j \cdot A$ for all $j$
+  - $X^{(B)}_\delta = s \cdot A$ uses the same $s$ from B's $\delta_2$ term
+- **DLREP_C (MUST)**: Proof in $\mathbb{G}_1$ that the committed $C$ is the actual Groth16 proof element
 
 These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts either "(Groth16 verify) OR (DLREPs + GS PPE)" as valid attestation.
 
-**Target bound (non-normative)**: In column-based encodings, $n_B$ (number of Y columns) scales with circuit size but remains manageable due to direct arming.
+**Profile parameter**: $N_{\max}$ (max allowed columns for this deployment; e.g., 32 or 48).
 
-**MUST (GS size bounds):** Reject GS attestations requiring > 48 pairings 
-total ($n_B \leq 48$). Typical column-based encodings require 16-32 pairings.
+**MUST (Column profile):** If $n_B > N_{\max}$, reject under the Column profile and use the **Outer-Compressed profile** (tiny outer verifier + rank-1 PPE), documented separately. Typical column-based encodings require 16-32 pairings.
 
 **Implementation note:** For BLS12-381, 96 pairings is ~50-100ms on modern hardware - 
 acceptable for one-time decapsulation.
@@ -176,7 +192,7 @@ K_i=\mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(M_i) || H_\text{bytes}(\textt
 $$
 Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) to get $(\texttt{ct}_i,\tau_i)$.
 
-**Publish only:** $\{D_\ell\}_{\ell=1}^m$, $\{D_a\}_{a=1}^{r_\delta}$, $\texttt{ct}_i$, $\tau_i$, $T_i$, $h_i$, plus PoK and **PoCE-A** (algebraic proof).
+**Publish only:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $\texttt{ct}_i$, $\tau_i$, $T_i$, $h_i$, plus PoK and **PoCE-A** (algebraic proof).
 **Keep secret:** $M_i$ (derivable only with valid attestation).
 
 **Degenerate & subgroup guards:** Abort arming if $R(\mathsf{vk}, x) = 1$ (identity in $\mathbb{G}_T$) or if it lies in any proper subgroup of $\mathbb{G}_T$. While negligible for honest setups, these checks prevent trivial keys. PoCE MUST also assert $R(\mathsf{vk},x) \neq 1$ via a public input bit tied to `GS_instance_digest`.
@@ -186,20 +202,20 @@ Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) 
 **Decapsulation (anyone with a valid attestation).**
 Verify GS attestation and DLREP proofs, then compute
 $$
-\tilde{M}_i = \left(\prod_{j=1}^{n_B} e(X^{(B)}_j,D_j)\right) \cdot e(-C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
+\tilde{M}_i = \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j,D_j)\right) \cdot e(X^{(B)}_\delta, D_\delta) \cdot e(C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
 derive $K_i'=\mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$, decrypt $\texttt{ct}_i\to(s_i \| h_i)$, check $T_i=s_iG$, $H_\text{bytes}(s_i \| T_i \| i)=h_i$, and verify PoCE-B. Sum $\alpha=\sum_i s_i$ and finish the adaptor $s=s'+\alpha \bmod n$.
 
 **Proof‑agnostic key (the critical insight).** For any two valid GS attestations $\mathsf{Att}_1, \mathsf{Att}_2$ for the same $(\mathsf{vk},x)$, the one-sided product equals the same fixed value:
 $$
-\left(\prod_{j} e(X^{(B)}_j(\mathsf{Att}_1), Y_j)\right) \cdot e(-C(\mathsf{Att}_1), [\delta]_2) = R(\mathsf{vk},x)
+\left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j(\mathsf{Att}_1), Y_j)\right) \cdot e(X^{(B)}_\delta(\mathsf{Att}_1), [\delta]_2) \cdot e(C(\mathsf{Att}_1), [\delta]_2) = R(\mathsf{vk},x)
 $$
 $$
-\left(\prod_{j} e(X^{(B)}_j(\mathsf{Att}_2), Y_j)\right) \cdot e(-C(\mathsf{Att}_2), [\delta]_2) = R(\mathsf{vk},x)
+\left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j(\mathsf{Att}_2), Y_j)\right) \cdot e(X^{(B)}_\delta(\mathsf{Att}_2), [\delta]_2) \cdot e(C(\mathsf{Att}_2), [\delta]_2) = R(\mathsf{vk},x)
 $$
 Therefore, for any valid attestation:
 $$
-\tilde{M}_i = \left(\prod_j e(X^{(B)}_j, D_j)\right) \cdot e(-C, D_\delta) = R(\mathsf{vk},x)^{\rho_i}
+\tilde{M}_i = \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, D_j)\right) \cdot e(X^{(B)}_\delta, D_\delta) \cdot e(C, D_\delta) = R(\mathsf{vk},x)^{\rho_i}
 $$
 
 This means *every* valid attestation yields the **same** KEM key $K_i$, regardless of which proof was used.
@@ -232,13 +248,13 @@ This means *every* valid attestation yields the **same** KEM key $K_i$, regardle
 
 **Lemma 1 (GS product determinism, one-sided).** For fixed $(\mathsf{vk},x)$, any accepting GS attestation $\mathsf{Att}$ with valid DLREP proofs for the statement "Groth16 verifies $(\mathsf{vk},x)$" yields
 $$
-\left(\prod_{j=1}^{n_B} e(X^{(B)}_j(\mathsf{Att}),Y_j)\right) \cdot e(-C(\mathsf{Att}), [\delta]_2) = R(\mathsf{vk},x) \in \mathbb{G}_T
+\left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j(\mathsf{Att}),Y_j)\right) \cdot e(X^{(B)}_\delta(\mathsf{Att}), [\delta]_2) \cdot e(C(\mathsf{Att}), [\delta]_2) = R(\mathsf{vk},x) \in \mathbb{G}_T
 $$
 where $Y_j$, $[\delta]_2$ are **statement-only** bases derived from VK components and $R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e(\sum_i x_i[l_i]_1,[\gamma]_2)$. The value is **independent of prover randomization** because the randomness in commitments cancels through the pairing structure, and the DLREP proofs ensure consistency with the underlying Groth16 proof.
 
 **Lemma 2 (KEM correctness).** For share $i$ with randomness $\rho_i$, the published masks $D_j = Y_j^{\rho_i}$, $D_\delta = [\delta]_2^{\rho_i}$ and any accepting attestation give
 $$
-\tilde{M}_i = \left(\prod_j e(X^{(B)}_j,D_j)\right) \cdot e(-C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
+\tilde{M}_i = \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j,D_j)\right) \cdot e(X^{(B)}_\delta, D_\delta) \cdot e(C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
 Hence $K_i' = \mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest}) = K_i$, and the DEM decrypts $(s_i \| h_i)$.
 
@@ -250,7 +266,7 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 
 *Proof sketches:* (i) follows from DLREP soundness + randomness cancellation in PPE; (ii) is algebraic as written; (iii) from KEM hardness and Schnorr UF-CMA.
 
-**Statement-Only Construction:** The one-sided GS variant used here requires no CRS. The G₂ bases $\{Y_j\}, [\delta]_2$ are derived directly from the Groth16 verifying key components (statement-only), and the target $R(\mathsf{vk},x)$ depends only on the VK and public inputs. Column-based arming directly arms each statement-only column without matrix aggregation. 
+**Transparent CRS:** Groth–Sahai commitments use a **binding CRS (two G₁ bases)** which we derive deterministically via hash-to-curve from the VK/ctx. No trapdoor or ceremony is required. The G₂ right-legs $\{Y_j\}, [\delta]_2$ and the target $R(\mathsf{vk},x)$ are **statement-only and CRS-independent**, derived directly from the Groth16 verifying key components and public inputs. Column-based arming directly arms each statement-only column without matrix aggregation. 
 **SHOULD:** To mitigate potential weaknesses, implementations MAY use multiple independent arming approaches and verify all resulting PPEs (logical AND).
 
 **Knowledge‑soundness (SHOULD).** The GS attestation SHOULD be knowledge‑sound for the relation “there exists a Groth16 proof $\pi$ such that $\textsf{Verify}_{\text{G16}}(\mathsf{vk},x,\pi)=1$.” That is, there exists an extractor that, given any accepting GS attestation, outputs a valid Groth16 proof $\pi$ for $(\mathsf{vk},x)$. Plain soundness suffices for correctness/no‑proof‑spend; knowledge‑soundness is a stronger deployment profile.
@@ -262,7 +278,7 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 **PoCE (Two-stage verification):**
 
 **PoCE-A (Arm-time verifiable encryption & mask-link, SNARK-friendly).** A NIZK proving, for share $i$:
-* Knowledge of $(\rho_i,s_i,h_i)$ s.t. (i) $D_\ell=U_\ell^{\rho_i}$ for all $\ell \in [1,m]$, $D_a=W_a^{\rho_i}$ for all $a \in [1,r_\delta]$; (ii) $T_i=s_iG$; (iii) $\rho\_\text{link}=H_\text{tag}(\rho_i)$.
+* Knowledge of $(\rho_i,s_i,h_i)$ s.t. (i) $D_j=Y_j^{\rho_i}$ for all $j \in [0,n_B-1]$, $D_\delta=[\delta]_2^{\rho_i}$; (ii) $T_i=s_iG$; (iii) $\rho\_\text{link}=H_\text{tag}(\rho_i)$.
 * Key derivation (in-circuit): $K_i = \mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(R(\mathsf{vk},x)^{\rho_i}) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$.
 * DEM correctness (SNARK-friendly): $\texttt{ct}_i = (s_i\|h_i) \oplus \mathrm{Poseidon2}(K_i, \text{AD\_core})$ and $\tau_i = \mathrm{Poseidon2}(K_i, \text{AD\_core}, \texttt{ct}_i)$.
 * $\rho_i\neq 0$ (via auxiliary $\rho_i\cdot u_i=1$)
@@ -278,12 +294,12 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 * Decrypt $\texttt{ct}_i$ with $K_i'$ and verify $T_i = s_iG$ and $H(s_i \| T_i \| i) = h_i$
 * Verify key-commit tag: $\tau_i = \mathrm{Poseidon2}(K_i', \text{AD\_core}, \texttt{ct}_i)$
 * **Note:** This is a decapper-local check (not publicly verifiable unless plaintext revealed)
-* **Shape check (MUST):** Before decryption, verify the lengths and ordering of $\{D_\ell\}$ and $\{D_a\}$ match `header_meta` exactly; mismatch ⇒ reject.
+* **Shape check (MUST):** Before decryption, verify the lengths and ordering of $\{D_j\}$ and $D_\delta$ match `header_meta` exactly; mismatch ⇒ reject.
 
 Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify for all shares.
 * **Publication (SHOULD):** Implementations SHOULD publish a minimal PoCE‑B verification transcript (hashes of inputs/outputs) alongside the broadcasted spend to aid auditing, without revealing plaintext values.
 
-**AD_core** binds: `PVUGC/WE/v1 || vk_hash || H_bytes(x) || ctx_hash || tapleaf_hash || tapleaf_version || txid_template || path_tag || share_index || T_i || T || {D_ℓ} || {D_a} || GS_instance_digest`.
+**AD_core** binds: `PVUGC/WE/v1 || vk_hash || H_bytes(x) || ctx_hash || tapleaf_hash || tapleaf_version || txid_template || path_tag || share_index || T_i || T || {D_j} || D_\delta || GS_instance_digest`.
 
 **Decapper requirement:** Upon decapsulation, reject if the tuple $(K_i, \text{AD\_core})$ repeats for the same published header/`ctx_core` (indicates encapsulation reuse).
 
@@ -360,7 +376,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 * **Adaptor compartmentalization:** one adaptor ⇒ one $T$, one $R$; fresh per path/template/epoch.
 * **KEM/DEM:** constant‑time pairings; subgroup checks; $\rho_i\neq 0$; nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
 * **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts before pre‑sign; abort on any mismatch.
-* **Artifacts to publish:** $\{D_\ell\}$, $\{D_a\}$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
+* **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
 * **Side-channel protection:** Pairings, scalars, and DEM MUST be constant-time; avoid cache-tunable table leakage across different `ctx_hash` values.
 
 ---
@@ -383,7 +399,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 * **Trusted setup for Groth16** ($\mathsf{vk}$ pinned to a public ceremony transcript).
 * **Fixed circuit**: Changing $\mathsf{vk}$ or $x$ changes `ctx_hash` and requires re‑arming.
 * **Proving cost**: Proof generation time dominates; WE/KEM work is milliseconds.
-* **Security assumptions**: Discrete log hardness in $\mathbb{G}_2$; Groth16 soundness; **GT‑XPDH (External Power in $\mathbb{G}_T$) as in §7, Lemma 3**; Schnorr unforgeability for DLREP proofs; DEM key‑commitment. The one-sided construction avoids CRS requirements.
+* **Security assumptions**: Discrete log hardness in $\mathbb{G}_2$; Groth16 soundness; **GT‑XPDH (External Power in $\mathbb{G}_T$) as in §7, Lemma 3**; Schnorr unforgeability for DLREP proofs; DEM key‑commitment. The GS binding CRS is derived transparently via hash-to-curve (no trusted setup ceremony needed for GS, unlike Groth16 itself).
 
 ---
 
@@ -397,23 +413,24 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 
 ### 16) Minimal equations
 
-**One-Sided GS‑PPE & KEM:**
+**Column-Profile GS‑PPE & KEM:**
 
+**Verifier PPE (column mode):**
 $$
-\prod_{\ell=1}^{m} e(C_\ell, U_\ell) \cdot \prod_{a=1}^{r_\delta} e(\Theta_a, W_a) = R(\mathsf{vk},x)
+\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j) \cdot e(X^{(B)}_\delta, [\delta]_2) \cdot e(C, [\delta]_2) = R(\mathsf{vk},x)
 $$
 
-**Encap (share $i$):**
+**Arming (per share $i$):**
 $$
-D_\ell = U_\ell^{\rho_i} \in \mathbb{G}_2 \text{ for } \ell \in [1,m], \quad D_a = W_a^{\rho_i} \in \mathbb{G}_2 \text{ for } a \in [1,r_\delta]
+D_j = Y_j^{\rho_i} \text{ for } j \in [0, n_B-1], \quad D_\delta = [\delta]_2^{\rho_i}
 $$
 $$
 M_i = R(\mathsf{vk},x)^{\rho_i} \in \mathbb{G}_T, \quad K_i = \text{Poseidon2}(\text{ser}_{\mathbb{G}_T}(M_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})
 $$
 
-**Decap:**
+**Decap (permissionless):**
 $$
-\tilde{M}_i = \left(\prod_{\ell=1}^{m} e(C_\ell, D_\ell)\right) \cdot \left(\prod_{a=1}^{r_\delta} e(\Theta_a, D_a)\right) = R(\mathsf{vk},x)^{\rho_i} = M_i
+\tilde{M}_i = \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, D_j)\right) \cdot e(X^{(B)}_\delta, D_\delta) \cdot e(C, D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
 $$
 K_i' = \text{Poseidon2}(\text{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})
