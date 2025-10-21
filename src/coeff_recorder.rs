@@ -8,7 +8,7 @@
 
 use ark_ec::pairing::Pairing;
 use ark_ec::{CurveGroup, AffineRepr};
-use ark_ff::{Field, Zero, One};
+use ark_ff::{Field, One};
 use ark_groth16::pvugc_hook::PvugcCoefficientHook;
 
 /// Coefficients extracted from Groth16 prover
@@ -101,7 +101,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     }
     
     /// Create DLREP proof for B coefficients
-    /// Proves: B - β - query[0] = s·δ + Σ b_j·query[1..]
+    /// Proves: B - β = s·δ + Σ b_j·query[j]
     pub fn create_dlrep_b<R: ark_std::rand::RngCore>(
         &self,
         pvugc_vk: &crate::api::PvugcVk<E>,
@@ -110,11 +110,10 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         use crate::dlrep::prove_b_msm;
         use ark_ec::CurveGroup;
         
-        let b_coeffs = &self.b_coeffs;  // These correspond to query[1..]
+        let b_coeffs = &self.b_coeffs;  // These correspond to b_g2_query[1..]
         let s = self.s.expect("s not recorded");
         
-        // B'' = s·δ + Σ b_j·query[1..]
-        // (NOT including β or query[0] - those are constants)
+        // Variable part: s·δ + Σ b_j·query[1..] (β and query[0] handled separately)
         let mut b_var = pvugc_vk.delta_g2.into_group() * s;
         for (b_j, y_j) in b_coeffs.iter().zip(&pvugc_vk.b_g2_query[1..]) {
             b_var += y_j.into_group() * b_j;
@@ -132,10 +131,9 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     }
     
     /// Create same-scalar tie proof
-    /// Proves: Σ C_ℓ = u_agg · A
+    /// Column-correct path: X_agg = Σ_j X_B_j(first limb) = (Σ_j coeff_j)·A
     pub fn create_dlrep_tie<R: ark_std::rand::RngCore>(
         &self,
-        gamma: &[Vec<E::ScalarField>],
         rng: &mut R,
     ) -> crate::dlrep::DlrepTieProof<E> {
         use crate::dlrep::prove_tie_aggregated;
@@ -143,20 +141,13 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         
         let a = self.a.expect("A not recorded");
         
-        // Full coefficients: [1 (β), 1 (query[0]), b_1, ...]
-        let mut full_coeffs = vec![E::ScalarField::one()];
-        full_coeffs.push(E::ScalarField::one());
+        // Full coefficients aligned to columns: [1 (β), 1 (query[0]), b_1, b_2, ...]
+        let mut full_coeffs = vec![E::ScalarField::one(), E::ScalarField::one()];
         full_coeffs.extend(self.b_coeffs.iter().copied());
         
-        // u_agg = Σ_ℓ (Σ_j Γ_ℓj · coeff_j)
+        // Column aggregation: u_agg = Σ_j coeff_j to match X_agg = Σ_j coeff_j·A
         let mut u_agg = E::ScalarField::zero();
-        for row in gamma {
-            let mut u_ell = E::ScalarField::zero();
-            for (g, c) in row.iter().zip(&full_coeffs) {
-                u_ell += *g * c;
-            }
-            u_agg += u_ell;
-        }
+        for c in &full_coeffs { u_agg += *c; }
         
         // x_agg = u_agg · A (verifier will compute Σ C_ℓ)
         let x_agg = (a.into_group() * u_agg).into_affine();
@@ -164,70 +155,53 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         prove_tie_aggregated(a, x_agg, u_agg, rng)
     }
     
-    /// Build GS commitments from recorded coefficients  
+    /// Build GS commitments from recorded coefficients (column-wise)
     pub fn build_commitments(
         &self,
-        _pvugc_vk: &crate::api::PvugcVk<E>,
-        gamma: &[Vec<E::ScalarField>],
     ) -> crate::decap::OneSidedCommitments<E> {
-        // Use the fixed get_aggregated_x_b (now includes constants)
-        let c_rows_values = self.get_aggregated_x_b(gamma);
-        let c_rows: Vec<_> = c_rows_values
-            .iter()
-            .map(|c| (*c, <E as Pairing>::G1Affine::zero()))
-            .collect();
-        
-        // θ = -C (to get e(-C, δ))
-        let neg_c = self.get_neg_c().expect("C not recorded");
-        let theta = vec![(neg_c, <E as Pairing>::G1Affine::zero())];
-        
-        // This cancels the -sA part in e(-C, δ)!
-        let a = self.a.expect("A not recorded").into_group();
-        let s = self.s.expect("s not recorded");
-        let s_a = (a * s).into_affine();
-        let c_delta = (s_a, <E as Pairing>::G1Affine::zero());
-        
-        crate::decap::OneSidedCommitments {
-            c_rows,
-            theta,
-            c_delta,
+        // Build per-column X_B_j limbs to mirror [β₂, b_g2_query[0], b_g2_query[1..], δ₂]
+        let a = self.a.expect("A not recorded");
+        let a_g = a.into_group();
+        // Columns: [A (β), A (b_g2_query[0]), b1·A, ..., b_{n-1}·A]
+        let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> = Vec::with_capacity(2 + self.b_coeffs.len());
+        // Column 0: β column = 1·A
+        x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
+        // Column 1: b_g2_query[0] constant row = 1·A (hook b_coeffs covers query[1..] only)
+        x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
+        // Columns 2.. = b_j · A aligned to b_g2_query[1..]
+        for b in self.b_coeffs.iter() {
+            x_b_cols.push(((a_g * b).into_affine(), <E as Pairing>::G1Affine::zero()));
         }
+        // No explicit δ column on B-side; δ-side provides e(C,
+        // δ) and e(A, s·δ) via Θ = C + sA
+
+        // δ-side bucket: use θ = -C + sA so e(θ, δ) = e(-C, δ) · e(A, δ)^s
+        // Combined with B-side (which omits the δ column), yields e(A,B) + e(-C, δ) = R
+        let s = self.s.expect("s not recorded");
+        let theta0 = ((a_g * s) - self.get_c().expect("C not recorded").into_group()).into_affine();
+        // Derive deterministic r_Theta from (A,C,s) to simulate RAND-row and provide canceller
+        use sha2::{Sha256, Digest};
+        use ark_ff::{PrimeField, BigInteger};
+        use ark_serialize::CanonicalSerialize;
+        let mut h = Sha256::new();
+        let a_aff = self.a.expect("A not recorded");
+        let c_aff = self.get_c().expect("C not recorded");
+        let mut buf = Vec::new();
+        a_aff.serialize_compressed(&mut buf).unwrap();
+        h.update(&buf); buf.clear();
+        c_aff.serialize_compressed(&mut buf).unwrap();
+        h.update(&buf); buf.clear();
+        h.update(&s.into_bigint().to_bytes_be());
+        let bytes = h.finalize();
+        let r_theta = <E as Pairing>::ScalarField::from_le_bytes_mod_order(&bytes);
+        let rand_limb = (a_g * r_theta).into_affine();
+        // RAND-row limbs for Θ and matching canceller to neutralize rand_limb pairing against δ2
+        let theta = vec![(theta0, rand_limb)];
+        let theta_delta_cancel = (rand_limb.into_group().neg().into_affine(), <E as Pairing>::G1Affine::zero());
+        
+        crate::decap::OneSidedCommitments { x_b_cols, theta, theta_delta_cancel }
     }
     
-    /// Get aggregated X^(B) values for GS
-    /// Computes row aggregates: C_ℓ = Σ Γ_ℓj · coeff_j · A
-    /// where coeffs = [1 (β), 1 (query[0]), b_1, b_2, ...]
-    pub fn get_aggregated_x_b(
-        &self,
-        gamma: &[Vec<E::ScalarField>],
-    ) -> Vec<E::G1Affine> {
-        let a = self.a.expect("A not recorded");
-        let a_group = a.into_group();
-        
-        // Full coefficient vector includes constants
-        // [1 for β, 1 for query[0], b_1, b_2, ...]
-        let mut full_coeffs = vec![E::ScalarField::one()];  // β coefficient
-        full_coeffs.push(E::ScalarField::one());  // query[0] coefficient
-        full_coeffs.extend(self.b_coeffs.iter().copied());  // Variable coefficients
-        
-        // For each row ℓ in Γ:
-        // C_ℓ = Σ_j Γ_ℓj · coeff_j · A = (Σ_j Γ_ℓj · coeff_j) · A
-        let mut result = Vec::with_capacity(gamma.len());
-        
-        for row in gamma {
-            // Compute u_ℓ = Σ_j Γ_ℓj · coeff_j
-            let mut u_ell = E::ScalarField::zero();
-            for (gamma_ell_j, coeff_j) in row.iter().zip(&full_coeffs) {
-                u_ell += *gamma_ell_j * coeff_j;
-            }
-            
-            // C_ℓ = u_ℓ · A
-            let c_ell = (a_group * u_ell).into_affine();
-            result.push(c_ell);
-        }
-        
-        result
-    }
 }
 
 use std::ops::Neg;
@@ -241,8 +215,7 @@ impl<E: Pairing> Default for SimpleCoeffRecorder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
-    use ark_std::UniformRand;
+    use ark_bls12_381::Bls12_381;
     
     type E = Bls12_381;
     
@@ -258,51 +231,5 @@ mod tests {
         
     }
     
-    #[test]
-    fn test_aggregated_x_computation() {
-        use ark_std::test_rng;
-        use ark_ec::AffineRepr;
-        use ark_groth16::pvugc_hook::PvugcCoefficientHook;
-        
-        let mut rng = test_rng();
-        
-        let mut recorder = SimpleCoeffRecorder::<E>::new();
-        
-        let a = G1Affine::rand(&mut rng);
-        let b_scalars = vec![Fr::from(2u64), Fr::from(3u64)];
-        let s = Fr::from(7u64);
-        let beta_g2 = G2Affine::rand(&mut rng);
-        let b_g2_query = vec![G2Affine::rand(&mut rng); 2];
-        
-        // Call the hook method directly to populate recorder
-        recorder.on_b_computed(&b_scalars, &a, &beta_g2, &b_g2_query, &s);
-        
-        // Gamma matrix: 4x4 identity (for [1(β), 1(query[0]), b_1, b_2])
-        let gamma = vec![
-            vec![Fr::from(1u64), Fr::from(0u64), Fr::from(0u64), Fr::from(0u64)],
-            vec![Fr::from(0u64), Fr::from(1u64), Fr::from(0u64), Fr::from(0u64)],
-            vec![Fr::from(0u64), Fr::from(0u64), Fr::from(1u64), Fr::from(0u64)],
-            vec![Fr::from(0u64), Fr::from(0u64), Fr::from(0u64), Fr::from(1u64)],
-        ];
-        
-        let x_b_agg = recorder.get_aggregated_x_b(&gamma);
-        
-        assert_eq!(x_b_agg.len(), 4);
-        
-        // C_0 = 1·A (β coefficient)
-        assert_eq!(x_b_agg[0], a);
-        
-        // C_1 = 1·A (query[0] coefficient)
-        assert_eq!(x_b_agg[1], a);
-        
-        // C_2 = 2·A (b_1)
-        let expected_c2 = (a.into_group() * Fr::from(2u64)).into_affine();
-        assert_eq!(x_b_agg[2], expected_c2);
-        
-        // C_3 = 3·A (b_2)
-        let expected_c3 = (a.into_group() * Fr::from(3u64)).into_affine();
-        assert_eq!(x_b_agg[3], expected_c3);
-        
-    }
 }
 

@@ -4,7 +4,7 @@
 
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::AffineRepr;
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, Field};
 use ark_groth16::VerifyingKey as Groth16VK;
 use ark_serialize::CanonicalSerialize;
 use ark_std::Zero;
@@ -40,6 +40,32 @@ pub struct PvugcVk<E: Pairing> {
     pub beta_g2: E::G2Affine,
     pub delta_g2: E::G2Affine,
     pub b_g2_query: Vec<E::G2Affine>,
+}
+
+/// Validate subgroup membership for Groth16 VK elements
+/// - G1: alpha_g1 and all gamma_abc_g1 entries must be in the prime-order subgroup
+/// - G2: beta_g2, gamma_g2, delta_g2 must be non-zero and in the prime-order subgroup
+pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
+    use ark_ff::PrimeField;
+    let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+
+    let is_good_g1 = |g: &E::G1Affine| {
+        if g.is_zero() { return false; }
+        g.mul_bigint(order).is_zero()
+    };
+    let is_good_g2 = |g: &E::G2Affine| {
+        if g.is_zero() { return false; }
+        g.mul_bigint(order).is_zero()
+    };
+
+    if !is_good_g1(&vk.alpha_g1) { return false; }
+    for g in &vk.gamma_abc_g1 {
+        if !g.mul_bigint(order).is_zero() { return false; }
+    }
+    if !is_good_g2(&vk.beta_g2) { return false; }
+    if !is_good_g2(&vk.gamma_g2) { return false; }
+    if !is_good_g2(&vk.delta_g2) { return false; }
+    true
 }
 
 /// Extract Y_j bases from PVUGC-VK for B-side PPE
@@ -78,33 +104,22 @@ pub fn derive_gamma_rademacher<E: Pairing>(
     vk: &Groth16VK<E>,
     num_rows: usize,
 ) -> Vec<Vec<E::ScalarField>> {
-    // Seed = H("PVUGC/Γ" || vk_digest || beta || delta || hash(b_g2_query))
+    use sha2::Digest;
     let mut hasher = Sha256::new();
     hasher.update(b"PVUGC/GAMMA/v1");
-    // vk digest (γ_abc_g1, α, β, γ, δ)
     let mut tmp = Vec::new();
     vk.alpha_g1.serialize_compressed(&mut tmp).unwrap();
     vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
     vk.gamma_g2.serialize_compressed(&mut tmp).unwrap();
     vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-    for g in &vk.gamma_abc_g1 {
-        g.serialize_compressed(&mut tmp).unwrap();
-    }
-    hasher.update(&tmp);
-    tmp.clear();
+    for g in &vk.gamma_abc_g1 { g.serialize_compressed(&mut tmp).unwrap(); }
     pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
     pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
+    for y in &pvugc_vk.b_g2_query { y.serialize_compressed(&mut tmp).unwrap(); }
     hasher.update(&tmp);
-    tmp.clear();
-    for y in &pvugc_vk.b_g2_query {
-        y.serialize_compressed(&mut tmp).unwrap();
-    }
-    let b_query_digest = Sha256::digest(&tmp);
-    hasher.update(&b_query_digest);
     let seed = hasher.finalize();
 
-    // Expand to Rademacher entries in {-1,0,+1}; bias sparse 0s lightly
-    let cols = 1 + pvugc_vk.b_g2_query.len(); // {β} ∪ b_g2_query
+    let cols = 1 + pvugc_vk.b_g2_query.len();
     let mut gamma: Vec<Vec<E::ScalarField>> = Vec::with_capacity(num_rows);
     let mut ctr: u64 = 0;
     while gamma.len() < num_rows {
@@ -115,7 +130,7 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             h.update(&ctr.to_le_bytes());
             h.update(&j.to_le_bytes());
             let out = h.finalize();
-            let v = out[0] % 3; // 0,1,2
+            let v = out[0] % 3;
             let sf = match v {
                 0 => E::ScalarField::from(-1i64),
                 1 => E::ScalarField::from(0u64),
@@ -123,20 +138,177 @@ pub fn derive_gamma_rademacher<E: Pairing>(
             };
             row.push(sf);
         }
-        // Avoid all-zero rows
-        let mut nonzero = false;
-        for c in &row {
-            if !c.is_zero() {
-                nonzero = true;
-                break;
-            }
-        }
-        if nonzero {
+        // enforce non-zero and no duplicate rows
+        if row.iter().any(|c| !c.is_zero()) && !gamma.iter().any(|r| r == &row) {
             gamma.push(row);
         }
         ctr += 1;
     }
     gamma
+}
+
+/// Validate structural properties of Γ
+/// - No all-zero rows
+/// - Each row has at least `min_nonzero_per_row` non-zero entries
+/// - Optionally require that every column has at least one non-zero entry
+/// - Optionally require full row rank (over the scalar field)
+pub fn validate_gamma_structure<E: Pairing>(
+    gamma: &[Vec<E::ScalarField>],
+    min_nonzero_per_row: usize,
+    require_all_columns_covered: bool,
+    require_full_row_rank: bool,
+) -> bool {
+    if gamma.is_empty() { return false; }
+    let cols = gamma[0].len();
+    if cols == 0 { return false; }
+    for row in gamma {
+        if row.len() != cols { return false; }
+        let mut nonzero = 0usize;
+        for c in row {
+            if !c.is_zero() { nonzero += 1; }
+        }
+        if nonzero < min_nonzero_per_row { return false; }
+    }
+    if require_all_columns_covered {
+        for j in 0..cols {
+            let mut covered = false;
+            for row in gamma {
+                if !row[j].is_zero() { covered = true; break; }
+            }
+            if !covered { return false; }
+        }
+    }
+    if require_full_row_rank {
+        if matrix_row_rank::<E>(gamma) < gamma.len() { return false; }
+    }
+    true
+}
+
+/// Compute the row rank of a matrix over the scalar field using Gaussian elimination
+fn matrix_row_rank<E: Pairing>(gamma: &[Vec<E::ScalarField>]) -> usize {
+    let rows = gamma.len();
+    if rows == 0 { return 0; }
+    let cols = gamma[0].len();
+    let mut a = gamma.to_vec();
+    let mut rank = 0usize;
+    let mut col = 0usize;
+    while rank < rows && col < cols {
+        // Find pivot
+        let mut pivot = rank;
+        while pivot < rows && a[pivot][col].is_zero() { pivot += 1; }
+        if pivot == rows { col += 1; continue; }
+        a.swap(rank, pivot);
+        // Normalize pivot row
+        if let Some(inv) = a[rank][col].inverse() {
+            for j in col..cols { a[rank][j] *= inv; }
+        }
+        // Eliminate other rows
+        for i in 0..rows {
+            if i == rank { continue; }
+            let factor = a[i][col];
+            if factor.is_zero() { continue; }
+            for j in col..cols {
+                let mut t = a[rank][j];
+                t *= factor;
+                a[i][j] -= t;
+            }
+        }
+        rank += 1;
+        col += 1;
+    }
+    rank
+}
+
+/// Derive Γ with additional entropy and structural safeguards.
+/// This function mixes an external, non-attacker-controlled `extra_entropy` into the seed,
+/// draws `and_k` independent Γ candidates with distinct domain tags, then combines them
+/// entry-wise by choosing the first non-zero among the candidates (reduces forced zeros).
+/// It repeats up to `max_tries` until structural validation passes.
+pub fn derive_gamma_secure<E: Pairing>(
+    pvugc_vk: &PvugcVk<E>,
+    vk: &Groth16VK<E>,
+    extra_entropy: &[u8],
+    num_rows: usize,
+    and_k: usize,
+    min_nonzero_per_row: usize,
+    require_all_columns_covered: bool,
+    require_full_row_rank: bool,
+    max_tries: usize,
+) -> Vec<Vec<E::ScalarField>> {
+    let cols = 1 + pvugc_vk.b_g2_query.len();
+    let mut attempt = 0usize;
+    loop {
+        // Draw and_k candidates with domain separation
+        let mut candidates: Vec<Vec<Vec<E::ScalarField>>> = Vec::with_capacity(and_k);
+        for k in 0..and_k {
+            // Domain-separated seed: include k and extra entropy
+            let mut hasher = Sha256::new();
+            hasher.update(b"PVUGC/GAMMA_SECURE/v1");
+            hasher.update(&(k as u64).to_le_bytes());
+            hasher.update(extra_entropy);
+            // vk digest and pvugc-vk components
+            let mut tmp = Vec::new();
+            vk.alpha_g1.serialize_compressed(&mut tmp).unwrap();
+            vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
+            vk.gamma_g2.serialize_compressed(&mut tmp).unwrap();
+            vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
+            for g in &vk.gamma_abc_g1 { g.serialize_compressed(&mut tmp).unwrap(); }
+            hasher.update(&tmp);
+            tmp.clear();
+            pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
+            pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
+            for y in &pvugc_vk.b_g2_query { y.serialize_compressed(&mut tmp).unwrap(); }
+            hasher.update(&tmp);
+            let seed = hasher.finalize();
+
+            // Expand to Rademacher candidates
+            let mut gamma_k: Vec<Vec<E::ScalarField>> = Vec::with_capacity(num_rows);
+            let mut ctr: u64 = 0;
+            while gamma_k.len() < num_rows {
+                let mut row = Vec::with_capacity(cols);
+                for j in 0..cols {
+                    let mut h = Sha256::new();
+                    h.update(&seed);
+                    h.update(&ctr.to_le_bytes());
+                    h.update(&j.to_le_bytes());
+                    let out = h.finalize();
+                    let v = out[0] % 3; // 0,1,2
+                    let sf = match v {
+                        0 => E::ScalarField::from(-1i64),
+                        1 => E::ScalarField::from(0u64),
+                        _ => E::ScalarField::from(1u64),
+                    };
+                    row.push(sf);
+                }
+                // Avoid all-zero rows
+                let mut nonzero = false;
+                for c in &row { if !c.is_zero() { nonzero = true; break; } }
+                if nonzero { gamma_k.push(row); }
+                ctr += 1;
+            }
+            candidates.push(gamma_k);
+        }
+
+        // Combine entry-wise: choose first non-zero among candidates to reduce sparsity
+        let mut gamma: Vec<Vec<E::ScalarField>> = vec![vec![E::ScalarField::zero(); cols]; num_rows];
+        for i in 0..num_rows {
+            for j in 0..cols {
+                let mut val = E::ScalarField::zero();
+                for k in 0..and_k {
+                    let v = candidates[k][i][j];
+                    if !v.is_zero() { val = v; break; }
+                }
+                gamma[i][j] = val;
+            }
+        }
+
+        if validate_gamma_structure::<E>(&gamma, min_nonzero_per_row, require_all_columns_covered, require_full_row_rank) {
+            return gamma;
+        }
+
+        attempt += 1;
+        if attempt >= max_tries { return gamma; }
+    }
 }
 
 /// Validate subgroup membership for PVUGC-VK G₂ elements

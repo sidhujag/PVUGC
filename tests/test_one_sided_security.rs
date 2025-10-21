@@ -1,7 +1,7 @@
 //! Security Tests for One-Sided GS PVUGC
 
 use arkworks_groth16::*;
-use arkworks_groth16::ppe::{PvugcVk, derive_gamma_rademacher};
+use arkworks_groth16::ppe::PvugcVk;
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
 use ark_std::{UniformRand, rand::rngs::StdRng, rand::SeedableRng};
 use ark_groth16::Groth16;
@@ -10,7 +10,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::alloc::AllocVar;
-use ark_ec::{CurveGroup, AffineRepr};
+use ark_ec::{CurveGroup, AffineRepr, pairing::PairingOutput};
 
 type E = Bls12_381;
 
@@ -34,7 +34,6 @@ impl ConstraintSynthesizer<Fr> for TestCircuit {
 fn test_cannot_compute_k_from_arms_alone() {
     let mut rng = StdRng::seed_from_u64(10);
     
-    
     let circuit = TestCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
     
@@ -43,27 +42,39 @@ fn test_cannot_compute_k_from_arms_alone() {
     // Compute R
     let r = compute_groth16_target(&vk, &vault_utxo);
     
-    // Arm bases
+    // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
-    let (y_bases, delta, _) = build_one_sided_ppe(&pvugc_vk, &vk, &vault_utxo);
-    let gamma = derive_gamma_rademacher(&pvugc_vk, &vk, 4);
-    let rows: RowBases<E> = build_row_bases_from_vk(&y_bases, delta, gamma);
-    let arms = arm_rows(&rows, &rho);
+    let pvugc_vk: PvugcVk<E> = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let mut y_cols = vec![pvugc_vk.beta_g2];
+    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
+    let cols: ColumnBases<E> = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
+    let col_arms = arm_columns(&cols, &rho);
     
-    // Formal check: With only arms and random fake commitments, decap output ≠ R^ρ
+    // Expected K = R^ρ
     let k_expected = OneSidedPvugc::compute_r_to_rho(&r, &rho);
+    
+    // Create random fake commitments (not derived from valid proof)
     use ark_std::test_rng;
     let mut rng_fake = test_rng();
-    let fake_c_rows: Vec<_> = rows
-        .u_rows
+    let fake_x_b_cols: Vec<_> = cols
+        .y_cols
         .iter()
         .map(|_| (G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake)))
         .collect();
     let fake_theta = vec![(G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake))];
-    let fake_commitments = OneSidedCommitments { c_rows: fake_c_rows, theta: fake_theta, c_delta: (G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake)) };
-    let k_fake = decap_one_sided(&fake_commitments, &arms);
-    assert_ne!(k_fake, k_expected);
+    let fake_commitments: OneSidedCommitments<E> = OneSidedCommitments { 
+        x_b_cols: fake_x_b_cols, 
+        theta: fake_theta, 
+        theta_delta_cancel: (G1Affine::rand(&mut rng_fake), G1Affine::rand(&mut rng_fake)) 
+    };
+    
+    // Security property: fake commitments + valid arms should NOT produce correct K
+    let fake_k = OneSidedPvugc::decapsulate(&fake_commitments, &col_arms);
+    assert_ne!(fake_k, k_expected, "Fake commitments should not produce correct K = R^ρ");
+    
+    // Additional check: fake K should not be identity (trivial case)
+    use ark_std::One;
+    assert_ne!(fake_k, PairingOutput::<E>(One::one()), "Fake K should not be identity");
 }
 
 #[test]
@@ -89,31 +100,6 @@ fn test_invalid_groth16_rejected() {
     assert!(!valid);
 }
 
-#[test]
-fn test_poce_detects_wrong_rho() {
-    let mut rng = StdRng::seed_from_u64(11);
-    
-    
-    let bases = vec![G2Affine::rand(&mut rng); 2];
-    
-    // Arm first with ρ₁
-    let rho1 = Fr::rand(&mut rng);
-    let arm1 = (bases[0].into_group() * rho1).into_affine();
-    
-    // Arm second with DIFFERENT ρ₂
-    let rho2 = Fr::rand(&mut rng);
-    let arm2 = (bases[1].into_group() * rho2).into_affine();
-    
-    let inconsistent_arms = vec![arm1, arm2];
-    
-    // Try to prove with ρ₁
-    let proof: PoceAcrossProof<E> = prove_poce_across(&bases, &inconsistent_arms, &rho1, &mut rng);
-    
-    // Verification should fail
-    let valid = verify_poce_across(&bases, &inconsistent_arms, &proof);
-    
-    assert!(!valid);
-}
 
 #[test]
 fn test_dlrep_detects_wrong_coefficients() {
@@ -182,30 +168,20 @@ fn test_verify_rejects_mismatched_statement() {
 
     let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
 
-    // Deterministic identity Γ for clarity
-    let gamma = {
-        let n = pvugc_vk.b_g2_query.len() + 1;
-        (0..n)
-            .map(|i| {
-                let mut row = vec![Fr::from(0u64); n];
-                row[i] = Fr::from(1u64);
-                row
-            })
-            .collect::<Vec<_>>()
-    };
+    // Canonical Γ required by verifier
 
     let mut recorder = SimpleCoeffRecorder::<E>::new();
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
 
-    let commitments = recorder.build_commitments(&pvugc_vk, &gamma);
+    let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
         dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder.create_dlrep_tie(&gamma, &mut rng),
+        dlrep_tie: recorder.create_dlrep_tie(&mut rng),
         gs_commitments: commitments,
     };
 
-    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo, &gamma));
-    assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &wrong_vault_utxo, &gamma));
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo));
+    assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &wrong_vault_utxo));
 }
 

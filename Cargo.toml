@@ -16,21 +16,20 @@ ark-bls12-381 = "0.5"
 ark-ec = "0.5"
 ark-ff = "0.5"
 ark-groth16 = { path = "ark-groth16-pvugc" }
-ark-r1cs-std = "0.5"
-ark-relations = "0.5"
 ark-serialize = "0.5"
-ark-snark = "0.5"
 ark-std = "0.5"
+ark-relations = "0.5"
+ark-srs = "0.5"
+ark-schnorr = "0.5"
 ark-crypto-primitives = { version = "0.5", features = ["r1cs", "crh"] }
+
+# New hardening deps
 subtle = "2.5"
 zeroize = "1.6"
 hkdf = "0.12"
 sha2 = "0.10"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 rand_core = "0.6"
-
-# Crypto primitives
-sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

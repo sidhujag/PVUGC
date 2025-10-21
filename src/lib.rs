@@ -29,11 +29,11 @@ pub mod ct;
 pub mod pvugc_aead;
 
 // Re-exports - Public API
-pub use arming::{RowBases, Arms, arm_rows, build_row_bases_from_vk};
+pub use arming::{ColumnBases, ColumnArms, arm_columns};
 pub use coeff_recorder::{CoefficientRecorder, BCoefficients, SimpleCoeffRecorder};
 pub use dlrep::{DlrepBProof, DlrepTieProof, prove_b_msm, verify_b_msm, prove_tie_aggregated, verify_tie_aggregated};
-pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, derive_gamma_rademacher, PvugcVk};
-pub use decap::{decap_one_sided, OneSidedCommitments};
-pub use poce::{PoceAcrossProof, prove_poce_across, verify_poce_across};
+pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, PvugcVk};
+pub use decap::OneSidedCommitments;
+pub use poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
 pub use api::{OneSidedPvugc, PvugcBundle};
 

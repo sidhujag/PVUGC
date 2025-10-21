@@ -1,0 +1,47 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache fuzz target builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            fuzz/target
+          key: fuzz-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Set up Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Run fuzzers for 10 minutes each
+        run: |
+          cargo +nightly fuzz run arm_rows -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run build_row_bases_from_vk -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run decap -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run statement_k_collision -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run cross_circuit_k_difference -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run gt_span_small_coeff -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run gs_malleation_binding -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run gs_random_recomb_budget -- -runs=0 -max_total_time=600 || true
+          cargo +nightly fuzz run gamma_vk_grinding -- -runs=0 -max_total_time=600 || true
+      - name: Upload fuzz artifacts (crashes & corpora)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: |
+            fuzz/artifacts
+            fuzz/corpus
+

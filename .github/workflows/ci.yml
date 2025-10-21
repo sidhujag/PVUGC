@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-stable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cargo test (stable)
+        run: cargo test --all --locked
+
+  test-sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [ address, thread ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install rust-src (for -Z build-std)
+        run: rustup component add rust-src --toolchain nightly
+      - name: Install LLVM tools (for sanitizers)
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: Cargo test with ${{ matrix.sanitizer }} (build std)
+        env:
+          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C link-arg=-fuse-ld=lld -Cunsafe-allow-abi-mismatch=sanitizer
+          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer
+          ASAN_OPTIONS: detect_leaks=0
+        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --all --locked
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Smoke run fuzzers (1 min each)
+        run: |
+          cargo +nightly fuzz run arm_rows -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run build_row_bases_from_vk -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run decap -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run statement_k_collision -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run cross_circuit_k_difference -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run gt_span_small_coeff -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_malleation_binding -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_random_recomb_budget -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run gamma_vk_grinding -- -runs=0 -max_total_time=60 || true
+

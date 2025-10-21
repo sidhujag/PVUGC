@@ -3,93 +3,48 @@
 //! Computes K = R^ρ using armed bases and GS commitments
 
 use ark_ec::pairing::{Pairing, PairingOutput};
-use crate::arming::Arms;
+use crate::arming::ColumnArms;
+use ark_ec::AffineRepr;
+use ark_std::Zero;
 
 /// GS commitments for one-sided PPE
 #[derive(Clone, Debug)]
 pub struct OneSidedCommitments<E: Pairing> {
-    /// Row commitments: C_ℓ (both limbs)
-    pub c_rows: Vec<(E::G1Affine, E::G1Affine)>,
-    
-    /// Theta proofs (for randomness cancellation)
+    /// Column commitments for B-side: X_B_j limbs per column
+    pub x_b_cols: Vec<(E::G1Affine, E::G1Affine)>,
+    /// Theta/C-side limbs per Υ row (keep vector for zipping to W)
     pub theta: Vec<(E::G1Affine, E::G1Affine)>,
-    
-    /// C commitment (for delta term)
-    pub c_delta: (E::G1Affine, E::G1Affine),
+    /// Canceller limbs for the δ-side Θ commitment (rank=1). REQUIRED.
+    pub theta_delta_cancel: (E::G1Affine, E::G1Affine),
 }
 
-/// Decapsulate to get K = R^ρ
-///
-/// Uses one-sided buckets: rows with U_ℓ^ρ and Θ with δ^ρ (both limbs)
-/// K = (∏_ℓ e(C_ℓ, U_ℓ^ρ)) · e(Theta, W^ρ)
-pub fn decap_one_sided<E: Pairing>(
+/// Canonical decapsulation: K = R^ρ using column arms
+pub fn decap<E: Pairing>(
     commitments: &OneSidedCommitments<E>,
-    arms: &Arms<E>,
+    col_arms: &ColumnArms<E>,
 ) -> PairingOutput<E> {
-    // Initialize with ONE (multiplicative identity)
+    use ark_ff::PrimeField;
+    let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+    let is_good_g1 = |g: &E::G1Affine| {
+        if g.is_zero() { return true; }
+        g.mul_bigint(order).is_zero()
+    };
+    if commitments.x_b_cols.len() != col_arms.y_cols_rho.len() { panic!("|X_B| != |Y^rho|"); }
+    for (a,b) in &commitments.x_b_cols { if !is_good_g1(a) || !is_good_g1(b) { panic!("Invalid X_B limb"); } }
+    for (a,b) in &commitments.theta { if !is_good_g1(a) || !is_good_g1(b) { panic!("Invalid theta limb"); } }
     use ark_std::One;
     let mut k = PairingOutput::<E>(One::one());
-    
-    // B1: Pair row commitments (both limbs) with U_ℓ^ρ
-    for (c_row, u_rho) in commitments.c_rows.iter().zip(&arms.u_rows_rho) {
-        k += E::pairing(c_row.0, *u_rho);  // First limb
-        k += E::pairing(c_row.1, *u_rho);  // Second limb
+    for ((x0, x1), y_rho) in commitments.x_b_cols.iter().zip(&col_arms.y_cols_rho) {
+        k += E::pairing(*x0, *y_rho);
+        k += E::pairing(*x1, *y_rho);
     }
-    
-    // Theta/C-side: Pair Theta commitments (both limbs) with single W^ρ = δ^ρ
-    if let Some(w_rho) = arms.w_rows_rho.first() {
-        // θ = -C
-        for theta in &commitments.theta {
-            k += E::pairing(theta.0, *w_rho);
-            k += E::pairing(theta.1, *w_rho);
-        }
-        
-        k += E::pairing(commitments.c_delta.0, *w_rho);
-        k += E::pairing(commitments.c_delta.1, *w_rho);
+    for (t0, t1) in &commitments.theta {
+        k += E::pairing(*t0, col_arms.delta_rho);
+        k += E::pairing(*t1, col_arms.delta_rho);
     }
-    
-    // K = R(vk,x)^ρ
+    let (c0, c1) = commitments.theta_delta_cancel;
+    k += E::pairing(c0, col_arms.delta_rho);
+    k += E::pairing(c1, col_arms.delta_rho);
     k
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ark_bls12_381::{Bls12_381, G1Affine, G2Affine};
-    use ark_std::{test_rng, UniformRand};
-    
-    type E = Bls12_381;
-    
-    #[test]
-    fn test_decap_structure() {
-        let mut rng = test_rng();
-        
-        // Create mock armed bases
-        let u_rows_rho = vec![G2Affine::rand(&mut rng); 2];
-        let w_rows_rho = vec![G2Affine::rand(&mut rng)];
-        
-        let arms: Arms<E> = Arms { u_rows_rho, w_rows_rho };
-        
-        // Create mock GS commitments
-        let commitments = OneSidedCommitments {
-            c_rows: vec![
-                (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
-                (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
-            ],
-            theta: vec![
-                (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
-                (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
-            ],
-            c_delta: (G1Affine::rand(&mut rng), G1Affine::rand(&mut rng)),
-        };
-        
-        // Decap
-        let k = decap_one_sided(&commitments, &arms);
-        
-        // K should be non-zero (in general)
-        
-        // Test uses mock data, but structure is correct
-        let _ = k;
-    }
 }
 

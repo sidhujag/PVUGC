@@ -104,42 +104,4 @@ fn test_recorder_captures_c() {
     assert!(sum.into_affine().is_zero());
 }
 
-#[test]
-fn test_recorder_aggregates_correctly() {
-    let mut rng = StdRng::seed_from_u64(202);
-    
-    
-    let circuit = TestCircuit {
-        x: Some(Fr::from(25u64)),
-        y: Some(Fr::from(5u64)),
-    };
-    
-    let (pk, _vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    
-    let _proof = Groth16::<E>::create_random_proof_with_hook(
-        circuit,
-        &pk,
-        &mut rng,
-        &mut recorder,
-    ).unwrap();
-    
-    
-    // Get coefficients through public API
-    let coeffs = recorder.get_coefficients().expect("Should have coefficients");
-    let n = coeffs.b.len();
-    
-    // Test aggregation with small identity matrix
-    let gamma: Vec<Vec<Fr>> = (0..n.min(3)).map(|i| {
-        let mut row = vec![Fr::from(0u64); n];
-        row[i] = Fr::from(1u64);
-        row
-    }).collect();
-    
-    let x_b_agg = recorder.get_aggregated_x_b(&gamma);
-    
-    assert_eq!(x_b_agg.len(), n.min(3));
-    
-}
 
