@@ -356,6 +356,8 @@ dependencies = [
  "ark-ec",
  "ark-ff",
  "ark-groth16",
+ "ark-mnt4-298",
+ "ark-mnt6-298",
  "ark-r1cs-std",
  "ark-relations",
  "ark-serialize",
