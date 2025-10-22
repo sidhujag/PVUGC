@@ -271,10 +271,9 @@ mod tests {
     use ark_groth16::Groth16;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
-    use ark_std::UniformRand;
 
     use crate::test_circuits::AddCircuit;
-    use crate::test_fixtures::{get_fixture, get_fixture_mnt};
+    use crate::test_fixtures::{get_fixture, get_fixture_mnt, GlobalFixture};
 
     fn smoke_test_for_cycle<C: ProvidesFixture>() {
         let mut rng = StdRng::seed_from_u64(12345);
@@ -333,55 +332,55 @@ mod tests {
     #[test]
     #[ignore]
     fn test_pvugc_on_outer_proof_e2e() {
+        e2e_outer_proof_for::<DefaultCycle>(get_fixture(), 99999);
+        e2e_outer_proof_for::<Mnt4Mnt6Cycle>(get_fixture_mnt(), 99999);
+    }
+
+    fn e2e_outer_proof_for<C: RecursionCycle>(fixture: GlobalFixture<C>, rng_seed: u64) {
+        use crate::coeff_recorder::SimpleCoeffRecorder;
         use ark_snark::SNARK;
         use ark_std::rand::rngs::StdRng;
         use ark_std::rand::SeedableRng;
+        use ark_std::UniformRand;
         use std::sync::Arc;
         use std::time::Instant;
 
-        let mut rng = StdRng::seed_from_u64(99999);
-        let fixture = get_fixture();
+        let mut rng = StdRng::seed_from_u64(rng_seed);
         eprintln!(
             "[timing:{}] outer setup cached in {:?}",
-            DefaultCycle::name(),
+            C::name(),
             fixture.outer_setup_time
         );
+
         let pk_outer = Arc::clone(&fixture.pk_outer_recursive);
         let vk_outer = Arc::clone(&fixture.vk_outer_recursive);
 
-        let x = InnerFr::from(42u64);
+        let x = InnerScalar::<C>::from(42u64);
         let public_x = vec![x];
         let circuit_inner = AddCircuit::with_public_input(x);
         let inner_start = Instant::now();
         let proof_inner =
-            Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng).unwrap();
+            Groth16::<C::InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng).unwrap();
         eprintln!(
             "[timing:{}] inner Groth16 proof {:?}",
-            DefaultCycle::name(),
+            C::name(),
             inner_start.elapsed()
         );
 
-        let rho = OuterFr::rand(&mut rng);
+        let rho = OuterScalar::<C>::rand(&mut rng);
         let pvugc_vk = fixture.pvugc_vk_outer_recursive.clone();
+        let bases = crate::pvugc_outer::build_column_bases_outer_for::<C>(&pvugc_vk);
+        let col_arms = crate::pvugc_outer::arm_columns_outer_for::<C>(&bases, &rho);
 
-        let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        let bases = crate::arming::ColumnBases::<OuterE> {
-            y_cols,
-            delta: pvugc_vk.delta_g2,
-        };
-        let col_arms = crate::arming::arm_columns(&bases, &rho);
-
-        let outer_circuit = OuterCircuit::<DefaultCycle>::new(
+        let outer_circuit = OuterCircuit::<C>::new(
             fixture.vk_inner.as_ref().clone(),
             public_x.clone(),
             proof_inner.clone(),
         );
 
-        use crate::coeff_recorder::SimpleCoeffRecorder;
-        let mut recorder = SimpleCoeffRecorder::<OuterE>::new();
+        let mut recorder = SimpleCoeffRecorder::<C::OuterE>::new();
         let outer_start = Instant::now();
-        let proof_outer = ark_groth16::Groth16::<OuterE>::create_random_proof_with_hook(
+        let proof_outer = ark_groth16::Groth16::<C::OuterE>::create_random_proof_with_hook(
             outer_circuit,
             &*pk_outer,
             &mut rng,
@@ -390,23 +389,19 @@ mod tests {
         .unwrap();
         eprintln!(
             "[timing:{}] outer Groth16 proof {:?}",
-            DefaultCycle::name(),
+            C::name(),
             outer_start.elapsed()
         );
 
-        assert!(verify_outer(&*vk_outer, &public_x, &proof_outer).unwrap());
+        assert!(verify_outer_for::<C>(&*vk_outer, &public_x, &proof_outer).unwrap());
 
         let decap_start = Instant::now();
         let gs_commitments = recorder.build_commitments();
         let k_decapped = crate::decap::decap(&gs_commitments, &col_arms);
-        eprintln!(
-            "[timing:{}] decap {:?}",
-            DefaultCycle::name(),
-            decap_start.elapsed()
-        );
+        eprintln!("[timing:{}] decap {:?}", C::name(), decap_start.elapsed());
 
-        let r = crate::pvugc_outer::compute_target_outer(&*vk_outer, &public_x);
-        let k_expected = crate::pvugc_outer::compute_r_to_rho_outer(&r, &rho);
+        let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &public_x);
+        let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
         assert_eq!(k_decapped, k_expected, "Decapsulated K doesn't match R^ρ!");
     }
