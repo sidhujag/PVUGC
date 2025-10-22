@@ -72,7 +72,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Statement-only PVUGC VK
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
     // Canonical column setup and arming
     let (_bases, col_arms, _r, k_expected_from_setup) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x], &rho);

@@ -56,7 +56,7 @@ fuzz_target!(|data: &[u8]| {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
     let circuit = SqCircuit { x: Some(x), y: Some(y) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
     // Make one valid proof and commitments
     let mut recorder = SimpleCoeffRecorder::<E>::new();

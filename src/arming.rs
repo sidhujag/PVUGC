@@ -57,16 +57,6 @@ pub struct ColumnArms<E: Pairing> {
 ///
 /// **Security note**: This function assumes `bases` have been validated.
 /// Call `bases.validate_subgroups()` ONCE when keys are first generated/loaded.
-///
-/// **Production usage**:
-/// ```ignore
-/// // At key loading/generation (ONCE):
-/// let bases = build_column_bases(&vk, &pk);
-/// bases.validate_subgroups().expect("Invalid Groth16 keys");
-/// 
-/// // During runtime (FAST, repeated many times):
-/// let arms = arm_columns(&bases, &rho);  // No validation overhead
-/// ```
 pub fn arm_columns<E: Pairing>(bases: &ColumnBases<E>, rho: &E::ScalarField) -> ColumnArms<E> {
     if rho.is_zero() { panic!("rho must be non-zero"); }
     

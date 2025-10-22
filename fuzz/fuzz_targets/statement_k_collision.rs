@@ -74,7 +74,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Construct pvugc-vk wrapper from pk and vk
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
 
     // Canonical column setup once (arms independent of x)

@@ -66,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
     let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     // Build PVUGC VK using vk and pk-like fields where needed; here only vk is used
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: vec![] };
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(vec![]) };
 
     // Derive column bases from VK Y-bases: {β} ∪ b_g2_query; if query empty, we still have β
     // Extract Y from pvugc_vk via build_one_sided_ppe path
