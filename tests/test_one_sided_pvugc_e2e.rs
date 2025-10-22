@@ -95,7 +95,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // === DEPOSIT TIME ===
     
     // Build PVUGC VK wrapper
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
     
     // Generate ρ
     let rho = Fr::rand(&mut rng);
@@ -246,7 +246,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let pvugc_vk2 = PvugcVk {
         beta_g2: vk2.beta_g2,
         delta_g2: vk2.delta_g2,
-        b_g2_query: pk2.b_g2_query.clone(),
+        b_g2_query: std::sync::Arc::new(pk2.b_g2_query.clone()),
     };
     
     // Generate proof for vault 2
@@ -296,7 +296,7 @@ fn test_delta_sign_sanity() {
     let vault_utxo = vec![Fr::from(25u64)];
     let circuit = SquareCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
     let rho = Fr::rand(&mut rng);
     
     // Use API for setup and arming
@@ -412,7 +412,7 @@ fn test_witness_independence() {
     let pvugc_vk = PvugcVk {
         beta_g2: vk.beta_g2,
         delta_g2: vk.delta_g2,
-        b_g2_query: pk.b_g2_query.clone(),
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
     
     let rho = Fr::rand(&mut rng);

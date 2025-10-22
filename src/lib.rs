@@ -1,20 +1,18 @@
 //! One-Sided GS PVUGC for Groth16
 //!
 //! This crate implements the coefficient-carrying one-sided GS approach
-//! that achieves all PVUGC properties:
-//! - Deposit-only arming (statement-only G₂ arms)
-//! - Permissionless decap (no committee at spend)
-//! - Proof-agnostic (K = R^ρ for any valid proof)
-//! - Witness-independent (R depends only on vk, vault_utxo)
-//! - SNARK-gated (requires valid Groth16)
+//! for efficient PVUGC operations on Groth16 proofs.
 //!
-//! Architecture:
-//! 1. Groth16 proves statement: i.e. Bitcoin light client
-//! 2. Prover exposes MSM coefficients b_j, c_i
-//! 3. One-sided GS PPE: ∏ e(X^(B)_j, Y_j) · e(C, -δ) = R(vk,x)
-//! 4. All G₂ bases from VK (statement-only!)
-//! 5. Arm: Y_j^ρ, δ^ρ
-//! 6. Decap: K = R^ρ
+//! Properties:
+//! - Deposit-only arming (statement-only G₂ arms from VK)
+//! - Permissionless decap (no committee at spend)
+//! - Proof-agnostic (K = R^ρ for any valid proof of same statement)
+//! - Witness-independent (R depends only on vk, public_inputs)
+//! - SNARK-gated (requires valid Groth16 proof)
+//!
+//! The crate also includes demonstration modules for recursive proof-of-proof
+//! architectures that could provide constant-size scalability. See the
+//! test_recursive_demo test for details.
 
 pub mod arming;
 pub mod coeff_recorder;
@@ -25,6 +23,16 @@ pub mod ctx;
 pub mod poce;
 pub mod api;
 
+// Recursive demonstration modules (not for production use)
+// These modules demonstrate how PVUGC could work with proof-of-proof recursion
+// for constant-size scalability. They are kept for educational/testing purposes.
+pub mod outer_compressed;
+pub mod pvugc_outer;
+
+// Test utilities (available in both unit tests and integration tests)
+pub mod test_circuits; // Shared test circuits
+pub mod test_fixtures;  // Shared fixtures with disk caching
+
 // Re-exports - Public API
 pub use arming::{ColumnBases, ColumnArms, arm_columns};
 pub use coeff_recorder::{CoefficientRecorder, BCoefficients, SimpleCoeffRecorder};
@@ -33,3 +41,12 @@ pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, Pvug
 pub use decap::OneSidedCommitments;
 pub use poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
 pub use api::{OneSidedPvugc, PvugcBundle};
+
+// Recursive demonstration types (not for production use)
+// These are exposed for testing and educational purposes only.
+// Production code should use the main API (OneSidedPvugc).
+pub use outer_compressed::{InnerE, OuterE, InnerFr, OuterFr, fr_inner_to_outer, setup_outer_params, prove_outer, verify_outer};
+
+// Test utilities re-exports
+pub use test_circuits::AddCircuit;
+pub use test_fixtures::{get_fixture, GlobalFixture};

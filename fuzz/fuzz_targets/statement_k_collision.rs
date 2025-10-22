@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::api::OneSidedPvugc;
-use arkworks_groth16::ppe::{PvugcVk, compute_groth16_target, derive_gamma_rademacher};
+use arkworks_groth16::ppe::{PvugcVk, compute_groth16_target};
 use arkworks_groth16::decap::OneSidedCommitments;
 
 // Simple y^2 = x circuit: public x, witness y
@@ -76,8 +76,6 @@ fuzz_target!(|data: &[u8]| {
     // Construct pvugc-vk wrapper from pk and vk
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
 
-    // Deterministic thin gamma
-    let _gamma = derive_gamma_rademacher::<E>(&pvugc_vk, &vk, 4);
 
     // Canonical column setup once (arms independent of x)
     let (_bases_cols, col_arms, _r, _k) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x1], &rho);

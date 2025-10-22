@@ -39,7 +39,8 @@ pub fn compute_groth16_target<E: Pairing>(
 pub struct PvugcVk<E: Pairing> {
     pub beta_g2: E::G2Affine,
     pub delta_g2: E::G2Affine,
-    pub b_g2_query: Vec<E::G2Affine>,
+    /// Arc-wrapped to avoid expensive clones (BW6-761 has dozens of large G2 points)
+    pub b_g2_query: std::sync::Arc<Vec<E::G2Affine>>,
 }
 
 /// Validate subgroup membership for Groth16 VK elements
@@ -73,7 +74,7 @@ pub fn extract_y_bases<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> Vec<E::G2Affine> {
     // Basis choice Y^{(B)} = {β₂} ∪ b_g2_query; δ₂ kept separate on C-side
     let mut y = Vec::with_capacity(1 + pvugc_vk.b_g2_query.len());
     y.push(pvugc_vk.beta_g2);
-    y.extend_from_slice(&pvugc_vk.b_g2_query);
+    y.extend_from_slice(&**pvugc_vk.b_g2_query);
     y
 }
 
@@ -98,54 +99,6 @@ pub fn build_one_sided_ppe<E: Pairing>(
     (y_bases, delta, target)
 }
 
-/// Deterministically derive a thin Γ (|U| rows) from PVUGC-VK digests
-pub fn derive_gamma_rademacher<E: Pairing>(
-    pvugc_vk: &PvugcVk<E>,
-    vk: &Groth16VK<E>,
-    num_rows: usize,
-) -> Vec<Vec<E::ScalarField>> {
-    use sha2::Digest;
-    let mut hasher = Sha256::new();
-    hasher.update(b"PVUGC/GAMMA/v1");
-    let mut tmp = Vec::new();
-    vk.alpha_g1.serialize_compressed(&mut tmp).unwrap();
-    vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
-    vk.gamma_g2.serialize_compressed(&mut tmp).unwrap();
-    vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-    for g in &vk.gamma_abc_g1 { g.serialize_compressed(&mut tmp).unwrap(); }
-    pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
-    pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-    for y in &pvugc_vk.b_g2_query { y.serialize_compressed(&mut tmp).unwrap(); }
-    hasher.update(&tmp);
-    let seed = hasher.finalize();
-
-    let cols = 1 + pvugc_vk.b_g2_query.len();
-    let mut gamma: Vec<Vec<E::ScalarField>> = Vec::with_capacity(num_rows);
-    let mut ctr: u64 = 0;
-    while gamma.len() < num_rows {
-        let mut row = Vec::with_capacity(cols);
-        for j in 0..cols {
-            let mut h = Sha256::new();
-            h.update(&seed);
-            h.update(&ctr.to_le_bytes());
-            h.update(&j.to_le_bytes());
-            let out = h.finalize();
-            let v = out[0] % 3;
-            let sf = match v {
-                0 => E::ScalarField::from(-1i64),
-                1 => E::ScalarField::from(0u64),
-                _ => E::ScalarField::from(1u64),
-            };
-            row.push(sf);
-        }
-        // enforce non-zero and no duplicate rows
-        if row.iter().any(|c| !c.is_zero()) && !gamma.iter().any(|r| r == &row) {
-            gamma.push(row);
-        }
-        ctr += 1;
-    }
-    gamma
-}
 
 /// Validate structural properties of Γ
 /// - No all-zero rows
@@ -257,7 +210,7 @@ pub fn derive_gamma_secure<E: Pairing>(
             tmp.clear();
             pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
             pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-            for y in &pvugc_vk.b_g2_query { y.serialize_compressed(&mut tmp).unwrap(); }
+            for y in pvugc_vk.b_g2_query.iter() { y.serialize_compressed(&mut tmp).unwrap(); }
             hasher.update(&tmp);
             let seed = hasher.finalize();
 
@@ -442,7 +395,7 @@ mod tests {
         let pvugc_vk: PvugcVk<E> = PvugcVk {
             beta_g2: vk.beta_g2,
             delta_g2: vk.delta_g2,
-            b_g2_query: pk.b_g2_query.clone(),
+            b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
         };
 
         assert!(validate_pvugc_vk_subgroups(&pvugc_vk));
@@ -459,7 +412,7 @@ mod tests {
 
         // Zero entries in the query vector are allowed
         let mut zero_query_vk = pvugc_vk.clone();
-        if let Some(first) = zero_query_vk.b_g2_query.first_mut() {
+        if let Some(first) = std::sync::Arc::make_mut(&mut zero_query_vk.b_g2_query).first_mut() {
             *first = <E as Pairing>::G2Affine::identity();
         }
         assert!(validate_pvugc_vk_subgroups(&zero_query_vk));

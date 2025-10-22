@@ -115,14 +115,14 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         
         // Variable part: s·δ + Σ b_j·query[1..] (β and query[0] handled separately)
         let mut b_var = pvugc_vk.delta_g2.into_group() * s;
-        for (b_j, y_j) in b_coeffs.iter().zip(&pvugc_vk.b_g2_query[1..]) {
+        for (b_j, y_j) in b_coeffs.iter().zip(&pvugc_vk.b_g2_query.as_ref()[1..]) {
             b_var += y_j.into_group() * b_j;
         }
         
         // Prove over query[1..] only
         prove_b_msm(
             b_var.into_affine(),
-            &pvugc_vk.b_g2_query[1..],
+            &pvugc_vk.b_g2_query.as_ref()[1..],
             pvugc_vk.delta_g2,
             b_coeffs,
             s,

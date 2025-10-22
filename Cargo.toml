@@ -10,9 +10,20 @@ edition = "2021"
 name = "arkworks_groth16"
 crate-type = ["rlib"]  # Add rlib for testing
 
+[features]
+default = ["r1cs", "parallel"]
+r1cs = ["ark-groth16/r1cs"]
+parallel = [
+    "ark-ff/parallel",
+    "ark-ec/parallel",
+    "ark-std/parallel",
+]
+
 [dependencies]
 # Arkworks ecosystem (0.5 for PVUGC compatibility)
 ark-bls12-381 = "0.5"
+ark-bls12-377 = "0.5"  # BLS12-377 for production (with BW6-761)
+ark-bw6-761   = "0.5"  # BW6-761 for production recursion
 ark-ec = "0.5"
 ark-ff = "0.5"
 ark-groth16 = { path = "ark-groth16-pvugc" }
@@ -21,11 +32,18 @@ ark-relations = "0.5"
 ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
+ark-crypto-primitives = "0.5"
 
 # Crypto primitives
 sha2 = "0.10"
+anyhow = "1.0"  # Error handling for outer compressed
+once_cell = "1.19"  # For test fixtures
+rayon = "1.10"  # Parallel operations
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
 codegen-units = 1
+
+[profile.test]
+opt-level = 3

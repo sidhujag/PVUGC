@@ -44,7 +44,7 @@ fn test_cannot_compute_k_from_arms_alone() {
     
     // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    let pvugc_vk: PvugcVk<E> = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk: PvugcVk<E> = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
     let mut y_cols = vec![pvugc_vk.beta_g2];
     y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
     let cols: ColumnBases<E> = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
@@ -166,7 +166,7 @@ fn test_verify_rejects_mismatched_statement() {
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: pk.b_g2_query.clone() };
+    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
     // Canonical Γ required by verifier
 
