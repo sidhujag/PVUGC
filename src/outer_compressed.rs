@@ -51,7 +51,6 @@ pub type OuterPk<C> = ark_groth16::ProvingKey<<C as RecursionCycle>::OuterE>;
 /// Available recursion cycles.
 pub mod cycles {
     use super::*;
-    use crate::mnt6_fixed::FixedMNT6_298;
     use ark_r1cs_std::pairing::{
         bls12::PairingVar as Bls12PairingVar, mnt4::PairingVar as Mnt4PairingVar,
     };
@@ -72,16 +71,13 @@ pub mod cycles {
     }
 
     /// Low-security (≈100-bit) experimental cycle: inner MNT4-298, outer MNT6-298.
-    ///
-    /// The outer curve uses a locally patched twist (`FixedMNT6_298`) so pairing
-    /// preparation remains well-defined during PVUGC decapsulation.
     #[derive(Debug, Clone, Copy)]
     pub struct Mnt4Mnt6Cycle;
 
     impl RecursionCycle for Mnt4Mnt6Cycle {
         type ConstraintField = ark_mnt4_298::Fq;
         type InnerE = ark_mnt4_298::MNT4_298;
-        type OuterE = FixedMNT6_298;
+        type OuterE = ark_mnt6_298::MNT6_298;
         type InnerPairingVar = Mnt4PairingVar<ark_mnt4_298::Config>;
 
         fn name() -> &'static str {
