@@ -25,6 +25,12 @@ pub struct PvugcBundle<E: Pairing> {
     pub gs_commitments: OneSidedCommitments<E>,
 }
 
+/// Optional verification limits
+pub struct VerifyLimits {
+    /// Maximum allowed number of B-columns (length of b_g2_query)
+    pub max_b_columns: Option<usize>,
+}
+
 /// Main API for one-sided PVUGC
 pub struct OneSidedPvugc;
 
@@ -115,13 +121,26 @@ impl OneSidedPvugc {
         vk: &Groth16VK<E>,
         public_inputs: &[E::ScalarField],
     ) -> bool {
-        
+        Self::verify_with_limits(bundle, pvugc_vk, vk, public_inputs, &VerifyLimits { max_b_columns: None })
+    }
+
+    /// Verify with optional limits (e.g., N_max to mitigate DoS)
+    pub fn verify_with_limits<E: Pairing>(
+        bundle: &PvugcBundle<E>,
+        pvugc_vk: &PvugcVk<E>,
+        vk: &Groth16VK<E>,
+        public_inputs: &[E::ScalarField],
+        limits: &VerifyLimits,
+    ) -> bool {
         // 0. Basic guards
         if !validate_pvugc_vk_subgroups(pvugc_vk) { 
             return false; 
         }
         if !validate_groth16_vk_subgroups(vk) {
             return false;
+        }
+        if let Some(n_max) = limits.max_b_columns {
+            if pvugc_vk.b_g2_query.len() > n_max { return false; }
         }
         
         // 1. Verify Groth16 proof (standard)
@@ -156,7 +175,26 @@ impl OneSidedPvugc {
         let ties_ok = verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
         if !ties_ok { return false; }
         
-        // 4. Verify PPE equals R(vk,x) using direct column pairing
+        // 4. Subgroup/identity checks on commitments (allow zero limbs, enforce subgroup when non-zero)
+        {
+            use ark_ff::PrimeField;
+            use ark_ec::PrimeGroup;
+            let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+            let is_good_g1 = |g: &E::G1Affine| {
+                if g.is_zero() { return true; }
+                (g.into_group().mul_bigint(order)).into_affine().is_zero()
+            };
+            for (x0, x1) in &bundle.gs_commitments.x_b_cols {
+                if !is_good_g1(x0) || !is_good_g1(x1) { return false; }
+            }
+            for (t0, t1) in &bundle.gs_commitments.theta {
+                if !is_good_g1(t0) || !is_good_g1(t1) { return false; }
+            }
+            let (c0, c1) = bundle.gs_commitments.theta_delta_cancel;
+            if !is_good_g1(&c0) || !is_good_g1(&c1) { return false; }
+        }
+
+        // 5. Verify PPE equals R(vk,x) using direct column pairing
         let r_target = compute_groth16_target(vk, public_inputs);
         
         // Columns: [β₂, b_g2_query[0], b_g2_query[1..]] (δ supplied via Θ = C + sA)
