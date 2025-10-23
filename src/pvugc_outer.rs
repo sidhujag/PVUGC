@@ -65,7 +65,7 @@ pub fn arm_columns_outer_for<C: RecursionCycle>(
     bases: &ColumnBases<C::OuterE>,
     rho: &OuterScalar<C>,
 ) -> ColumnArms<C::OuterE> {
-    crate::arming::arm_columns(bases, rho)
+    crate::arming::arm_columns(bases, rho).expect("arm_columns failed")
 }
 
 /// Default-cycle convenience wrapper around [`arm_columns_outer_for`].

@@ -47,7 +47,7 @@ impl OneSidedPvugc {
         let mut y_cols = vec![pvugc_vk.beta_g2];
         y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
         let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
-        let col_arms = arm_columns(&bases, rho);
+        let col_arms = arm_columns(&bases, rho).expect("arm_columns failed");
         let k = Self::compute_r_to_rho(&r, rho);
         (bases, col_arms, r, k)
     }
@@ -273,6 +273,27 @@ impl OneSidedPvugc {
         
         let r_to_rho = r.0.pow(&rho.into_bigint());
         PairingOutput(r_to_rho)
+    }
+
+    /// Encrypt using derived key K (PairingOutput), binding to ctx_digest
+    pub fn encrypt_with_key<E: Pairing>(
+        derived_m: &PairingOutput<E>,
+        ctx_digest: &[u8],
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        crate::ct::seal_with_k_bytes(&k_bytes, ctx_digest, plaintext)
+    }
+
+    /// Decrypt using derived key K (PairingOutput), bound to ctx_digest
+    pub fn decrypt_with_key<E: Pairing>(
+        derived_m: &PairingOutput<E>,
+        ctx_digest: &[u8],
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        crate::ct::open_with_k_bytes(&k_bytes, ctx_digest, nonce, ciphertext)
     }
 }
 

@@ -2,7 +2,6 @@
 
 use arkworks_groth16::*;
 use ark_ec::{AffineRepr, pairing::Pairing, PrimeGroup, CurveGroup};
-use ark_serialize::CanonicalSerialize;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ppe::PvugcVk;
 use ark_bls12_381::{Bls12_381, Fr};
@@ -162,38 +161,10 @@ fn test_one_sided_pvugc_proof_agnostic() {
     
     let k1 = OneSidedPvugc::decapsulate(&commitments1, &col_arms);
     
-    // === PoCE-B VALIDATION (DECAP-TIME) ===
-    
-    // Simulate ciphertext
-    let ct_i = b"simulated_ciphertext";
-    
-    // Compute correct key-commitment tag from derived key (matching PoCE-B logic)
-    use sha2::{Sha256, Digest};
-    
-    // Derive KEM key: K = Poseidon2(ser(R^ρ) || ctx_hash || gs_digest)
-    let mut key_hasher = Sha256::new();
-    let mut key_bytes = Vec::new();
-    k1.serialize_compressed(&mut key_bytes).unwrap();
-    key_hasher.update(&key_bytes);
-    key_hasher.update(ctx_hash);
-    key_hasher.update(gs_digest);
-    let key = key_hasher.finalize().to_vec();
-    
-    // Compute key-commitment tag: τ_i = Poseidon2(K, AD_core, ct_i)
-    let mut tag_hasher = Sha256::new();
-    tag_hasher.update(&key);
-    tag_hasher.update(ctx_hash);  // AD_core = ctx_hash
-    tag_hasher.update(ct_i);
-    let tau_i = tag_hasher.finalize().to_vec();
-    
-    // Verify key-commitment (PoCE-B)
-    assert!(OneSidedPvugc::verify_key_commitment(
-        &k1,
-        ctx_hash,
-        gs_digest,
-        ct_i,
-        &tau_i,
-    ));
+    // === CT ENCRYPTION (DEPOSIT-TIME) ===
+    // Encrypt once at deposit, using the statement-derived expected key K = R^ρ
+    let plaintext = b"simulated_ciphertext";
+    let (nonce, ct) = OneSidedPvugc::encrypt_with_key(&k_expected, ctx_hash, plaintext).expect("encrypt");
     
     // === SPEND TIME - PROOF 2 ===
     
@@ -214,16 +185,10 @@ fn test_one_sided_pvugc_proof_agnostic() {
     
     let k2 = OneSidedPvugc::decapsulate(&commitments2, &col_arms);
     
-    // === PoCE-B VALIDATION FOR PROOF 2 ===
-    
-    // Verify key-commitment for second proof (should use same key)
-    assert!(OneSidedPvugc::verify_key_commitment(
-        &k2,
-        ctx_hash,
-        gs_digest,
-        ct_i,
-        &tau_i,
-    ));
+    // === CT DECRYPTION (SPEND-TIME) ===
+    // Decrypt with derived key from proof 2 (same statement) → should succeed
+    let opened2 = OneSidedPvugc::decrypt_with_key(&k2, ctx_hash, &nonce, &ct).expect("decrypt");
+    assert_eq!(opened2.as_slice(), plaintext);
     
     // === PROOF-AGNOSTIC PROPERTY ===
     
@@ -288,6 +253,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // Different statements should produce different K
     // Even though we use SAME ρ!
     assert_ne!(k1, k_vault2_decap, "Different vaults MUST produce different keys!");
+    // Decryption with different-statement key should fail
+    assert!(OneSidedPvugc::decrypt_with_key(&k_vault2_decap, ctx_hash, &nonce, &ct).is_err());
 }
 
 #[test]

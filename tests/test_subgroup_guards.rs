@@ -30,19 +30,18 @@ fn arm_columns_allows_some_identity_cols_but_not_all() {
         delta: G2Affine::rand(&mut rng),
     };
     let rho = Fr::from(1u64);
-    let arms = arm_columns(&cols, &rho);
+    let arms = arm_columns(&cols, &rho).expect("arm_columns failed");
     assert_eq!(arms.y_cols_rho.len(), 2);
 }
 
 #[test]
-#[should_panic]
 fn arm_columns_rejects_zero_delta() {
-    // Zero delta → reject
+    // Zero delta → Err
     let cols = ColumnBases::<E> { 
         y_cols: vec![G2Affine::rand(&mut ark_std::test_rng())], 
         delta: G2Affine::identity() 
     };
     let rho = Fr::from(1u64);
-    let _ = arm_columns(&cols, &rho);
+    assert!(arm_columns(&cols, &rho).is_err());
 }
 

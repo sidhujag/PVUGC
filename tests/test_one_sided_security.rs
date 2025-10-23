@@ -49,7 +49,7 @@ fn test_cannot_compute_k_from_arms_alone() {
     let mut y_cols = vec![pvugc_vk.beta_g2];
     y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
     let cols: ColumnBases<E> = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
-    let col_arms = arm_columns(&cols, &rho);
+    let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
     
     // Expected K = R^ρ
     let k_expected = OneSidedPvugc::compute_r_to_rho(&r, &rho);
@@ -204,7 +204,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
 
     // Honest arms
     let rho = Fr::from(7u64);
-    let arms = arm_columns(&bases, &rho);
+    let arms = arm_columns(&bases, &rho).expect("arm_columns failed");
 
     // Create T_i
     let s_i = Fr::from(9u64);
@@ -237,12 +237,17 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         gs_digest,
     ));
 
-    // Mixed rho: change one column's arm to rho' while keeping others at rho
+    // Mixed rho: change one NON-ZERO column's arm to rho' while keeping others at rho
     let rho2 = Fr::from(5u64);
     let mut bad_arms = arms.clone();
-    if bad_arms.y_cols_rho.len() > 2 {
-        let y2_g2 = bases.y_cols[2].into_group();
-        bad_arms.y_cols_rho[2] = (y2_g2 * rho2).into_affine();
+    // find a non-zero Y base index to tamper
+    let mut tamper_idx = None;
+    for (i, y) in bases.y_cols.iter().enumerate() {
+        if !y.is_zero() { tamper_idx = Some(i); break; }
+    }
+    if let Some(i) = tamper_idx {
+        let y_g2 = bases.y_cols[i].into_group();
+        bad_arms.y_cols_rho[i] = (y_g2 * rho2).into_affine();
     }
     let proof_bad: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
@@ -267,10 +272,14 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         gs_digest,
     ));
 
-    // Swapped columns should also fail
+    // Swapped columns (two NON-ZERO indices) should also fail
     let mut swapped_arms = arms.clone();
-    if swapped_arms.y_cols_rho.len() > 3 {
-        swapped_arms.y_cols_rho.swap(2, 3);
+    let mut nz_idx = Vec::new();
+    for (i, y) in bases.y_cols.iter().enumerate() {
+        if !y.is_zero() { nz_idx.push(i); }
+    }
+    if nz_idx.len() >= 2 {
+        swapped_arms.y_cols_rho.swap(nz_idx[0], nz_idx[1]);
     }
     let proof_swapped: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
