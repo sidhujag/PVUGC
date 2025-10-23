@@ -186,6 +186,114 @@ fn test_verify_rejects_mismatched_statement() {
 }
 
 #[test]
+fn test_poce_rejects_mixed_rho_and_swapped_columns() {
+    use ark_std::rand::rngs::StdRng;
+    use ark_std::rand::SeedableRng;
+    let mut rng = StdRng::seed_from_u64(123);
+
+    // Setup circuit and keys
+    let circuit = TestCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+
+    // Arming bases
+    let mut y_cols = vec![pvugc_vk.beta_g2];
+    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
+    let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
+
+    // Honest arms
+    let rho = Fr::from(7u64);
+    let arms = arm_columns(&bases, &rho);
+
+    // Create T_i
+    let s_i = Fr::from(9u64);
+    let t_i = (<E as Pairing>::G1::generator() * s_i).into_affine();
+
+    let ctx_hash = b"ctx";
+    let gs_digest = b"gs";
+
+    // Prove with honest rho
+    let proof_ok = arkworks_groth16::poce::prove_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &arms.y_cols_rho,
+        &arms.delta_rho,
+        &t_i,
+        &rho,
+        &s_i,
+        ctx_hash,
+        gs_digest,
+        &mut rng,
+    );
+    assert!(arkworks_groth16::poce::verify_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &arms.y_cols_rho,
+        &arms.delta_rho,
+        &t_i,
+        &proof_ok,
+        ctx_hash,
+        gs_digest,
+    ));
+
+    // Mixed rho: change one column's arm to rho' while keeping others at rho
+    let rho2 = Fr::from(5u64);
+    let mut bad_arms = arms.clone();
+    if bad_arms.y_cols_rho.len() > 2 {
+        bad_arms.y_cols_rho[2] = (bases.y_cols[2].into_group() * rho2).into_affine();
+    }
+    let proof_bad = arkworks_groth16::poce::prove_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &bad_arms.y_cols_rho,
+        &bad_arms.delta_rho,
+        &t_i,
+        &rho,
+        &s_i,
+        ctx_hash,
+        gs_digest,
+        &mut rng,
+    );
+    assert!(!arkworks_groth16::poce::verify_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &bad_arms.y_cols_rho,
+        &bad_arms.delta_rho,
+        &t_i,
+        &proof_bad,
+        ctx_hash,
+        gs_digest,
+    ));
+
+    // Swapped columns should also fail
+    let mut swapped_arms = arms.clone();
+    if swapped_arms.y_cols_rho.len() > 3 {
+        swapped_arms.y_cols_rho.swap(2, 3);
+    }
+    let proof_swapped = arkworks_groth16::poce::prove_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &swapped_arms.y_cols_rho,
+        &swapped_arms.delta_rho,
+        &t_i,
+        &rho,
+        &s_i,
+        ctx_hash,
+        gs_digest,
+        &mut rng,
+    );
+    assert!(!arkworks_groth16::poce::verify_poce_column(
+        &bases.y_cols,
+        &bases.delta,
+        &swapped_arms.y_cols_rho,
+        &swapped_arms.delta_rho,
+        &t_i,
+        &proof_swapped,
+        ctx_hash,
+        gs_digest,
+    ));
+}
+#[test]
 fn test_duplicate_g2_columns_detected_by_per_column_ties() {
     use ark_bls12_381::Bls12_381 as E;
     use ark_std::rand::SeedableRng;
