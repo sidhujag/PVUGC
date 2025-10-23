@@ -64,7 +64,7 @@ pub fn arm_columns<E: Pairing>(bases: &ColumnBases<E>, rho: &E::ScalarField) -> 
     // In debug builds, do full validation to catch bugs during development
     #[cfg(debug_assertions)]
     {
-        bases.validate_subgroups().expect("Base validation failed in debug build");
+        if let Err(e) = bases.validate_subgroups() { return Err(e); }
     }
     
     // Quick sanity check: delta must not be zero (cheap, always check)
