@@ -45,8 +45,24 @@ pub use api::{OneSidedPvugc, PvugcBundle};
 // Recursive demonstration types (not for production use)
 // These are exposed for testing and educational purposes only.
 // Production code should use the main API (OneSidedPvugc).
-pub use outer_compressed::{InnerE, OuterE, InnerFr, OuterFr, fr_inner_to_outer, setup_outer_params, prove_outer, verify_outer};
+pub use outer_compressed::{
+    cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle},
+    fr_inner_to_outer,
+    fr_inner_to_outer_for,
+    prove_outer,
+    prove_outer_for,
+    setup_outer_params,
+    setup_outer_params_for,
+    verify_outer,
+    verify_outer_for,
+    DefaultCycle,
+    InnerE,
+    InnerFr,
+    OuterE,
+    OuterFr,
+    RecursionCycle,
+};
 
 // Test utilities re-exports
 pub use test_circuits::AddCircuit;
-pub use test_fixtures::{get_fixture, GlobalFixture};
+pub use test_fixtures::{get_fixture, get_fixture_mnt, DefaultFixture, GlobalFixture, MntFixture};
