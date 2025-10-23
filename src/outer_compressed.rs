@@ -37,18 +37,6 @@ pub trait RecursionCycle: 'static + Send + Sync {
 
     /// Human-readable name for logging/test output.
     fn name() -> &'static str;
-
-    /// Whether this cycle can exercise the full PVUGC decapsulation flow in tests.
-    ///
-    /// The `ark-mnt6-298` parameters published upstream expose a zero-valued twist,
-    /// which causes pairing preparation to panic when the decapsulation code tries
-    /// to build many `G2Prepared` elements.  We keep the test coverage by skipping
-    /// the decap phase for the lightweight MNT cycle until the upstream curve
-    /// constants are fixed.  Production recursion still targets the default cycle,
-    /// so this does not affect shipping configurations.
-    fn supports_full_decap() -> bool {
-        true
-    }
 }
 
 /// Helper type aliases for a given cycle.
@@ -63,6 +51,7 @@ pub type OuterPk<C> = ark_groth16::ProvingKey<<C as RecursionCycle>::OuterE>;
 /// Available recursion cycles.
 pub mod cycles {
     use super::*;
+    use crate::mnt6_fixed::FixedMNT6_298;
     use ark_r1cs_std::pairing::{
         bls12::PairingVar as Bls12PairingVar, mnt4::PairingVar as Mnt4PairingVar,
     };
@@ -83,21 +72,20 @@ pub mod cycles {
     }
 
     /// Low-security (≈100-bit) experimental cycle: inner MNT4-298, outer MNT6-298.
+    ///
+    /// The outer curve uses a locally patched twist (`FixedMNT6_298`) so pairing
+    /// preparation remains well-defined during PVUGC decapsulation.
     #[derive(Debug, Clone, Copy)]
     pub struct Mnt4Mnt6Cycle;
 
     impl RecursionCycle for Mnt4Mnt6Cycle {
         type ConstraintField = ark_mnt4_298::Fq;
         type InnerE = ark_mnt4_298::MNT4_298;
-        type OuterE = ark_mnt6_298::MNT6_298;
+        type OuterE = FixedMNT6_298;
         type InnerPairingVar = Mnt4PairingVar<ark_mnt4_298::Config>;
 
         fn name() -> &'static str {
             "MNT4-298/MNT6-298"
-        }
-
-        fn supports_full_decap() -> bool {
-            false
         }
     }
 }
@@ -411,10 +399,9 @@ mod tests {
 
         assert!(verify_outer_for::<C>(&*vk_outer, &public_x, &proof_outer).unwrap());
 
-        let run_decap = C::supports_full_decap()
-            && std::env::var("PVUGC_RUN_DECAP")
-                .map(|flag| flag == "1" || flag.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+        let run_decap = std::env::var("PVUGC_RUN_DECAP")
+            .map(|flag| flag == "1" || flag.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         if run_decap {
             let decap_start = Instant::now();
@@ -428,7 +415,7 @@ mod tests {
             assert_eq!(k_decapped, k_expected, "Decapsulated K doesn't match R^ρ!");
         } else {
             eprintln!(
-                "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable when supported)",
+                "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable)",
                 C::name(),
             );
         }
