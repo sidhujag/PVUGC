@@ -64,7 +64,7 @@ fuzz_target!(|data: &[u8]| {
     let commitments = recorder.build_commitments();
 
     // Baseline must verify true
-    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng), dlrep_tie: recorder.create_dlrep_tie(&mut rng), gs_commitments: commitments.clone() };
+    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng), dlrep_ties: recorder.create_dlrep_ties(&mut rng), gs_commitments: commitments.clone() };
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x]));
 
     // Apply a single malleation
@@ -103,7 +103,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Reuse same proofs (dlrep proofs bind to original structure). Verifier should reject.
-    let bundle_bad = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_tie: bundle.dlrep_tie, gs_commitments: mal };
+    let bundle_bad = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_ties: bundle.dlrep_ties, gs_commitments: mal };
     if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &[x]) {
         panic!("Malleation accepted by verifier");
     }

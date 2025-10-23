@@ -63,9 +63,9 @@ fuzz_target!(|data: &[u8]| {
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec).unwrap();
     let mut commitments = rec.build_commitments();
     let dlrep_b = rec.create_dlrep_b(&pvugc_vk, &mut rng);
-    let dlrep_tie = rec.create_dlrep_tie(&mut rng);
+    let dlrep_ties = rec.create_dlrep_ties(&mut rng);
 
-    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b, dlrep_tie, gs_commitments: commitments.clone() };
+    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b, dlrep_ties, gs_commitments: commitments.clone() };
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x]));
 
     // Linear recombination of two rows (if available): C'_0 = a*C_0 + b*C_1
@@ -81,15 +81,27 @@ fuzz_target!(|data: &[u8]| {
     let c0b_new = (c0b.into_group() * Fr::from(a) + c1b.into_group() * Fr::from(b)).into_affine();
     commitments.x_b_cols[0] = (c0a_new, c0b_new);
 
-    // Attempt to forge consistent DLREP proofs with the same public bases
+    // Attempt to forge per-column ties independently should fail
     let fake_u = Fr::from_le_bytes_mod_order(&take_bytes::<32>(&mut data).unwrap_or([1;32]));
     let a_g1 = bundle.groth16_proof.a;
-    let mut x_agg = <E as Pairing>::G1::zero();
-    for (c_limb0, _) in &commitments.x_b_cols { x_agg += c_limb0.into_group(); }
-    let x_agg = x_agg.into_affine();
-    let forged_tie = arkworks_groth16::dlrep::prove_tie_aggregated::<E, _>(a_g1, x_agg, fake_u, &mut rng);
+    // fabricate x_cols from malleated commitments for variable columns (skip first two)
+    let mut x_cols = Vec::new();
+    for (i, (x0, _)) in commitments.x_b_cols.iter().enumerate() { if i >= 2 { x_cols.push(*x0); } }
+    // forge responses with a single fake_u reused — verifier uses per-column FS, should reject
+    use arkworks_groth16::dlrep::{DlrepPerColumnTies};
+    let mut commitments_g1 = Vec::new();
+    let mut responses = Vec::new();
+    for x_j in &x_cols {
+        let k = Fr::from_le_bytes_mod_order(&take_bytes::<32>(&mut data).unwrap_or([2;32]));
+        let t = (a_g1.into_group() * k).into_affine();
+        // wrong response binding
+        let z = k + fake_u;
+        commitments_g1.push(t);
+        responses.push(z);
+    }
+    let forged_ties = DlrepPerColumnTies { commitments_g1, responses };
 
-    let bundle_forged = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_tie: forged_tie, gs_commitments: commitments };
+    let bundle_forged = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_ties: forged_ties, gs_commitments: commitments };
     if OneSidedPvugc::verify(&bundle_forged, &pvugc_vk, &vk, &[x]) {
         panic!("Linear recombination with forged tie accepted");
     }

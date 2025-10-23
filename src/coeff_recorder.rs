@@ -8,7 +8,7 @@
 
 use ark_ec::pairing::Pairing;
 use ark_ec::{CurveGroup, AffineRepr};
-use ark_ff::{Field, One};
+use ark_ff::{Field};
 use ark_groth16::pvugc_hook::PvugcCoefficientHook;
 
 /// Coefficients extracted from Groth16 prover
@@ -28,6 +28,7 @@ pub struct SimpleCoeffRecorder<E: Pairing> {
     b_coeffs: Vec<E::ScalarField>,
     s: Option<E::ScalarField>,
     c: Option<E::G1Affine>,  // For C-side (will be negated)
+    b_commitment: Option<E::G2Affine>, // DLREP_B commitment for joint binding
 }
 
 impl<E: Pairing> SimpleCoeffRecorder<E> {
@@ -37,6 +38,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             b_coeffs: Vec::new(),
             s: None,
             c: None,
+            b_commitment: None,
         }
     }
     
@@ -45,6 +47,24 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         self.a.is_some()
     }
     
+    /// Create per-column tie proofs: for each variable column j, prove X_j = b_j · A
+    pub fn create_dlrep_ties<R: ark_std::rand::RngCore>(
+        &self,
+        rng: &mut R,
+    ) -> crate::dlrep::DlrepPerColumnTies<E> {
+        use crate::dlrep::prove_ties_per_column;
+        let a = self.a.expect("A not recorded");
+        let a_g = a.into_group();
+        // x_cols correspond to variable columns only (aligned with b_g2_query[1..])
+        let x_cols: Vec<E::G1Affine> = self
+            .b_coeffs
+            .iter()
+            .map(|b| (a_g * b).into_affine())
+            .collect();
+        let b_commitment = self.b_commitment.expect("DLREP_B commitment not recorded");
+        prove_ties_per_column(a, &x_cols, &self.b_coeffs, b_commitment, rng)
+    }
+
     /// Check if C was recorded
     pub fn has_c(&self) -> bool {
         self.c.is_some()
@@ -103,7 +123,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     /// Create DLREP proof for B coefficients
     /// Proves: B - β = s·δ + Σ b_j·query[j]
     pub fn create_dlrep_b<R: ark_std::rand::RngCore>(
-        &self,
+        &mut self,
         pvugc_vk: &crate::api::PvugcVk<E>,
         rng: &mut R,
     ) -> crate::dlrep::DlrepBProof<E> {
@@ -120,39 +140,17 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         }
         
         // Prove over query[1..] only
-        prove_b_msm(
+        let proof = prove_b_msm(
             b_var.into_affine(),
             &pvugc_vk.b_g2_query.as_ref()[1..],
             pvugc_vk.delta_g2,
             b_coeffs,
             s,
             rng,
-        )
-    }
-    
-    /// Create same-scalar tie proof
-    /// Column-correct path: X_agg = Σ_j X_B_j(first limb) = (Σ_j coeff_j)·A
-    pub fn create_dlrep_tie<R: ark_std::rand::RngCore>(
-        &self,
-        rng: &mut R,
-    ) -> crate::dlrep::DlrepTieProof<E> {
-        use crate::dlrep::prove_tie_aggregated;
-        use ark_ff::Zero;
-        
-        let a = self.a.expect("A not recorded");
-        
-        // Full coefficients aligned to columns: [1 (β), 1 (query[0]), b_1, b_2, ...]
-        let mut full_coeffs = vec![E::ScalarField::one(), E::ScalarField::one()];
-        full_coeffs.extend(self.b_coeffs.iter().copied());
-        
-        // Column aggregation: u_agg = Σ_j coeff_j to match X_agg = Σ_j coeff_j·A
-        let mut u_agg = E::ScalarField::zero();
-        for c in &full_coeffs { u_agg += *c; }
-        
-        // x_agg = u_agg · A (verifier will compute Σ C_ℓ)
-        let x_agg = (a.into_group() * u_agg).into_affine();
-        
-        prove_tie_aggregated(a, x_agg, u_agg, rng)
+        );
+        // Store the B-proof commitment for later tie binding
+        self.b_commitment = Some(proof.commitment);
+        proof
     }
     
     /// Build GS commitments from recorded coefficients (column-wise)

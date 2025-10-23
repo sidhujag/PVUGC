@@ -177,11 +177,65 @@ fn test_verify_rejects_mismatched_statement() {
     let bundle = PvugcBundle {
         groth16_proof: proof,
         dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
 
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo));
     assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &wrong_vault_utxo));
+}
+
+#[test]
+fn test_duplicate_g2_columns_detected_by_per_column_ties() {
+    use ark_bls12_381::Bls12_381 as E;
+    use ark_std::rand::SeedableRng;
+    let mut rng = StdRng::seed_from_u64(99);
+
+    // Circuit and setup
+    let circuit = TestCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+
+    // Make a valid proof and commitments
+    let mut recorder = SimpleCoeffRecorder::<E>::new();
+    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
+    let mut commitments = recorder.build_commitments();
+
+    // Build bundle with per-column ties
+    let bundle = PvugcBundle {
+        groth16_proof: proof,
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
+        gs_commitments: commitments.clone(),
+    };
+
+    // Baseline should verify with the matching statement
+    let vault_utxo = vec![Fr::from(25u64)];
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo));
+
+    // Duplicate one G2 column logically by perturbing two X columns equally/oppositely,
+    // which keeps the aggregate but should break per-column ties
+    use ark_ec::CurveGroup;
+    let a = bundle.groth16_proof.a;
+    if commitments.x_b_cols.len() >= 4 {
+        // choose two variable columns (>= 2)
+        let i = 2usize;
+        let j = 3usize;
+        let delta = Fr::from(3u64);
+        let (xi0, xi1) = commitments.x_b_cols[i];
+        let (xj0, xj1) = commitments.x_b_cols[j];
+        let xi0p = (xi0.into_group() + a.into_group() * delta).into_affine();
+        let xj0p = (xj0.into_group() - a.into_group() * delta).into_affine();
+        commitments.x_b_cols[i] = (xi0p, xi1);
+        commitments.x_b_cols[j] = (xj0p, xj1);
+
+        let bundle_bad = PvugcBundle {
+            groth16_proof: bundle.groth16_proof,
+            dlrep_b: bundle.dlrep_b,
+            dlrep_ties: bundle.dlrep_ties,
+            gs_commitments: commitments,
+        };
+        assert!(!OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &vault_utxo));
+    }
 }
 

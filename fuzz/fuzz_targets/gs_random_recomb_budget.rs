@@ -64,9 +64,9 @@ fuzz_target!(|data: &[u8]| {
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec).unwrap();
     let mut commitments = rec.build_commitments();
     let dlrep_b = rec.create_dlrep_b(&pvugc_vk, &mut rng);
-    let dlrep_tie = rec.create_dlrep_tie(&mut rng);
+    let dlrep_ties = rec.create_dlrep_ties(&mut rng);
 
-    let base_bundle = PvugcBundle { groth16_proof: proof, dlrep_b, dlrep_tie, gs_commitments: commitments.clone() };
+    let base_bundle = PvugcBundle { groth16_proof: proof, dlrep_b, dlrep_ties, gs_commitments: commitments.clone() };
     assert!(OneSidedPvugc::verify(&base_bundle, &pvugc_vk, &vk, &[x]));
 
     if commitments.x_b_cols.is_empty() { return; }
@@ -87,7 +87,7 @@ fuzz_target!(|data: &[u8]| {
     commitments.x_b_cols[0] = (acc0.into_affine(), acc1.into_affine());
 
     // Keep DLREP proofs unchanged; verifier should reject
-    let bundle_bad = PvugcBundle { groth16_proof: base_bundle.groth16_proof, dlrep_b: base_bundle.dlrep_b, dlrep_tie: base_bundle.dlrep_tie, gs_commitments: commitments };
+    let bundle_bad = PvugcBundle { groth16_proof: base_bundle.groth16_proof, dlrep_b: base_bundle.dlrep_b, dlrep_ties: base_bundle.dlrep_ties, gs_commitments: commitments };
     if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &[x]) {
         panic!("Random recombination accepted");
     }

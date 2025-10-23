@@ -8,11 +8,11 @@ use ark_ff::One;
 use crate::{
     OneSidedCommitments,
     compute_groth16_target,
-    DlrepBProof, DlrepTieProof,
+    DlrepBProof, DlrepPerColumnTies,
 };
 use crate::arming::{ColumnBases, ColumnArms, arm_columns};
 pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
-use crate::dlrep::{verify_b_msm, verify_tie_aggregated};
+use crate::dlrep::{verify_b_msm, verify_ties_per_column};
 use crate::ppe::validate_groth16_vk_subgroups;
 use crate::poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
 use ark_std::rand::RngCore;
@@ -21,7 +21,7 @@ use ark_std::rand::RngCore;
 pub struct PvugcBundle<E: Pairing> {
     pub groth16_proof: Groth16Proof<E>,
     pub dlrep_b: DlrepBProof<E>,
-    pub dlrep_tie: DlrepTieProof<E>,
+    pub dlrep_ties: DlrepPerColumnTies<E>,
     pub gs_commitments: OneSidedCommitments<E>,
 }
 
@@ -146,21 +146,15 @@ impl OneSidedPvugc {
             return false; 
         }
         
-        // 3. Verify aggregated same-scalar tie over G1 (tie over x_b_cols[0])
-        use ark_ff::Zero;
+        // 3. Verify per-column same-scalar ties over G1 for variable columns only
         let a = bundle.groth16_proof.a;
-        
-        // Simple aggregation: sum of first limbs
-        let mut x_agg = <E as Pairing>::G1::zero();
-        for (c_limb0, _) in &bundle.gs_commitments.x_b_cols {
-            x_agg += c_limb0.into_group();
+        // x_cols for variable B-columns align with b_g2_query[1..] → start from index 2
+        let mut x_cols: Vec<E::G1Affine> = Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(2));
+        for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
+            if i >= 2 { x_cols.push(*x0); }
         }
-        let x_agg = x_agg.into_affine();
-        
-        let dlrep_tie_ok = verify_tie_aggregated::<E>(a, x_agg, &bundle.dlrep_tie);
-        if !dlrep_tie_ok { 
-            return false; 
-        }
+        let ties_ok = verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
+        if !ties_ok { return false; }
         
         // 4. Verify PPE equals R(vk,x) using direct column pairing
         let r_target = compute_groth16_target(vk, public_inputs);

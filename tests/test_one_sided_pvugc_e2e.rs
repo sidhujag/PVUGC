@@ -150,7 +150,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let bundle1 = PvugcBundle {
         groth16_proof: proof1.clone(),
         dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder1.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
     
@@ -205,7 +205,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let bundle2 = PvugcBundle {
         groth16_proof: proof2.clone(),
         dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder2.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
     
@@ -260,7 +260,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let bundle_vault2 = PvugcBundle {
         groth16_proof: proof_vault2.clone(),
         dlrep_b: recorder_vault2.create_dlrep_b(&pvugc_vk2, &mut rng),
-        dlrep_tie: recorder_vault2.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder_vault2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments_vault2.clone(),
     };
     
@@ -426,7 +426,7 @@ fn test_witness_independence() {
     let bundle1 = PvugcBundle {
         groth16_proof: proof1,
         dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder1.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
     
@@ -440,7 +440,7 @@ fn test_witness_independence() {
     let bundle2 = PvugcBundle {
         groth16_proof: proof2,
         dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &mut rng),
-        dlrep_tie: recorder2.create_dlrep_tie(&mut rng),
+        dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
     

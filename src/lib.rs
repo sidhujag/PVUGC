@@ -36,7 +36,14 @@ pub mod test_fixtures;  // Shared fixtures with disk caching
 // Re-exports - Public API
 pub use arming::{ColumnBases, ColumnArms, arm_columns};
 pub use coeff_recorder::{CoefficientRecorder, BCoefficients, SimpleCoeffRecorder};
-pub use dlrep::{DlrepBProof, DlrepTieProof, prove_b_msm, verify_b_msm, prove_tie_aggregated, verify_tie_aggregated};
+pub use dlrep::{
+    DlrepBProof,
+    DlrepPerColumnTies,
+    prove_b_msm,
+    verify_b_msm,
+    prove_ties_per_column,
+    verify_ties_per_column,
+};
 pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, PvugcVk};
 pub use decap::OneSidedCommitments;
 pub use poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};

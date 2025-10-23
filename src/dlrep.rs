@@ -11,6 +11,16 @@ use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use ark_std::rand::RngCore;
 use sha2::{Sha256, Digest};
 
+/// Per-column same-scalar ties: for each j, prove X_j = b_j · A
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct DlrepPerColumnTies<E: Pairing> {
+    /// Commitments T_j = k_j · A for each column j ≥ 2 (variable B-columns)
+    pub commitments_g1: Vec<E::G1Affine>,
+
+    /// Responses z_j = k_j + c_j · b_j for each column
+    pub responses: Vec<E::ScalarField>,
+}
+
 /// Proof that B = Σ b_j·Y_j (aggregated multi-base Schnorr)
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DlrepBProof<E: Pairing> {
@@ -21,15 +31,6 @@ pub struct DlrepBProof<E: Pairing> {
     pub responses: Vec<E::ScalarField>,
 }
 
-/// Proof that aggregated tie: Σ r_j·X^(B)_j = (Σ r_j·b_j)·A
-#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
-pub struct DlrepTieProof<E: Pairing> {
-    /// Commitment in G₁: T_A = k·A
-    pub commitment_g1: E::G1Affine,
-    
-    /// Response: z = k + c·(Σ r_j·b_j)
-    pub response: E::ScalarField,
-}
 
 /// Prove B = Σ b_j·Y_j (multi-base DLREP)
 pub fn prove_b_msm<E: Pairing, R: RngCore>(
@@ -78,6 +79,10 @@ pub fn verify_b_msm<E: Pairing>(
     delta_g2: E::G2Affine,
     proof: &DlrepBProof<E>,
 ) -> bool {
+    // Basic length check: expect one response for s plus one per y_base
+    if proof.responses.len() != y_bases.len() + 1 {
+        return false;
+    }
     // Recompute challenge
     let challenge = compute_dlrep_challenge::<E>(&y_bases, &delta_g2, &b_prime, &proof.commitment);
     
@@ -93,45 +98,60 @@ pub fn verify_b_msm<E: Pairing>(
     lhs.into_affine() == rhs.into_affine()
 }
 
-/// Prove aggregated same-scalar tie: X_agg = u_agg·A
-/// where X_agg = Σ r_j·X^(B)_j, u_agg = Σ r_j·b_j
-pub fn prove_tie_aggregated<E: Pairing, R: RngCore>(
+/// Prove per-column same-scalar ties: ∀j, X_j = b_j · A
+///
+/// Inputs:
+/// - a: base in G1 (A)
+/// - x_cols: first limbs X_j in G1 for variable columns (aligned with b_coeffs)
+/// - b_coeffs: coefficients b_j used in B decomposition (secret)
+pub fn prove_ties_per_column<E: Pairing, R: RngCore>(
     a: E::G1Affine,
-    x_agg: E::G1Affine,  // Aggregated X^(B)
-    u_agg: E::ScalarField,  // Aggregated coefficient
+    x_cols: &[E::G1Affine],
+    b_coeffs: &[E::ScalarField],
+    b_commitment: E::G2Affine,
     rng: &mut R,
-) -> DlrepTieProof<E> {
-    // Sample nonce
-    let k = E::ScalarField::rand(rng);
-    
-    // Commitment: T = k·A
-    let commitment_g1 = (a.into_group() * k).into_affine();
-    
-    // Challenge
-    let challenge = compute_tie_challenge::<E>(&a, &x_agg, &commitment_g1);
-    
-    // Response: z = k + c·u_agg
-    let response = k + challenge * u_agg;
-    
-    DlrepTieProof {
-        commitment_g1,
-        response,
+) -> DlrepPerColumnTies<E> {
+    assert_eq!(x_cols.len(), b_coeffs.len());
+
+    let mut commitments_g1 = Vec::with_capacity(b_coeffs.len());
+    let mut responses = Vec::with_capacity(b_coeffs.len());
+
+    for (x_j, b_j) in x_cols.iter().zip(b_coeffs.iter()) {
+        let k_j = E::ScalarField::rand(rng);
+        let t_j = (a.into_group() * k_j).into_affine();
+        let c_j = compute_tie_col_challenge::<E>(&a, x_j, &t_j, &b_commitment);
+        let z_j = k_j + c_j * b_j;
+        commitments_g1.push(t_j);
+        responses.push(z_j);
     }
+
+    DlrepPerColumnTies { commitments_g1, responses }
 }
 
-/// Verify aggregated tie
-pub fn verify_tie_aggregated<E: Pairing>(
+/// Verify per-column same-scalar ties
+pub fn verify_ties_per_column<E: Pairing>(
     a: E::G1Affine,
-    x_agg: E::G1Affine,
-    proof: &DlrepTieProof<E>,
+    x_cols: &[E::G1Affine],
+    proof: &DlrepPerColumnTies<E>,
+    b_commitment: E::G2Affine,
 ) -> bool {
-    let challenge = compute_tie_challenge::<E>(&a, &x_agg, &proof.commitment_g1);
-    
-    // Verify: z·A = T + c·X_agg
-    let lhs = (a.into_group() * proof.response).into_affine();
-    let rhs: E::G1 = proof.commitment_g1.into_group() + x_agg.into_group() * challenge;
-    
-    lhs == rhs.into_affine()
+    if x_cols.len() != proof.commitments_g1.len() || x_cols.len() != proof.responses.len() {
+        return false;
+    }
+
+    for i in 0..x_cols.len() {
+        let x_j = x_cols[i];
+        let t_j = proof.commitments_g1[i];
+        let z_j = proof.responses[i];
+        let c_j = compute_tie_col_challenge::<E>(&a, &x_j, &t_j, &b_commitment);
+
+        // Check: z_j · A = T_j + c_j · X_j
+        let lhs = (a.into_group() * z_j).into_affine();
+        let rhs: <E as Pairing>::G1 = t_j.into_group() + x_j.into_group() * c_j;
+        if lhs != rhs.into_affine() { return false; }
+    }
+
+    true
 }
 
 /// Compute Fiat-Shamir challenge for DLREP
@@ -160,22 +180,28 @@ fn compute_dlrep_challenge<E: Pairing>(
     E::ScalarField::from_le_bytes_mod_order(&hasher.finalize())
 }
 
-/// Compute Fiat-Shamir challenge for tie proof
-fn compute_tie_challenge<E: Pairing>(
+
+/// Compute Fiat-Shamir challenge for per-column tie
+fn compute_tie_col_challenge<E: Pairing>(
     a: &E::G1Affine,
-    x_agg: &E::G1Affine,
+    x_j: &E::G1Affine,
     commitment: &E::G1Affine,
+    b_commitment: &E::G2Affine,
 ) -> E::ScalarField {
     let mut hasher = Sha256::new();
-    hasher.update(b"PVUGC_TIE_AGG");
-    
+    hasher.update(b"PVUGC_TIE_COL");
+
     let mut bytes = Vec::new();
     a.serialize_compressed(&mut bytes).unwrap();
     hasher.update(&bytes);
-    x_agg.serialize_compressed(&mut bytes).unwrap();
+    x_j.serialize_compressed(&mut bytes).unwrap();
     hasher.update(&bytes);
     commitment.serialize_compressed(&mut bytes).unwrap();
-    
+    hasher.update(&bytes);
+    // Bind to B-proof commitment to prevent mix-and-match across transcripts
+    b_commitment.serialize_compressed(&mut bytes).unwrap();
+    hasher.update(&bytes);
+
     E::ScalarField::from_le_bytes_mod_order(&hasher.finalize())
 }
 
@@ -213,24 +239,33 @@ mod tests {
         
         assert!(valid);
     }
-    
+
     #[test]
-    fn test_tie_proof() {
+    fn test_per_column_ties_detect_delta_redistribution() {
         let mut rng = test_rng();
-        
+
+        type E = Bls12_381;
+        // Base A and coefficients
         let a = G1Affine::rand(&mut rng);
-        let u_agg = Fr::from(5u64);
-        
-        // X_agg = u_agg·A
-        let x_agg = (a.into_group() * u_agg).into_affine();
-        
-        // Prove
-        let proof: DlrepTieProof<E> = prove_tie_aggregated(a, x_agg, u_agg, &mut rng);
-        
-        // Verify
-        let valid = verify_tie_aggregated(a, x_agg, &proof);
-        
-        assert!(valid);
+        let b1 = Fr::from(7u64);
+        let b2 = Fr::from(11u64);
+
+        // Original per-column X's
+        let x1 = (a.into_group() * b1).into_affine();
+        let x2 = (a.into_group() * b2).into_affine();
+
+        // Prove per-column ties (bind to a random B-commitment for this unit test)
+        let b_commitment = G2Affine::rand(&mut rng);
+        let ties = prove_ties_per_column::<E, _>(a, &[x1, x2], &[b1, b2], b_commitment, &mut rng);
+        assert!(verify_ties_per_column::<E>(a, &[x1, x2], &ties, b_commitment));
+
+        // Apply equal/opposite delta that preserves the aggregate
+        let delta = Fr::from(5u64);
+        let x1_prime = (x1.into_group() + a.into_group() * delta).into_affine();
+        let x2_prime = (x2.into_group() - a.into_group() * delta).into_affine();
+
+        // Per-column ties must fail on modified columns
+        assert!(!verify_ties_per_column::<E>(a, &[x1_prime, x2_prime], &ties, b_commitment));
     }
 }
 
