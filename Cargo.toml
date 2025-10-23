@@ -25,7 +25,7 @@ ark-bls12-381 = "0.5"
 ark-bls12-377 = "0.5"  # BLS12-377 for production (with BW6-761)
 ark-bw6-761   = "0.5"  # BW6-761 for production recursion
 ark-mnt4-298  = { version = "0.5", features = ["curve", "r1cs"] }  # Lightweight recursion cycle (inner)
-ark-mnt6-298  = { version = "0.5", features = ["r1cs"] }          # Lightweight recursion cycle (outer)
+ark-mnt6-298  = { version = "0.5", features = ["std", "r1cs"] }   # Lightweight recursion cycle (outer)
 ark-ec = "0.5"
 ark-ff = "0.5"
 ark-groth16 = { path = "ark-groth16-pvugc" }
