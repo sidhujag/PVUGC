@@ -1,6 +1,7 @@
 //! Security Tests for One-Sided GS PVUGC
 
 use arkworks_groth16::*;
+use arkworks_groth16::PoceColumnProof;
 use arkworks_groth16::ppe::PvugcVk;
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
 use ark_std::{UniformRand, rand::rngs::StdRng, rand::SeedableRng};
@@ -10,7 +11,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::alloc::AllocVar;
-use ark_ec::{CurveGroup, AffineRepr, pairing::PairingOutput};
+use ark_ec::{CurveGroup, AffineRepr, PrimeGroup, pairing::Pairing, pairing::PairingOutput};
 
 type E = Bls12_381;
 
@@ -199,7 +200,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     // Arming bases
     let mut y_cols = vec![pvugc_vk.beta_g2];
     y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-    let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
+    let bases: ColumnBases<E> = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
 
     // Honest arms
     let rho = Fr::from(7u64);
@@ -213,7 +214,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     let gs_digest = b"gs";
 
     // Prove with honest rho
-    let proof_ok = arkworks_groth16::poce::prove_poce_column(
+    let proof_ok: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
         &arms.y_cols_rho,
@@ -240,9 +241,10 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     let rho2 = Fr::from(5u64);
     let mut bad_arms = arms.clone();
     if bad_arms.y_cols_rho.len() > 2 {
-        bad_arms.y_cols_rho[2] = (bases.y_cols[2].into_group() * rho2).into_affine();
+        let y2_g2 = bases.y_cols[2].into_group();
+        bad_arms.y_cols_rho[2] = (y2_g2 * rho2).into_affine();
     }
-    let proof_bad = arkworks_groth16::poce::prove_poce_column(
+    let proof_bad: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
         &bad_arms.y_cols_rho,
@@ -270,7 +272,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     if swapped_arms.y_cols_rho.len() > 3 {
         swapped_arms.y_cols_rho.swap(2, 3);
     }
-    let proof_swapped = arkworks_groth16::poce::prove_poce_column(
+    let proof_swapped: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
         &swapped_arms.y_cols_rho,

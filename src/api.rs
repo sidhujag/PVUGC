@@ -89,6 +89,28 @@ impl OneSidedPvugc {
         ctx_hash: &[u8],             // Context hash
         gs_digest: &[u8],            // GS instance digest
     ) -> bool {
+        // Subgroup and identity checks for arms
+        // For Y-columns: if base is identity, arm MUST be identity; otherwise, arm must be non-identity and in subgroup
+        // For δ arm: MUST be non-identity and in subgroup
+        {
+            use ark_ec::PrimeGroup;
+            use ark_ff::PrimeField;
+            let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+            let is_good_g2 = |g: &E::G2Affine| {
+                if g.is_zero() { return false; }
+                (g.into_group().mul_bigint(order)).into_affine().is_zero()
+            };
+            for (y_base, d_arm) in bases.y_cols.iter().zip(col_arms.y_cols_rho.iter()) {
+                if y_base.is_zero() {
+                    if !d_arm.is_zero() { return false; }
+                } else {
+                    if !is_good_g2(d_arm) { return false; }
+                }
+            }
+            if col_arms.delta_rho.is_zero() { return false; }
+            if !is_good_g2(&col_arms.delta_rho) { return false; }
+        }
+
         verify_poce_column::<E>(
             &bases.y_cols,
             &bases.delta,
@@ -196,6 +218,8 @@ impl OneSidedPvugc {
 
         // 5. Verify PPE equals R(vk,x) using direct column pairing
         let r_target = compute_groth16_target(vk, public_inputs);
+        // Guard: R must not be identity
+        if r_target == PairingOutput::<E>(One::one()) { return false; }
         
         // Columns: [β₂, b_g2_query[0], b_g2_query[1..]] (δ supplied via Θ = C + sA)
         let mut y_cols = vec![pvugc_vk.beta_g2];
