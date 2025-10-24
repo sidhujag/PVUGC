@@ -379,7 +379,9 @@ dependencies = [
  "rand_core",
  "rayon",
  "sha2",
+ "subtle",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

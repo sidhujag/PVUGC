@@ -55,8 +55,9 @@ fn test_cannot_compute_k_from_arms_alone() {
     let k_expected = OneSidedPvugc::compute_r_to_rho(&r, &rho);
     
     // Create random fake commitments (not derived from valid proof)
-    use ark_std::test_rng;
-    let mut rng_fake = test_rng();
+    use ark_std::rand::SeedableRng;
+    use ark_std::rand::rngs::StdRng;
+    let mut rng_fake = StdRng::seed_from_u64(5);
     let fake_x_b_cols: Vec<_> = cols
         .y_cols
         .iter()

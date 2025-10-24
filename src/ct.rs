@@ -4,19 +4,22 @@ use chacha20poly1305::{aead::Aead, aead::KeyInit, ChaCha20Poly1305, Nonce, aead:
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::{Sha256};
+use zeroize::Zeroizing;
+use subtle::ConstantTimeEq;
+use ark_ec::pairing::{Pairing, PairingOutput};
 
 /// Derive a 32-byte AEAD key and 32-byte associated-data tag from GT bytes + context digest.
 fn derive_key_and_ad(k_bytes: &[u8], ctx_digest: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let mut ikm = Vec::with_capacity(16 + k_bytes.len() + ctx_digest.len());
+    let mut ikm = Zeroizing::new(Vec::with_capacity(16 + k_bytes.len() + ctx_digest.len()));
     ikm.extend_from_slice(b"PVUGC/AEAD/v1");
     ikm.extend_from_slice(k_bytes);
     ikm.extend_from_slice(ctx_digest);
     let hk = Hkdf::<Sha256>::new(None, &ikm);
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     let mut ad = [0u8; 32];
-    hk.expand(b"key", &mut key).expect("HKDF expand");
+    hk.expand(b"key", &mut *key).expect("HKDF expand");
     hk.expand(b"ad", &mut ad).expect("HKDF expand");
-    (key, ad)
+    (*key, ad)
 }
 
 /// Seal `plaintext` using `k_bytes` (serialized GT) and `ctx_digest` (transcript digest).
@@ -56,6 +59,17 @@ pub fn serialize_gt<E: ark_ec::pairing::Pairing>(k: &E::TargetField) -> Vec<u8> 
     let mut out = Vec::new();
     k.serialize_compressed(&mut out).expect("serialize");
     out
+}
+
+/// Constant-time equality for GT elements via canonical compressed bytes
+pub fn gt_eq_ct<E: Pairing>(a: &PairingOutput<E>, b: &PairingOutput<E>) -> bool {
+    use ark_serialize::CanonicalSerialize;
+    let mut ab = Vec::new();
+    let mut bb = Vec::new();
+    a.0.serialize_compressed(&mut ab).expect("serialize");
+    b.0.serialize_compressed(&mut bb).expect("serialize");
+    if ab.len() != bb.len() { return false; }
+    ab.ct_eq(&bb).into()
 }
 
 #[cfg(test)]

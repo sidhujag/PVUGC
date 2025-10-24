@@ -33,7 +33,7 @@ pub struct DlrepBProof<E: Pairing> {
 
 
 /// Prove B = Σ b_j·Y_j (multi-base DLREP)
-pub fn prove_b_msm<E: Pairing, R: RngCore>(
+pub fn prove_b_msm<E: Pairing, R: RngCore + rand_core::CryptoRng>(
     b_prime: E::G2Affine,  // B - β - Y_0 (public target)
     y_bases: &[E::G2Affine],  // Y_1, ..., Y_N
     delta_g2: E::G2Affine,  // δ for s term
@@ -104,7 +104,7 @@ pub fn verify_b_msm<E: Pairing>(
 /// - a: base in G1 (A)
 /// - x_cols: first limbs X_j in G1 for variable columns (aligned with b_coeffs)
 /// - b_coeffs: coefficients b_j used in B decomposition (secret)
-pub fn prove_ties_per_column<E: Pairing, R: RngCore>(
+pub fn prove_ties_per_column<E: Pairing, R: RngCore + rand_core::CryptoRng>(
     a: E::G1Affine,
     x_cols: &[E::G1Affine],
     b_coeffs: &[E::ScalarField],
@@ -209,13 +209,14 @@ fn compute_tie_col_challenge<E: Pairing>(
 mod tests {
     use super::*;
     use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
-    use ark_std::test_rng;
+    use ark_std::rand::SeedableRng;
+    use ark_std::rand::rngs::StdRng;
     
     type E = Bls12_381;
     
     #[test]
     fn test_dlrep_b_proof() {
-        let mut rng = test_rng();
+        let mut rng = StdRng::seed_from_u64(1);
         
         // Setup
         let y_bases = vec![G2Affine::rand(&mut rng), G2Affine::rand(&mut rng)];
@@ -242,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_per_column_ties_detect_delta_redistribution() {
-        let mut rng = test_rng();
+        let mut rng = StdRng::seed_from_u64(2);
 
         type E = Bls12_381;
         // Base A and coefficients

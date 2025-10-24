@@ -48,7 +48,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     }
     
     /// Create per-column tie proofs: for each variable column j, prove X_j = b_j · A
-    pub fn create_dlrep_ties<R: ark_std::rand::RngCore>(
+    pub fn create_dlrep_ties<R: ark_std::rand::RngCore + rand_core::CryptoRng>(
         &self,
         rng: &mut R,
     ) -> crate::dlrep::DlrepPerColumnTies<E> {
@@ -122,7 +122,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     
     /// Create DLREP proof for B coefficients
     /// Proves: B - β = s·δ + Σ b_j·query[j]
-    pub fn create_dlrep_b<R: ark_std::rand::RngCore>(
+    pub fn create_dlrep_b<R: ark_std::rand::RngCore + rand_core::CryptoRng>(
         &mut self,
         pvugc_vk: &crate::api::PvugcVk<E>,
         rng: &mut R,
@@ -219,14 +219,9 @@ mod tests {
     
     #[test]
     fn test_coefficient_recording() {
-        use ark_std::test_rng;
-        let _rng = test_rng();
-        
         let recorder = SimpleCoeffRecorder::<E>::new();
-        
         // Test that recorder initializes correctly
         assert!(recorder.get_coefficients().is_none());
-        
     }
     
 }

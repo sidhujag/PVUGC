@@ -57,7 +57,7 @@ impl OneSidedPvugc {
     /// 
     /// Proves that all column arms share the same ρ and ciphertext is key-committed
     /// to K = Poseidon2(ser(R^ρ)|ctx|GSdig)
-    pub fn attest_column_arming<E: Pairing, R: RngCore>(
+    pub fn attest_column_arming<E: Pairing, R: RngCore + rand_core::CryptoRng>(
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
         t_i: &E::G1Affine,           // T_i = s_i G
@@ -255,7 +255,7 @@ impl OneSidedPvugc {
         // 5. Verify PPE equals R(vk,x) using direct column pairing
         let r_target = compute_groth16_target(vk, public_inputs);
         // Guard: R must not be identity
-        if r_target == PairingOutput::<E>(One::one()) { return false; }
+        if crate::ct::gt_eq_ct::<E>(&r_target, &PairingOutput::<E>(One::one())) { return false; }
         
         // Columns: [β₂, b_g2_query[0], b_g2_query[1..]] (δ supplied via Θ = C + sA)
         let mut y_cols = vec![pvugc_vk.beta_g2];
@@ -276,15 +276,11 @@ impl OneSidedPvugc {
         lhs += E::pairing(c0, pvugc_vk.delta_g2);
         lhs += E::pairing(c1, pvugc_vk.delta_g2);
         
-        // Guard: LHS should not be identity
-        if lhs == PairingOutput::<E>(One::one()) { 
-            return false; 
-        }
+        // Guard: LHS should not be identity (constant-time compare)
+        if crate::ct::gt_eq_ct::<E>(&lhs, &PairingOutput::<E>(One::one())) { return false; }
         
-        // Check: LHS == R
-        if lhs != r_target { 
-            return false; 
-        }
+        // Check: LHS == R (constant-time compare)
+        if !crate::ct::gt_eq_ct::<E>(&lhs, &r_target) { return false; }
         
         true
     }
@@ -294,7 +290,7 @@ impl OneSidedPvugc {
         commitments: &OneSidedCommitments<E>,
         col_arms: &ColumnArms<E>,
     ) -> PairingOutput<E> {
-        crate::decap::decap(commitments, col_arms)
+        crate::decap::decap(commitments, col_arms).expect("decap failed")
     }
     
     /// Helper: Compute R^ρ

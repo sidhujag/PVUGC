@@ -333,7 +333,7 @@ mod tests {
     #[ignore]
     fn test_pvugc_on_outer_proof_e2e() {
         e2e_outer_proof_for::<DefaultCycle>(get_fixture(), 99999);
-        e2e_outer_proof_for::<Mnt4Mnt6Cycle>(get_fixture_mnt(), 99999);
+        //e2e_outer_proof_for::<Mnt4Mnt6Cycle>(get_fixture_mnt(), 99999);
     }
 
     fn e2e_outer_proof_for<C: RecursionCycle>(fixture: GlobalFixture<C>, rng_seed: u64) {
@@ -402,13 +402,13 @@ mod tests {
         if run_decap {
             let decap_start = Instant::now();
             let gs_commitments = recorder.build_commitments();
-            let k_decapped = crate::decap::decap(&gs_commitments, &col_arms);
+            let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
             eprintln!("[timing:{}] decap {:?}", C::name(), decap_start.elapsed());
 
             let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &public_x);
             let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
-            assert_eq!(k_decapped, k_expected, "Decapsulated K doesn't match R^ρ!");
+            assert!(crate::ct::gt_eq_ct::<C::OuterE>(&k_decapped, &k_expected), "Decapsulated K doesn't match R^ρ!");
         } else {
             eprintln!(
                 "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable)",

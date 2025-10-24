@@ -38,7 +38,7 @@ pub struct PoceColumnProof<E: Pairing> {
 ///
 /// Witness: (ρ_i, s_i, h_i)
 /// Public: ({D_j = Y_j^ρ_i}, D_δ = δ^ρ_i, T_i = s_i G, ctx_hash, GS_instance_digest, ct_i, τ_i)
-pub fn prove_poce_column<E: Pairing, R: RngCore>(
+pub fn prove_poce_column<E: Pairing, R: RngCore + rand_core::CryptoRng>(
     y_bases: &[E::G2Affine],  // Y_j bases
     delta_base: &E::G2Affine, // δ base
     y_arms: &[E::G2Affine],   // D_j = Y_j^ρ
@@ -287,11 +287,12 @@ fn compute_key_commitment_tag(key: &[u8], ad_core: &[u8], ciphertext: &[u8]) -> 
 mod tests {
     use super::*;
     use ark_bls12_381::{Bls12_381 as E, Fr, G2Affine};
-    use ark_std::test_rng;
+    use ark_std::rand::SeedableRng;
+    use ark_std::rand::rngs::StdRng;
 
     #[test]
     fn test_poce_column_proof() {
-        let mut rng = test_rng();
+        let mut rng = StdRng::seed_from_u64(3);
 
         // Create test bases and arms
         let y_bases = vec![G2Affine::rand(&mut rng), G2Affine::rand(&mut rng)];
@@ -347,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_poce_column_rejects_mixed_rho() {
-        let mut rng = test_rng();
+        let mut rng = StdRng::seed_from_u64(4);
 
         let y_bases = vec![G2Affine::rand(&mut rng), G2Affine::rand(&mut rng)];
         let delta_base = G2Affine::rand(&mut rng);

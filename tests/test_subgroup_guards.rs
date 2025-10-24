@@ -24,7 +24,7 @@ fn reject_zero_points_in_vk() {
 #[test]
 fn arm_columns_allows_some_identity_cols_but_not_all() {
     // one identity and one non-identity column per side
-    let mut rng = ark_std::test_rng();
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(6);
     let cols = ColumnBases::<E> {
         y_cols: vec![G2Affine::identity(), G2Affine::rand(&mut rng)],
         delta: G2Affine::rand(&mut rng),
@@ -38,7 +38,7 @@ fn arm_columns_allows_some_identity_cols_but_not_all() {
 fn arm_columns_rejects_zero_delta() {
     // Zero delta → Err
     let cols = ColumnBases::<E> { 
-        y_cols: vec![G2Affine::rand(&mut ark_std::test_rng())], 
+        y_cols: vec![G2Affine::rand(&mut ark_std::rand::rngs::StdRng::seed_from_u64(7))], 
         delta: G2Affine::identity() 
     };
     let rho = Fr::from(1u64);

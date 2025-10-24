@@ -8,6 +8,7 @@ use crate::arming::ColumnArms;
 use ark_ec::AffineRepr;
 #[allow(unused_imports)]
 use ark_std::Zero;
+use crate::error::{Error, Result};
 
 /// GS commitments for one-sided PPE
 #[derive(Clone, Debug)]
@@ -24,10 +25,10 @@ pub struct OneSidedCommitments<E: Pairing> {
 pub fn decap<E: Pairing>(
     commitments: &OneSidedCommitments<E>,
     col_arms: &ColumnArms<E>,
-) -> PairingOutput<E> {
+) -> Result<PairingOutput<E>> {
     // Size check (always)
     if commitments.x_b_cols.len() != col_arms.y_cols_rho.len() { 
-        panic!("|X_B| != |Y^rho|"); 
+        return Err(Error::MismatchedSizes); 
     }
     
     // Subgroup checks: ONLY in debug builds (very expensive!)
@@ -62,6 +63,6 @@ pub fn decap<E: Pairing>(
     let (c0, c1) = commitments.theta_delta_cancel;
     k += E::pairing(c0, col_arms.delta_rho);
     k += E::pairing(c1, col_arms.delta_rho);
-    k
+    Ok(k)
 }
 

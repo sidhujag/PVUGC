@@ -24,6 +24,7 @@ pub mod poce;
 pub mod api;
 pub mod error;
 pub mod ct;
+pub mod io;
 
 // Recursive demonstration modules (not for production use)
 // These modules demonstrate how PVUGC could work with proof-of-proof recursion
