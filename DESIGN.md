@@ -249,8 +249,14 @@ Meets all PVUGC goals but relies on WE/iO/LWE assumptions. Larger artifacts; hea
 fn setup_and_arm(
     pvugc_vk: &PvugcVk<E>,
     groth16_vk: &VerifyingKey<E>,
+    public_inputs: &[E::ScalarField],
     rho: &E::ScalarField,
-) -> Result<(Arms<E>, R: PairingOutput<E>)>
+) -> Result<(
+    ColumnBases<E>,
+    ColumnArms<E>,
+    PairingOutput<E>,
+    PairingOutput<E>,
+)>
 
 // Prover (online, repeatable)
 fn produce_bundle(
