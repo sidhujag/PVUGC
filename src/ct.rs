@@ -30,10 +30,11 @@ pub fn seal_with_k_bytes(
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
     let (key, ad) = derive_key_and_ad(k_bytes, ctx_digest);
     let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    let mut nonce = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce);
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &ad })
+        .encrypt(&nonce, Payload { msg: plaintext, aad: &ad })
         .map_err(|e| e.to_string())?;
     Ok((nonce.to_vec(), ct))
 }
@@ -48,8 +49,10 @@ pub fn open_with_k_bytes(
     if nonce.len() != 12 { return Err("invalid nonce length (expected 12 bytes)".into()); }
     let (key, ad) = derive_key_and_ad(k_bytes, ctx_digest);
     let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let nonce_array: [u8; 12] = nonce.try_into().map_err(|_| "invalid nonce length")?;
+    let nonce_obj = Nonce::from(nonce_array);
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: &ad })
+        .decrypt(&nonce_obj, Payload { msg: ciphertext, aad: &ad })
         .map_err(|e| e.to_string())
 }
 
@@ -82,13 +85,13 @@ mod tests {
         let k_bytes = b"dummy-pairing-output"; // In production, pass canonical GT bytes.
         let ctx = Sha256::digest(b"ctx-digest-example");
         let pt = b"hello world";
-        let (nonce, ct) = seal_with_k_bytes(k_bytes, &ctx, pt).expect("seal");
-        let out = open_with_k_bytes(k_bytes, &ctx, &nonce, &ct).expect("open");
+        let (nonce_bytes, ct) = seal_with_k_bytes(k_bytes, &ctx, pt).expect("seal");
+        let out = open_with_k_bytes(k_bytes, &ctx, &nonce_bytes, &ct).expect("open");
         assert_eq!(out, pt);
 
         // Different context must fail to open
         let bad_ctx = Sha256::digest(b"another-context");
-        assert!(open_with_k_bytes(k_bytes, &bad_ctx, &nonce, &ct).is_err());
+        assert!(open_with_k_bytes(k_bytes, &bad_ctx, &nonce_bytes, &ct).is_err());
     }
 }
 

@@ -6,7 +6,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
-use ark_ec::{pairing::Pairing, AffineRepr};
+use ark_ec::AffineRepr;
 use ark_ff::{PrimeField, Field};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
@@ -14,7 +14,6 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
-use ark_std::Zero;
 
 use arkworks_groth16::api::{OneSidedPvugc, PvugcBundle};
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
@@ -91,7 +90,7 @@ fuzz_target!(|data: &[u8]| {
     use arkworks_groth16::dlrep::{DlrepPerColumnTies};
     let mut commitments_g1 = Vec::new();
     let mut responses = Vec::new();
-    for x_j in &x_cols {
+    for _x_j in &x_cols {
         let k = Fr::from_le_bytes_mod_order(&take_bytes::<32>(&mut data).unwrap_or([2;32]));
         let t = (a_g1.into_group() * k).into_affine();
         // wrong response binding

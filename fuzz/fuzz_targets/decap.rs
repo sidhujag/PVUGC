@@ -81,8 +81,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Expected K = R^rho
     let k_expected = PairingOutput::<E>(r.0.pow(rho.into_bigint()));
-    let k_actual = decap::<E>(&commitments, &col_arms);
-    if k_actual != k_expected {
+    let k_actual = decap::<E>(&commitments, &col_arms).expect("decap");
+    if !arkworks_groth16::ct::gt_eq_ct::<E>(&k_actual, &k_expected) {
         panic!("Decap fuzzer equality failed: K != R^rho");
     }
 });
