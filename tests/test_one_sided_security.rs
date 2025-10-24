@@ -214,6 +214,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     let gs_digest = b"gs";
 
     // Prove with honest rho
+    let ct = b"ct"; let tau = b"tau";
     let proof_ok: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
@@ -224,6 +225,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &s_i,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
         &mut rng,
     );
     assert!(arkworks_groth16::poce::verify_poce_column(
@@ -235,6 +238,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &proof_ok,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
     ));
 
     // Mixed rho: change one NON-ZERO column's arm to rho' while keeping others at rho
@@ -249,6 +254,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         let y_g2 = bases.y_cols[i].into_group();
         bad_arms.y_cols_rho[i] = (y_g2 * rho2).into_affine();
     }
+    let ct = b"ct"; let tau = b"tau";
     let proof_bad: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
@@ -259,6 +265,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &s_i,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
         &mut rng,
     );
     assert!(!arkworks_groth16::poce::verify_poce_column(
@@ -270,6 +278,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &proof_bad,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
     ));
 
     // Swapped columns (two NON-ZERO indices) should also fail
@@ -281,6 +291,7 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     if nz_idx.len() >= 2 {
         swapped_arms.y_cols_rho.swap(nz_idx[0], nz_idx[1]);
     }
+    let ct = b"ct"; let tau = b"tau";
     let proof_swapped: PoceColumnProof<E> = arkworks_groth16::poce::prove_poce_column(
         &bases.y_cols,
         &bases.delta,
@@ -291,6 +302,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &s_i,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
         &mut rng,
     );
     assert!(!arkworks_groth16::poce::verify_poce_column(
@@ -302,6 +315,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         &proof_swapped,
         ctx_hash,
         gs_digest,
+        ct,
+        tau,
     ));
 }
 #[test]

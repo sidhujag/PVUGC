@@ -48,6 +48,8 @@ pub fn prove_poce_column<E: Pairing, R: RngCore>(
     s_i: &E::ScalarField,     // s_i (secret)
     ctx_hash: &[u8],          // Context hash
     gs_digest: &[u8],         // GS instance digest
+    ct_i: &[u8],              // Ciphertext bytes (published)
+    tau_i: &[u8],             // Key-commitment tag bytes (published)
     rng: &mut R,
 ) -> PoceColumnProof<E> {
     assert_eq!(y_bases.len(), y_arms.len());
@@ -66,7 +68,7 @@ pub fn prove_poce_column<E: Pairing, R: RngCore>(
     // T commitment: k_s * G1_generator
     let t_commitment = (<E as Pairing>::G1::generator() * k_s).into_affine();
 
-    // Challenge: H(y_bases || delta_base || y_arms || delta_arm || t_i || commitment || t_commitment || ctx_hash || gs_digest)
+    // Challenge: H(y_bases || delta_base || y_arms || delta_arm || t_i || commitment || t_commitment || ctx_hash || gs_digest || ct_i || tau_i)
     let challenge = compute_poce_challenge::<E>(
         y_bases,
         delta_base,
@@ -78,6 +80,8 @@ pub fn prove_poce_column<E: Pairing, R: RngCore>(
         &t_commitment,
         ctx_hash,
         gs_digest,
+        ct_i,
+        tau_i,
     );
 
     // Responses
@@ -104,6 +108,8 @@ pub fn verify_poce_column<E: Pairing>(
     proof: &PoceColumnProof<E>,
     ctx_hash: &[u8],  // Context hash
     gs_digest: &[u8], // GS instance digest
+    ct_i: &[u8],      // Ciphertext bytes (published)
+    tau_i: &[u8],     // Key-commitment tag bytes (published)
 ) -> bool {
     // Recompute challenge
     if y_bases.len() != y_arms.len() || y_bases.len() != proof.commitments.len() {
@@ -121,6 +127,8 @@ pub fn verify_poce_column<E: Pairing>(
         &proof.t_commitment,
         ctx_hash,
         gs_digest,
+        ct_i,
+        tau_i,
     );
 
     if challenge != proof.challenge {
@@ -190,6 +198,8 @@ fn compute_poce_challenge<E: Pairing>(
     t_commitment: &E::G1Affine,
     ctx_hash: &[u8],
     gs_digest: &[u8],
+    ct_i: &[u8],
+    tau_i: &[u8],
 ) -> E::ScalarField {
     let mut hasher = Sha256::new();
 
@@ -235,6 +245,10 @@ fn compute_poce_challenge<E: Pairing>(
     // Add context data
     hasher.update(ctx_hash);
     hasher.update(gs_digest);
+
+    // Bind ciphertext and its tag into FS transcript
+    hasher.update(ct_i);
+    hasher.update(tau_i);
 
     // Convert hash to field element
     let hash_bytes = hasher.finalize();
@@ -297,6 +311,8 @@ mod tests {
         let gs_digest = b"test_gs_digest";
 
         // Prove
+        let ct = b"dummy-ct";
+        let tau = b"dummy-tau";
         let proof = prove_poce_column::<E, _>(
             &y_bases,
             &delta_base,
@@ -307,6 +323,8 @@ mod tests {
             &s_i,
             ctx_hash,
             gs_digest,
+            ct,
+            tau,
             &mut rng,
         );
 
@@ -320,6 +338,8 @@ mod tests {
             &proof,
             ctx_hash,
             gs_digest,
+            ct,
+            tau,
         );
 
         assert!(valid);
@@ -347,6 +367,8 @@ mod tests {
         let gs_digest = b"test_gs_digest";
 
         // Try to prove with rho1 (should fail)
+        let ct = b"dummy-ct";
+        let tau = b"dummy-tau";
         let proof = prove_poce_column::<E, _>(
             &y_bases,
             &delta_base,
@@ -357,6 +379,8 @@ mod tests {
             &s_i,
             ctx_hash,
             gs_digest,
+            ct,
+            tau,
             &mut rng,
         );
 
@@ -370,6 +394,8 @@ mod tests {
             &proof,
             ctx_hash,
             gs_digest,
+            ct,
+            tau,
         );
 
         assert!(!valid);

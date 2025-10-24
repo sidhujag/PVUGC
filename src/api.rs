@@ -15,6 +15,7 @@ pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
 use crate::dlrep::{verify_b_msm, verify_ties_per_column};
 use crate::ppe::validate_groth16_vk_subgroups;
 use crate::poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
+use sha2::{Digest, Sha256};
 use ark_std::rand::RngCore;
 
 /// Complete PVUGC bundle
@@ -64,6 +65,8 @@ impl OneSidedPvugc {
         s_i: &E::ScalarField,        // s_i (secret)
         ctx_hash: &[u8],             // Context hash
         gs_digest: &[u8],            // GS instance digest
+        ct_i: &[u8],                 // Ciphertext bytes (published)
+        tau_i: &[u8],                // Key-commitment tag bytes (published)
         rng: &mut R,
     ) -> PoceColumnProof<E> {
         prove_poce_column::<E, R>(
@@ -76,6 +79,8 @@ impl OneSidedPvugc {
             s_i,
             ctx_hash,
             gs_digest,
+            ct_i,
+            tau_i,
             rng,
         )
     }
@@ -88,6 +93,8 @@ impl OneSidedPvugc {
         proof: &PoceColumnProof<E>,
         ctx_hash: &[u8],             // Context hash
         gs_digest: &[u8],            // GS instance digest
+        ct_i: &[u8],                 // Ciphertext bytes (published)
+        tau_i: &[u8],                // Key-commitment tag bytes (published)
     ) -> bool {
         // Subgroup and identity checks for arms
         // For Y-columns: if base is identity, arm MUST be identity; otherwise, arm must be non-identity and in subgroup
@@ -120,6 +127,8 @@ impl OneSidedPvugc {
             proof,
             ctx_hash,
             gs_digest,
+            ct_i,
+            tau_i,
         )
     }
 
@@ -134,6 +143,33 @@ impl OneSidedPvugc {
         tau_i: &[u8],                 // Key-commitment tag
     ) -> bool {
         verify_poce_b::<E>(derived_m, ctx_hash, gs_digest, ct_i, tau_i)
+    }
+
+    /// Compute PoCE-B key-commitment tag for a ciphertext (deposit-time helper)
+    ///
+    /// τ = SHA256( K || ctx_hash || ct ), where K = SHA256( ser(R^ρ) || ctx_hash || gs_digest )
+    pub fn compute_key_commitment_tag_for_ciphertext<E: Pairing>(
+        derived_m: &PairingOutput<E>,
+        ctx_hash: &[u8],
+        gs_digest: &[u8],
+        ciphertext: &[u8],
+    ) -> Vec<u8> {
+        use ark_serialize::CanonicalSerialize;
+        // Derive K the same way PoCE-B does
+        let mut h = Sha256::new();
+        let mut buf = Vec::new();
+        derived_m.serialize_compressed(&mut buf).expect("serialize GT");
+        h.update(&buf);
+        h.update(ctx_hash);
+        h.update(gs_digest);
+        let k = h.finalize();
+
+        // Compute τ
+        let mut h2 = Sha256::new();
+        h2.update(&k);
+        h2.update(ctx_hash);
+        h2.update(ciphertext);
+        h2.finalize().to_vec()
     }
     
     /// Verify complete bundle

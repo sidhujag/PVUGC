@@ -116,7 +116,12 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let ctx_hash = b"test_context_hash";
     let gs_digest = b"test_gs_digest";
     
-    // Create PoCE-A proof
+    // Create a deposit-time ciphertext and tag bound to expected K = R^ρ
+    let plaintext = b"simulated_ciphertext";
+    let (nonce, ct) = OneSidedPvugc::encrypt_with_key(&k_expected, ctx_hash, plaintext).expect("encrypt");
+    let tau = OneSidedPvugc::compute_key_commitment_tag_for_ciphertext(&k_expected, ctx_hash, gs_digest, &ct);
+
+    // Create PoCE-A proof (bind arming to ciphertext and tag)
     let poce_proof = OneSidedPvugc::attest_column_arming(
         &_bases_cols,
         &col_arms,
@@ -125,6 +130,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &s_i,
         ctx_hash,
         gs_digest,
+        &ct,
+        &tau,
         &mut rng,
     );
     
@@ -136,6 +143,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &poce_proof,
         ctx_hash,
         gs_digest,
+        &ct,
+        &tau,
     ));
     
     // === SPEND TIME - PROOF 1 ===
@@ -161,10 +170,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     
     let k1 = OneSidedPvugc::decapsulate(&commitments1, &col_arms);
     
-    // === CT ENCRYPTION (DEPOSIT-TIME) ===
-    // Encrypt once at deposit, using the statement-derived expected key K = R^ρ
-    let plaintext = b"simulated_ciphertext";
-    let (nonce, ct) = OneSidedPvugc::encrypt_with_key(&k_expected, ctx_hash, plaintext).expect("encrypt");
+    // (ct, tau) already computed above and bound into PoCE-A
     
     // === SPEND TIME - PROOF 2 ===
     
