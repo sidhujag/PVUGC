@@ -66,8 +66,8 @@ fuzz_target!(|data: &[u8]| {
     let (_pk2, vk2) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng2).unwrap();
 
     // Compute K_i = R(vk_i, x)^rho
-    let r1 = compute_groth16_target::<E>(&vk1, &[x]);
-    let r2 = compute_groth16_target::<E>(&vk2, &[x]);
+    let r1 = compute_groth16_target::<E>(&vk1, &[x]).expect("compute_groth16_target");
+    let r2 = compute_groth16_target::<E>(&vk2, &[x]).expect("compute_groth16_target");
     let k1 = PairingOutput::<E>(r1.0.pow(rho.into_bigint()));
     let k2 = PairingOutput::<E>(r2.0.pow(rho.into_bigint()));
 

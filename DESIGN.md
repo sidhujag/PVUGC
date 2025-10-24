@@ -250,7 +250,7 @@ fn setup_and_arm(
     pvugc_vk: &PvugcVk<E>,
     groth16_vk: &VerifyingKey<E>,
     rho: &E::ScalarField,
-) -> (Arms<E>, R: PairingOutput<E>)
+) -> Result<(Arms<E>, R: PairingOutput<E>)>
 
 // Prover (online, repeatable)
 fn produce_bundle(

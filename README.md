@@ -120,7 +120,8 @@ let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
 
 // Arm bases at deposit time (one-time)
 let rho = Fr::rand(&mut rng);
-let (_bases, arms, _r, _k) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho);
+let (_bases, arms, _r, _k) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho)
+    .expect("setup_and_arm");
 
 // Publish: arms, R = target^1 (computable from vk + public_inputs)
 // Secret: rho
@@ -142,7 +143,8 @@ let valid = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs);
 
 if valid {
     // Extract key
-    let k = OneSidedPvugc::decapsulate(&bundle.gs_commitments, &arms);
+    let k = OneSidedPvugc::decapsulate(&bundle.gs_commitments, &arms)
+        .expect("decapsulate");
     // k = R^ρ (same for any valid proof of same statement)
 }
 ```

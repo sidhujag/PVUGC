@@ -78,9 +78,10 @@ fuzz_target!(|data: &[u8]| {
 
 
     // Canonical column setup once (arms independent of x)
-    let (_bases_cols, col_arms, _r, _k) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x1], &rho);
-    let r1 = compute_groth16_target::<E>(&vk, &[x1]);
-    let r2 = compute_groth16_target::<E>(&vk, &[x2]);
+    let (_bases_cols, col_arms, _r, _k) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x1], &rho)
+        .expect("setup_and_arm");
+    let r1 = compute_groth16_target::<E>(&vk, &[x1]).expect("compute_groth16_target");
+    let r2 = compute_groth16_target::<E>(&vk, &[x2]).expect("compute_groth16_target");
 
     // Take k1 = r1^rho and k2 = r2^rho; then assert k1 != k2 for x1 != x2.
     let k1 = OneSidedPvugc::compute_r_to_rho::<E>(&r1, &rho);
@@ -113,8 +114,8 @@ fuzz_target!(|data: &[u8]| {
             &mut rec2,
         ).unwrap();
         let commitments2: OneSidedCommitments<E> = rec2.build_commitments();
-        let kd1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms);
-        let kd2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms);
+        let kd1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
+        let kd2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms).expect("decapsulate");
         if kd1 == kd2 { panic!("Decap collision across different statements"); }
         let _ = (proof1, proof2);
     }

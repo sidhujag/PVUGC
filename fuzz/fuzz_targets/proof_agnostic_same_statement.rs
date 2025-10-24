@@ -75,7 +75,8 @@ fuzz_target!(|data: &[u8]| {
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
     // Canonical column setup and arming
-    let (_bases, col_arms, _r, k_expected_from_setup) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x], &rho);
+    let (_bases, col_arms, _r, k_expected_from_setup) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x], &rho)
+        .expect("setup_and_arm");
 
     // Deterministic RNGs
     let mut rng1 = ark_std::rand::rngs::StdRng::seed_from_u64(seed1);
@@ -101,8 +102,8 @@ fuzz_target!(|data: &[u8]| {
     let commitments2: arkworks_groth16::decap::OneSidedCommitments<E> = rec2.build_commitments();
 
     // Decap both; they must be identical and equal R^ρ
-    let k1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms);
-    let k2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms);
+    let k1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
+    let k2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms).expect("decapsulate");
     if k1 != k2 {
         panic!("Proof-agnostic violation: K1 != K2 for same (vk,x,rho)");
     }

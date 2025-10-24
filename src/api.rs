@@ -1,22 +1,19 @@
 //! Integration API for One-Sided GS PVUGC
 
 use ark_ec::pairing::{Pairing, PairingOutput};
-use ark_ec::{CurveGroup, AffineRepr};
-use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::One;
+use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
 
-use crate::{
-    OneSidedCommitments,
-    compute_groth16_target,
-    DlrepBProof, DlrepPerColumnTies,
-};
-use crate::arming::{ColumnBases, ColumnArms, arm_columns};
-pub use crate::ppe::{PvugcVk, validate_pvugc_vk_subgroups};
+use crate::arming::{arm_columns, ColumnArms, ColumnBases};
 use crate::dlrep::{verify_b_msm, verify_ties_per_column};
+use crate::error::{Error, Result as PvugcResult};
+use crate::poce::{prove_poce_column, verify_poce_b, verify_poce_column, PoceColumnProof};
 use crate::ppe::validate_groth16_vk_subgroups;
-use crate::poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
-use sha2::{Digest, Sha256};
+pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
+use crate::{compute_groth16_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
 use ark_std::rand::RngCore;
+use sha2::{Digest, Sha256};
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
@@ -43,30 +40,45 @@ impl OneSidedPvugc {
         vk: &Groth16VK<E>,
         public_inputs: &[E::ScalarField],
         rho: &E::ScalarField,
-    ) -> (ColumnBases<E>, ColumnArms<E>, PairingOutput<E>, PairingOutput<E>) {
-        let r = compute_groth16_target(vk, public_inputs);
+    ) -> PvugcResult<(
+        ColumnBases<E>,
+        ColumnArms<E>,
+        PairingOutput<E>,
+        PairingOutput<E>,
+    )> {
+        if !validate_pvugc_vk_subgroups(pvugc_vk) {
+            return Err(Error::InvalidSubgroup);
+        }
+        if !validate_groth16_vk_subgroups(vk) {
+            return Err(Error::InvalidSubgroup);
+        }
+
+        let r = compute_groth16_target(vk, public_inputs)?;
         let mut y_cols = vec![pvugc_vk.beta_g2];
         y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
-        let col_arms = arm_columns(&bases, rho).expect("arm_columns failed");
+        let bases = ColumnBases {
+            y_cols,
+            delta: pvugc_vk.delta_g2,
+        };
+        let col_arms = arm_columns(&bases, rho)?;
         let k = Self::compute_r_to_rho(&r, rho);
-        (bases, col_arms, r, k)
+        Ok((bases, col_arms, r, k))
     }
 
     /// Produce PoCE-A attestation for column arming (arm-time)
-    /// 
+    ///
     /// Proves that all column arms share the same ρ and ciphertext is key-committed
     /// to K = Poseidon2(ser(R^ρ)|ctx|GSdig)
     pub fn attest_column_arming<E: Pairing, R: RngCore + rand_core::CryptoRng>(
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
-        t_i: &E::G1Affine,           // T_i = s_i G
-        rho: &E::ScalarField,        // ρ_i (secret)
-        s_i: &E::ScalarField,        // s_i (secret)
-        ctx_hash: &[u8],             // Context hash
-        gs_digest: &[u8],            // GS instance digest
-        ct_i: &[u8],                 // Ciphertext bytes (published)
-        tau_i: &[u8],                // Key-commitment tag bytes (published)
+        t_i: &E::G1Affine,    // T_i = s_i G
+        rho: &E::ScalarField, // ρ_i (secret)
+        s_i: &E::ScalarField, // s_i (secret)
+        ctx_hash: &[u8],      // Context hash
+        gs_digest: &[u8],     // GS instance digest
+        ct_i: &[u8],          // Ciphertext bytes (published)
+        tau_i: &[u8],         // Key-commitment tag bytes (published)
         rng: &mut R,
     ) -> PoceColumnProof<E> {
         prove_poce_column::<E, R>(
@@ -89,13 +101,18 @@ impl OneSidedPvugc {
     pub fn verify_column_arming<E: Pairing>(
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
-        t_i: &E::G1Affine,           // T_i = s_i G
+        t_i: &E::G1Affine, // T_i = s_i G
         proof: &PoceColumnProof<E>,
-        ctx_hash: &[u8],             // Context hash
-        gs_digest: &[u8],            // GS instance digest
-        ct_i: &[u8],                 // Ciphertext bytes (published)
-        tau_i: &[u8],                // Key-commitment tag bytes (published)
+        ctx_hash: &[u8],  // Context hash
+        gs_digest: &[u8], // GS instance digest
+        ct_i: &[u8],      // Ciphertext bytes (published)
+        tau_i: &[u8],     // Key-commitment tag bytes (published)
     ) -> bool {
+        // Length guard before zipping (prevents silent truncation if caller messes up)
+        if bases.y_cols.len() != col_arms.y_cols_rho.len() {
+            return false;
+        }
+
         // Subgroup and identity checks for arms
         // For Y-columns: if base is identity, arm MUST be identity; otherwise, arm must be non-identity and in subgroup
         // For δ arm: MUST be non-identity and in subgroup
@@ -104,18 +121,28 @@ impl OneSidedPvugc {
             use ark_ff::PrimeField;
             let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
             let is_good_g2 = |g: &E::G2Affine| {
-                if g.is_zero() { return false; }
+                if g.is_zero() {
+                    return false;
+                }
                 (g.into_group().mul_bigint(order)).into_affine().is_zero()
             };
             for (y_base, d_arm) in bases.y_cols.iter().zip(col_arms.y_cols_rho.iter()) {
                 if y_base.is_zero() {
-                    if !d_arm.is_zero() { return false; }
+                    if !d_arm.is_zero() {
+                        return false;
+                    }
                 } else {
-                    if !is_good_g2(d_arm) { return false; }
+                    if !is_good_g2(d_arm) {
+                        return false;
+                    }
                 }
             }
-            if col_arms.delta_rho.is_zero() { return false; }
-            if !is_good_g2(&col_arms.delta_rho) { return false; }
+            if col_arms.delta_rho.is_zero() {
+                return false;
+            }
+            if !is_good_g2(&col_arms.delta_rho) {
+                return false;
+            }
         }
 
         verify_poce_column::<E>(
@@ -133,10 +160,10 @@ impl OneSidedPvugc {
     }
 
     /// Verify PoCE-B key-commitment (decap-time, decapper-local)
-    /// 
+    ///
     /// Verifies that ciphertext is key-committed to the derived key
     pub fn verify_key_commitment<E: Pairing>(
-        derived_m: &PairingOutput<E>,  // R^ρ derived from attestation
+        derived_m: &PairingOutput<E>, // R^ρ derived from attestation
         ctx_hash: &[u8],              // Context hash
         gs_digest: &[u8],             // GS instance digest
         ct_i: &[u8],                  // Ciphertext
@@ -158,7 +185,9 @@ impl OneSidedPvugc {
         // Derive K the same way PoCE-B does
         let mut h = Sha256::new();
         let mut buf = Vec::new();
-        derived_m.serialize_compressed(&mut buf).expect("serialize GT");
+        derived_m
+            .serialize_compressed(&mut buf)
+            .expect("serialize GT");
         h.update(&buf);
         h.update(ctx_hash);
         h.update(gs_digest);
@@ -171,7 +200,7 @@ impl OneSidedPvugc {
         h2.update(ciphertext);
         h2.finalize().to_vec()
     }
-    
+
     /// Verify complete bundle
     pub fn verify<E: Pairing>(
         bundle: &PvugcBundle<E>,
@@ -179,7 +208,15 @@ impl OneSidedPvugc {
         vk: &Groth16VK<E>,
         public_inputs: &[E::ScalarField],
     ) -> bool {
-        Self::verify_with_limits(bundle, pvugc_vk, vk, public_inputs, &VerifyLimits { max_b_columns: None })
+        Self::verify_with_limits(
+            bundle,
+            pvugc_vk,
+            vk,
+            public_inputs,
+            &VerifyLimits {
+                max_b_columns: None,
+            },
+        )
     }
 
     /// Verify with optional limits (e.g., N_max to mitigate DoS)
@@ -191,78 +228,116 @@ impl OneSidedPvugc {
         limits: &VerifyLimits,
     ) -> bool {
         // 0. Basic guards
-        if !validate_pvugc_vk_subgroups(pvugc_vk) { 
-            return false; 
+        if !validate_pvugc_vk_subgroups(pvugc_vk) {
+            return false;
         }
         if !validate_groth16_vk_subgroups(vk) {
             return false;
         }
         if let Some(n_max) = limits.max_b_columns {
-            if pvugc_vk.b_g2_query.len() > n_max { return false; }
+            if pvugc_vk.b_g2_query.len() > n_max {
+                return false;
+            }
         }
-        
+
         // 1. Verify Groth16 proof (standard)
         use ark_groth16::Groth16;
         use ark_snark::SNARK;
-        
-        let groth16_valid = Groth16::<E>::verify(vk, public_inputs, &bundle.groth16_proof)
-            .unwrap_or(false);
-        
+
+        let groth16_valid =
+            Groth16::<E>::verify(vk, public_inputs, &bundle.groth16_proof).unwrap_or(false);
+
         if !groth16_valid {
             return false;
         }
-        
+
         // 2. Verify DLREP_B against B' = B - β₂ - Y_0, variables are b_g2_query[1..]
+        let b_query: &[E::G2Affine] = &pvugc_vk.b_g2_query;
+        let (first_b_col, variable_b_cols) = match b_query.split_first() {
+            Some(split) => split,
+            None => return false,
+        };
+
         let b_prime = (bundle.groth16_proof.b.into_group()
-                     - pvugc_vk.beta_g2.into_group()
-                     - pvugc_vk.b_g2_query[0].into_group()).into_affine();
-        
+            - pvugc_vk.beta_g2.into_group()
+            - first_b_col.into_group())
+        .into_affine();
+
         // Verify over b_g2_query[1..] only (variable part)
-        let dlrep_b_ok = verify_b_msm::<E>(b_prime, &pvugc_vk.b_g2_query[1..], pvugc_vk.delta_g2, &bundle.dlrep_b);
-        if !dlrep_b_ok { 
-            return false; 
+        let dlrep_b_ok = verify_b_msm::<E>(
+            b_prime,
+            variable_b_cols,
+            pvugc_vk.delta_g2,
+            &bundle.dlrep_b,
+        );
+        if !dlrep_b_ok {
+            return false;
         }
-        
+
         // 3. Verify per-column same-scalar ties over G1 for variable columns only
         let a = bundle.groth16_proof.a;
         // x_cols for variable B-columns align with b_g2_query[1..] → start from index 2
-        let mut x_cols: Vec<E::G1Affine> = Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(2));
+        let mut x_cols: Vec<E::G1Affine> =
+            Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(2));
         for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
-            if i >= 2 { x_cols.push(*x0); }
+            if i >= 2 {
+                x_cols.push(*x0);
+            }
         }
-        let ties_ok = verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
-        if !ties_ok { return false; }
-        
+        let ties_ok =
+            verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
+        if !ties_ok {
+            return false;
+        }
+
         // 4. Subgroup/identity checks on commitments (allow zero limbs, enforce subgroup when non-zero)
         {
-            use ark_ff::PrimeField;
             use ark_ec::PrimeGroup;
+            use ark_ff::PrimeField;
             let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
             let is_good_g1 = |g: &E::G1Affine| {
-                if g.is_zero() { return true; }
+                if g.is_zero() {
+                    return true;
+                }
                 (g.into_group().mul_bigint(order)).into_affine().is_zero()
             };
             for (x0, x1) in &bundle.gs_commitments.x_b_cols {
-                if !is_good_g1(x0) || !is_good_g1(x1) { return false; }
+                if !is_good_g1(x0) || !is_good_g1(x1) {
+                    return false;
+                }
             }
             for (t0, t1) in &bundle.gs_commitments.theta {
-                if !is_good_g1(t0) || !is_good_g1(t1) { return false; }
+                if !is_good_g1(t0) || !is_good_g1(t1) {
+                    return false;
+                }
             }
             let (c0, c1) = bundle.gs_commitments.theta_delta_cancel;
-            if !is_good_g1(&c0) || !is_good_g1(&c1) { return false; }
+            if !is_good_g1(&c0) || !is_good_g1(&c1) {
+                return false;
+            }
         }
 
         // 5. Verify PPE equals R(vk,x) using direct column pairing
-        let r_target = compute_groth16_target(vk, public_inputs);
+        let r_target = match compute_groth16_target(vk, public_inputs) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
         // Guard: R must not be identity
-        if crate::ct::gt_eq_ct::<E>(&r_target, &PairingOutput::<E>(One::one())) { return false; }
-        
+        if crate::ct::gt_eq_ct::<E>(&r_target, &PairingOutput::<E>(One::one())) {
+            return false;
+        }
+
         // Columns: [β₂, b_g2_query[0], b_g2_query[1..]] (δ supplied via Θ = C + sA)
         let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        if bundle.gs_commitments.x_b_cols.len() != y_cols.len() { return false; }
-        if bundle.gs_commitments.theta.is_empty() { return false; }
-        
+        y_cols.push(*first_b_col);
+        y_cols.extend_from_slice(variable_b_cols);
+        if bundle.gs_commitments.x_b_cols.len() != y_cols.len() {
+            return false;
+        }
+        if bundle.gs_commitments.theta.is_empty() {
+            return false;
+        }
+
         let mut lhs = PairingOutput::<E>(One::one());
         for ((x0, x1), y) in bundle.gs_commitments.x_b_cols.iter().zip(&y_cols) {
             lhs += E::pairing(*x0, *y);
@@ -275,24 +350,28 @@ impl OneSidedPvugc {
         let (c0, c1) = bundle.gs_commitments.theta_delta_cancel;
         lhs += E::pairing(c0, pvugc_vk.delta_g2);
         lhs += E::pairing(c1, pvugc_vk.delta_g2);
-        
+
         // Guard: LHS should not be identity (constant-time compare)
-        if crate::ct::gt_eq_ct::<E>(&lhs, &PairingOutput::<E>(One::one())) { return false; }
-        
+        if crate::ct::gt_eq_ct::<E>(&lhs, &PairingOutput::<E>(One::one())) {
+            return false;
+        }
+
         // Check: LHS == R (constant-time compare)
-        if !crate::ct::gt_eq_ct::<E>(&lhs, &r_target) { return false; }
-        
+        if !crate::ct::gt_eq_ct::<E>(&lhs, &r_target) {
+            return false;
+        }
+
         true
     }
-    
+
     /// Decapsulate to get K = R^ρ
     pub fn decapsulate<E: Pairing>(
         commitments: &OneSidedCommitments<E>,
         col_arms: &ColumnArms<E>,
-    ) -> PairingOutput<E> {
-        crate::decap::decap(commitments, col_arms).expect("decap failed")
+    ) -> PvugcResult<PairingOutput<E>> {
+        crate::decap::decap(commitments, col_arms)
     }
-    
+
     /// Helper: Compute R^ρ
     pub fn compute_r_to_rho<E: Pairing>(
         r: &PairingOutput<E>,
@@ -302,7 +381,7 @@ impl OneSidedPvugc {
         // PairingOutput doesn't have pow, so we use the .0 field
         use ark_ff::Field;
         use ark_ff::PrimeField;
-        
+
         let r_to_rho = r.0.pow(&rho.into_bigint());
         PairingOutput(r_to_rho)
     }
@@ -312,9 +391,10 @@ impl OneSidedPvugc {
         derived_m: &PairingOutput<E>,
         ctx_digest: &[u8],
         plaintext: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+    ) -> core::result::Result<(Vec<u8>, Vec<u8>), String> {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
         crate::ct::seal_with_k_bytes(&k_bytes, ctx_digest, plaintext)
+            .map_err(|e| e.to_string())
     }
 
     /// Decrypt using derived key K (PairingOutput), bound to ctx_digest
@@ -323,10 +403,9 @@ impl OneSidedPvugc {
         ctx_digest: &[u8],
         nonce: &[u8],
         ciphertext: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    ) -> core::result::Result<Vec<u8>, String> {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
         crate::ct::open_with_k_bytes(&k_bytes, ctx_digest, nonce, ciphertext)
+            .map_err(|e| e.to_string())
     }
 }
-
-

@@ -2,9 +2,10 @@
 //!
 //! Builds PPE with target R(vk,x) = e(α,β) · e(L(x), γ)
 
+use crate::error::{Error, Result};
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::AffineRepr;
-use ark_ff::{PrimeField, Field};
+use ark_ff::{Field, PrimeField};
 use ark_groth16::VerifyingKey as Groth16VK;
 use ark_serialize::CanonicalSerialize;
 use ark_std::Zero;
@@ -17,18 +18,26 @@ use sha2::{Digest, Sha256};
 pub fn compute_groth16_target<E: Pairing>(
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
-) -> PairingOutput<E> {
+) -> Result<PairingOutput<E>> {
+    let expected_inputs = vk.gamma_abc_g1.len().saturating_sub(1);
+    if public_inputs.len() != expected_inputs {
+        return Err(Error::PublicInputLength {
+            expected: expected_inputs,
+            actual: public_inputs.len(),
+        });
+    }
+
     // Compute L(x) = vk.gamma_abc_g1[0] + Σ x_i · vk.gamma_abc_g1[i+1]
     let mut l = vk.gamma_abc_g1[0].into_group();
 
-    for (i, x_i) in public_inputs.iter().enumerate() {
-        l += vk.gamma_abc_g1[i + 1] * x_i;
+    for (gamma, x_i) in vk.gamma_abc_g1.iter().skip(1).zip(public_inputs.iter()) {
+        l += gamma.into_group() * x_i;
     }
 
     // R = e(α, β) + e(L(x), γ)  (additive notation in arkworks)
     let r = E::pairing(vk.alpha_g1, vk.beta_g2) + E::pairing(l, vk.gamma_g2);
 
-    r
+    Ok(r)
 }
 
 /// Extract Y_j bases from Groth16 VK for B-side PPE
@@ -51,21 +60,35 @@ pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
     let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
 
     let is_good_g1 = |g: &E::G1Affine| {
-        if g.is_zero() { return false; }
+        if g.is_zero() {
+            return false;
+        }
         g.mul_bigint(order).is_zero()
     };
     let is_good_g2 = |g: &E::G2Affine| {
-        if g.is_zero() { return false; }
+        if g.is_zero() {
+            return false;
+        }
         g.mul_bigint(order).is_zero()
     };
 
-    if !is_good_g1(&vk.alpha_g1) { return false; }
-    for g in &vk.gamma_abc_g1 {
-        if !g.mul_bigint(order).is_zero() { return false; }
+    if !is_good_g1(&vk.alpha_g1) {
+        return false;
     }
-    if !is_good_g2(&vk.beta_g2) { return false; }
-    if !is_good_g2(&vk.gamma_g2) { return false; }
-    if !is_good_g2(&vk.delta_g2) { return false; }
+    for g in &vk.gamma_abc_g1 {
+        if !g.mul_bigint(order).is_zero() {
+            return false;
+        }
+    }
+    if !is_good_g2(&vk.beta_g2) {
+        return false;
+    }
+    if !is_good_g2(&vk.gamma_g2) {
+        return false;
+    }
+    if !is_good_g2(&vk.delta_g2) {
+        return false;
+    }
     true
 }
 
@@ -86,7 +109,7 @@ pub fn build_one_sided_ppe<E: Pairing>(
     pvugc_vk: &PvugcVk<E>,
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
-) -> (Vec<E::G2Affine>, E::G2Affine, PairingOutput<E>) {
+) -> Result<(Vec<E::G2Affine>, E::G2Affine, PairingOutput<E>)> {
     // Y_j bases for B-side from PVUGC-VK wrapper
     let y_bases = extract_y_bases(pvugc_vk);
 
@@ -94,11 +117,10 @@ pub fn build_one_sided_ppe<E: Pairing>(
     let delta = pvugc_vk.delta_g2;
 
     // Target R(vk, x)
-    let target = compute_groth16_target(vk, public_inputs);
+    let target = compute_groth16_target(vk, public_inputs)?;
 
-    (y_bases, delta, target)
+    Ok((y_bases, delta, target))
 }
-
 
 /// Validate structural properties of Γ
 /// - No all-zero rows
@@ -111,28 +133,45 @@ pub fn validate_gamma_structure<E: Pairing>(
     require_all_columns_covered: bool,
     require_full_row_rank: bool,
 ) -> bool {
-    if gamma.is_empty() { return false; }
+    if gamma.is_empty() {
+        return false;
+    }
     let cols = gamma[0].len();
-    if cols == 0 { return false; }
+    if cols == 0 {
+        return false;
+    }
     for row in gamma {
-        if row.len() != cols { return false; }
+        if row.len() != cols {
+            return false;
+        }
         let mut nonzero = 0usize;
         for c in row {
-            if !c.is_zero() { nonzero += 1; }
+            if !c.is_zero() {
+                nonzero += 1;
+            }
         }
-        if nonzero < min_nonzero_per_row { return false; }
+        if nonzero < min_nonzero_per_row {
+            return false;
+        }
     }
     if require_all_columns_covered {
         for j in 0..cols {
             let mut covered = false;
             for row in gamma {
-                if !row[j].is_zero() { covered = true; break; }
+                if !row[j].is_zero() {
+                    covered = true;
+                    break;
+                }
             }
-            if !covered { return false; }
+            if !covered {
+                return false;
+            }
         }
     }
     if require_full_row_rank {
-        if matrix_row_rank::<E>(gamma) < gamma.len() { return false; }
+        if matrix_row_rank::<E>(gamma) < gamma.len() {
+            return false;
+        }
     }
     true
 }
@@ -140,7 +179,9 @@ pub fn validate_gamma_structure<E: Pairing>(
 /// Compute the row rank of a matrix over the scalar field using Gaussian elimination
 fn matrix_row_rank<E: Pairing>(gamma: &[Vec<E::ScalarField>]) -> usize {
     let rows = gamma.len();
-    if rows == 0 { return 0; }
+    if rows == 0 {
+        return 0;
+    }
     let cols = gamma[0].len();
     let mut a = gamma.to_vec();
     let mut rank = 0usize;
@@ -148,18 +189,29 @@ fn matrix_row_rank<E: Pairing>(gamma: &[Vec<E::ScalarField>]) -> usize {
     while rank < rows && col < cols {
         // Find pivot
         let mut pivot = rank;
-        while pivot < rows && a[pivot][col].is_zero() { pivot += 1; }
-        if pivot == rows { col += 1; continue; }
+        while pivot < rows && a[pivot][col].is_zero() {
+            pivot += 1;
+        }
+        if pivot == rows {
+            col += 1;
+            continue;
+        }
         a.swap(rank, pivot);
         // Normalize pivot row
         if let Some(inv) = a[rank][col].inverse() {
-            for j in col..cols { a[rank][j] *= inv; }
+            for j in col..cols {
+                a[rank][j] *= inv;
+            }
         }
         // Eliminate other rows
         for i in 0..rows {
-            if i == rank { continue; }
+            if i == rank {
+                continue;
+            }
             let factor = a[i][col];
-            if factor.is_zero() { continue; }
+            if factor.is_zero() {
+                continue;
+            }
             for j in col..cols {
                 let mut t = a[rank][j];
                 t *= factor;
@@ -205,12 +257,16 @@ pub fn derive_gamma_secure<E: Pairing>(
             vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
             vk.gamma_g2.serialize_compressed(&mut tmp).unwrap();
             vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-            for g in &vk.gamma_abc_g1 { g.serialize_compressed(&mut tmp).unwrap(); }
+            for g in &vk.gamma_abc_g1 {
+                g.serialize_compressed(&mut tmp).unwrap();
+            }
             hasher.update(&tmp);
             tmp.clear();
             pvugc_vk.beta_g2.serialize_compressed(&mut tmp).unwrap();
             pvugc_vk.delta_g2.serialize_compressed(&mut tmp).unwrap();
-            for y in pvugc_vk.b_g2_query.iter() { y.serialize_compressed(&mut tmp).unwrap(); }
+            for y in pvugc_vk.b_g2_query.iter() {
+                y.serialize_compressed(&mut tmp).unwrap();
+            }
             hasher.update(&tmp);
             let seed = hasher.finalize();
 
@@ -235,32 +291,50 @@ pub fn derive_gamma_secure<E: Pairing>(
                 }
                 // Avoid all-zero rows
                 let mut nonzero = false;
-                for c in &row { if !c.is_zero() { nonzero = true; break; } }
-                if nonzero { gamma_k.push(row); }
+                for c in &row {
+                    if !c.is_zero() {
+                        nonzero = true;
+                        break;
+                    }
+                }
+                if nonzero {
+                    gamma_k.push(row);
+                }
                 ctr += 1;
             }
             candidates.push(gamma_k);
         }
 
         // Combine entry-wise: choose first non-zero among candidates to reduce sparsity
-        let mut gamma: Vec<Vec<E::ScalarField>> = vec![vec![E::ScalarField::zero(); cols]; num_rows];
+        let mut gamma: Vec<Vec<E::ScalarField>> =
+            vec![vec![E::ScalarField::zero(); cols]; num_rows];
         for i in 0..num_rows {
             for j in 0..cols {
                 let mut val = E::ScalarField::zero();
                 for k in 0..and_k {
                     let v = candidates[k][i][j];
-                    if !v.is_zero() { val = v; break; }
+                    if !v.is_zero() {
+                        val = v;
+                        break;
+                    }
                 }
                 gamma[i][j] = val;
             }
         }
 
-        if validate_gamma_structure::<E>(&gamma, min_nonzero_per_row, require_all_columns_covered, require_full_row_rank) {
+        if validate_gamma_structure::<E>(
+            &gamma,
+            min_nonzero_per_row,
+            require_all_columns_covered,
+            require_full_row_rank,
+        ) {
             return gamma;
         }
 
         attempt += 1;
-        if attempt >= max_tries { return gamma; }
+        if attempt >= max_tries {
+            return gamma;
+        }
     }
 }
 
@@ -275,6 +349,10 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
 
         g.mul_bigint(order).is_zero()
     };
+
+    if pvugc_vk.b_g2_query.is_empty() {
+        return false;
+    }
 
     if pvugc_vk.beta_g2.is_zero() || !is_good(&pvugc_vk.beta_g2) {
         return false;
@@ -307,9 +385,12 @@ mod tests {
         pub x: Option<Fr>,
         pub y: Option<Fr>,
     }
-    
+
     impl ConstraintSynthesizer<Fr> for TestCircuit {
-        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        fn generate_constraints(
+            self,
+            cs: ConstraintSystemRef<Fr>,
+        ) -> std::result::Result<(), SynthesisError> {
             use ark_r1cs_std::eq::EqGadget;
             use ark_r1cs_std::fields::fp::FpVar;
             use ark_r1cs_std::prelude::*;
@@ -327,7 +408,7 @@ mod tests {
             Ok(())
         }
     }
-    
+
     #[test]
     fn test_compute_r_target() {
         use ark_std::rand::rngs::StdRng;
@@ -345,16 +426,16 @@ mod tests {
         let public_inputs = vec![Fr::from(25u64)];
 
         // Compute R(vk, x)
-        let r = compute_groth16_target(&vk, &public_inputs);
+        let r = compute_groth16_target(&vk, &public_inputs).expect("compute_groth16_target");
 
         // R should be non-trivial
         assert_ne!(r, PairingOutput::<E>::zero());
 
         // R should be deterministic
-        let r2 = compute_groth16_target(&vk, &public_inputs);
+        let r2 = compute_groth16_target(&vk, &public_inputs).expect("compute_groth16_target");
         assert_eq!(r, r2);
     }
-    
+
     #[test]
     fn test_different_statements_different_r() {
         use ark_std::rand::rngs::StdRng;
@@ -372,8 +453,8 @@ mod tests {
         let inputs1 = vec![Fr::from(25u64)];
         let inputs2 = vec![Fr::from(49u64)];
 
-        let r1 = compute_groth16_target(&vk, &inputs1);
-        let r2 = compute_groth16_target(&vk, &inputs2);
+        let r1 = compute_groth16_target(&vk, &inputs1).expect("compute_groth16_target");
+        let r2 = compute_groth16_target(&vk, &inputs2).expect("compute_groth16_target");
 
         // Different statements → different R
         assert_ne!(r1, r2);
@@ -418,4 +499,3 @@ mod tests {
         assert!(validate_pvugc_vk_subgroups(&zero_query_vk));
     }
 }
-

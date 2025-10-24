@@ -132,17 +132,27 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         
         let b_coeffs = &self.b_coeffs;  // These correspond to b_g2_query[1..]
         let s = self.s.expect("s not recorded");
-        
+
+        let b_query: &[E::G2Affine] = &pvugc_vk.b_g2_query;
+        let (_, variable_b_cols) = b_query
+            .split_first()
+            .expect("pvugc_vk.b_g2_query must contain at least one column");
+        assert_eq!(
+            variable_b_cols.len(),
+            b_coeffs.len(),
+            "mismatched DLREP coefficients vs. Groth16 B query columns",
+        );
+
         // Variable part: s·δ + Σ b_j·query[1..] (β and query[0] handled separately)
         let mut b_var = pvugc_vk.delta_g2.into_group() * s;
-        for (b_j, y_j) in b_coeffs.iter().zip(&pvugc_vk.b_g2_query.as_ref()[1..]) {
+        for (b_j, y_j) in b_coeffs.iter().zip(variable_b_cols) {
             b_var += y_j.into_group() * b_j;
         }
-        
+
         // Prove over query[1..] only
         let proof = prove_b_msm(
             b_var.into_affine(),
-            &pvugc_vk.b_g2_query.as_ref()[1..],
+            variable_b_cols,
             pvugc_vk.delta_g2,
             b_coeffs,
             s,

@@ -70,13 +70,14 @@ fuzz_target!(|data: &[u8]| {
 
     // Derive column bases from VK Y-bases: {β} ∪ b_g2_query; if query empty, we still have β
     // Extract Y from pvugc_vk via build_one_sided_ppe path
-    let (y_bases, delta, _r_target) = build_one_sided_ppe::<E>(&pvugc_vk, &vk, &[x]);
+    let (y_bases, delta, _r_target) = build_one_sided_ppe::<E>(&pvugc_vk, &vk, &[x])
+        .expect("build_one_sided_ppe");
     let cols: ColumnBases<E> = ColumnBases { y_cols: y_bases, delta };
     let y_cols: Vec<G2Affine> = cols.y_cols;
     let delta_g2: G2Affine = cols.delta;
 
     // Target R(vk, x)
-    let r = compute_groth16_target::<E>(&vk, &[x]);
+    let r = compute_groth16_target::<E>(&vk, &[x]).expect("compute_groth16_target");
 
     // G1 basis: pick two from VK
     let b0 = vk.alpha_g1.into_group();

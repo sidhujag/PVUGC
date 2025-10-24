@@ -7,6 +7,7 @@ use sha2::{Sha256};
 use zeroize::Zeroizing;
 use subtle::ConstantTimeEq;
 use ark_ec::pairing::{Pairing, PairingOutput};
+use crate::error::{Result, Error};
 
 /// Derive a 32-byte AEAD key and 32-byte associated-data tag from GT bytes + context digest.
 fn derive_key_and_ad(k_bytes: &[u8], ctx_digest: &[u8]) -> ([u8; 32], [u8; 32]) {
@@ -27,15 +28,15 @@ pub fn seal_with_k_bytes(
     k_bytes: &[u8],
     ctx_digest: &[u8],
     plaintext: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let (key, ad) = derive_key_and_ad(k_bytes, ctx_digest);
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| Error::Crypto(e.to_string()))?;
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from(nonce_bytes);
     let ct = cipher
         .encrypt(&nonce, Payload { msg: plaintext, aad: &ad })
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| Error::Crypto("encryption failed".into()))?;
     Ok((nonce.to_vec(), ct))
 }
 
@@ -45,15 +46,15 @@ pub fn open_with_k_bytes(
     ctx_digest: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],
-) -> Result<Vec<u8>, String> {
-    if nonce.len() != 12 { return Err("invalid nonce length (expected 12 bytes)".into()); }
+) -> Result<Vec<u8>> {
+    if nonce.len() != 12 { return Err(Error::Crypto("invalid nonce length (expected 12 bytes)".into())); }
     let (key, ad) = derive_key_and_ad(k_bytes, ctx_digest);
-    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
-    let nonce_array: [u8; 12] = nonce.try_into().map_err(|_| "invalid nonce length")?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| Error::Crypto(e.to_string()))?;
+    let nonce_array: [u8; 12] = nonce.try_into().map_err(|_| Error::Crypto("invalid nonce length".into()))?;
     let nonce_obj = Nonce::from(nonce_array);
     cipher
         .decrypt(&nonce_obj, Payload { msg: ciphertext, aad: &ad })
-        .map_err(|e| e.to_string())
+        .map_err(|_| Error::Crypto("decryption failed".into()))
 }
 
 /// Helper to serialize a pairing output to canonical bytes.
