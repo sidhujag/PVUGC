@@ -15,26 +15,22 @@ use ark_ec::AffineRepr;
 use ark_ff::{BigInteger, Field, PrimeField};
 use ark_groth16::VerifyingKey as Groth16VK;
 
-/// Build PVUGC VK from outer Groth16 VK
+/// Build PVUGC VK from the OUTER proving key (populates b_g2_query)
 ///
-/// Extracts the G₂ bases from the outer verifier VK.
-/// These are CONSTANT SIZE (small verifier circuit).
-pub fn build_pvugc_vk_outer_for<C: RecursionCycle>(
-    vk_outer: &Groth16VK<C::OuterE>,
+/// These right-legs are constant size for the small outer verifier circuit.
+pub fn build_pvugc_vk_outer_from_pk_for<C: RecursionCycle>(
+    pk_outer: &ark_groth16::ProvingKey<C::OuterE>,
 ) -> PvugcVk<C::OuterE> {
-    // The outer VK's b_g2_query comes from the proving key
-    // For the wrapper, we need access to pk.b_g2_query
-    // This function will be called with the full PK available
     PvugcVk {
-        beta_g2: vk_outer.beta_g2,
-        delta_g2: vk_outer.delta_g2,
-        b_g2_query: std::sync::Arc::new(Vec::new()), // Populated from PK
+        beta_g2: pk_outer.vk.beta_g2,
+        delta_g2: pk_outer.vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk_outer.b_g2_query.clone()),
     }
 }
 
-/// Default-cycle convenience wrapper around [`build_pvugc_vk_outer_for`].
-pub fn build_pvugc_vk_outer(vk_outer: &Groth16VK<OuterE>) -> PvugcVk<OuterE> {
-    build_pvugc_vk_outer_for::<DefaultCycle>(vk_outer)
+/// Default-cycle convenience wrapper around [`build_pvugc_vk_outer_from_pk_for`].
+pub fn build_pvugc_vk_outer_from_pk(pk_outer: &ark_groth16::ProvingKey<OuterE>) -> PvugcVk<OuterE> {
+    build_pvugc_vk_outer_from_pk_for::<DefaultCycle>(pk_outer)
 }
 
 /// Build column bases from outer PVUGC VK

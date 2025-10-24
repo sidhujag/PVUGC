@@ -58,12 +58,8 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     let (pk_outer, vk_outer) =
         Groth16::<C::OuterE>::circuit_specific_setup(circuit_outer, &mut rng).unwrap();
 
-    // Build PvugcVk with Arc-wrapped b_g2_query
-    let pvugc_vk = crate::ppe::PvugcVk {
-        beta_g2: vk_outer.beta_g2,
-        delta_g2: vk_outer.delta_g2,
-        b_g2_query: Arc::new(pk_outer.b_g2_query.clone()),
-    };
+    // Build PvugcVk from the outer proving key
+    let pvugc_vk = crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer);
 
     // Outer-recursive keys: reuse setup_outer_params once per process
     let setup_start = Instant::now();
@@ -75,11 +71,7 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         C::name(),
         outer_setup_time
     );
-    let pvugc_vk_outer_recursive = crate::ppe::PvugcVk {
-        beta_g2: vk_outer_recursive.beta_g2,
-        delta_g2: vk_outer_recursive.delta_g2,
-        b_g2_query: Arc::new(pk_outer_recursive.b_g2_query.clone()),
-    };
+    let pvugc_vk_outer_recursive = crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive);
 
     GlobalFixture {
         pk_inner: Arc::new(pk_inner),
