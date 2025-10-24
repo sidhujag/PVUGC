@@ -19,6 +19,9 @@ pub fn compute_groth16_target<E: Pairing>(
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
+    if vk.gamma_abc_g1.is_empty() {
+        return Err(Error::MismatchedSizes);
+    }
     let expected_inputs = vk.gamma_abc_g1.len().saturating_sub(1);
     if public_inputs.len() != expected_inputs {
         return Err(Error::PublicInputLength {
@@ -434,6 +437,25 @@ mod tests {
         // R should be deterministic
         let r2 = compute_groth16_target(&vk, &public_inputs).expect("compute_groth16_target");
         assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn test_compute_r_target_rejects_empty_gamma() {
+        use ark_std::rand::rngs::StdRng;
+        use ark_std::rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(2);
+
+        let circuit = TestCircuit {
+            x: Some(Fr::from(9u64)),
+            y: Some(Fr::from(3u64)),
+        };
+        let (_pk, mut vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+
+        vk.gamma_abc_g1.clear();
+
+        let err = compute_groth16_target(&vk, &[]).unwrap_err();
+        assert!(matches!(err, Error::MismatchedSizes));
     }
 
     #[test]
