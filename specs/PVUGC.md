@@ -124,12 +124,6 @@ It publicly proves that the published masks $\{D_\ell\}$ and $\{D_a\}$ were made
 
 ---
 
-### 5.1) KEM Randomness Commitment (Fairness Protection)
-
-To prevent collusive randomness cancellation ($\prod \rho_i = 1$), use three-phase commit-reveal: (1) Each armer publishes $\text{comm}_i = \text{SHA256}(\text{"PVUGC\_RHO\_COMMIT/v1"} \parallel \text{ser}_{\mathbb{F}_r}(\rho_i) \parallel \text{salt}_i)$ before any revelation; (2) After all commitments collected, reveal $(\rho_i, \text{salt}_i)$ with arming packages; (3) Verify commitment match before accepting, abort on mismatch. Prevents adaptive coordination enabling griefing and grinding attacks.
-
----
-
 ### 6) WE via Product‑Key KEM (GS‑attested Groth16‑verify)
 
 **The Challenge:** Standard Groth16 verification has proof elements on both sides of pairings:
@@ -207,7 +201,7 @@ $$
 Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) to get $(\texttt{ct}_i,\tau_i)$.
 
 **Publish only:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $\texttt{ct}_i$, $\tau_i$, $T_i$, $h_i$, plus PoK and **PoCE-A** (algebraic proof).
-**Keep secret:** $M_i$ (derivable only with valid attestation).
+**Keep secret (MUST):** $\rho_i$ (revealing it makes $M_i = R(\mathsf{vk},x)^{\rho_i}$ publicly computable, breaking No-Proof-Spend) and $M_i$ (derivable only with valid attestation).
 
 **Degenerate & subgroup guards:** Abort arming if $R(\mathsf{vk}, x) = 1$ (identity in $\mathbb{G}_T$) or if it lies in any proper subgroup of $\mathbb{G}_T$. While negligible for honest setups, these checks prevent trivial keys. PoCE MUST also assert $R(\mathsf{vk},x) \neq 1$ via a public input bit tied to `GS_instance_digest`.
 **Serialization (MUST):** Use a canonical, subgroup‑checked encoding $\mathrm{ser}_{\mathbb{G}_T}(\cdot)$ for KDF input; reject non‑canonical encodings.
@@ -332,7 +326,7 @@ Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify fo
 
 * **N‑of‑N arming.** All armers must publish valid $(T_i,\text{PoK},\text{PoCE},\texttt{ct}_i,\{D_\ell\},\{D_a\})$ before pre‑signing. No one learns $\alpha$.
 * **1‑of‑N trigger.** After arming, **any** prover who can produce a valid Groth16+GS attestation can finish the spend by decapsulating $\alpha$ (permissionless).
-* **Timeout/Abort path.** `CSV=Δ` path sending funds to a neutral sink or alternate policy. **RECOMMENDED** to mitigate griefing if malformed arming data passes PoK but breaks decryption. This is a liveness/UX mitigation.
+* **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent deadlock if operators stall or provide malformed arming data. This is operator-agnostic liveness protection, not optional.
 * **Challenge path (optional).** If your application benefits from a *negative* predicate (e.g., "there exists a valid proof that $\neg R_{\mathcal{L}}$"), you may WE‑gate a separate script leaf under a different $(\mathsf{vk}',x')$. Not required by PVUGC itself.
 **Takeaway:** The **only requirement** to understand the main innovation is the WE‑gated **ComputeSpend** path. Timeout/Abort/Challenge are **patterns**, not prerequisites.
 
@@ -388,14 +382,13 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 ### 12) Engineering checklist
 
 * **Script:** script‑path only; NUMS internal key; leaves for ComputeSpend (and optional Timeout/Abort).
-* **SIGHASH:** `SIGHASH_ALL`; annex absent (BIP‑341 `annex_present = 0`); bind tapleaf hash **and version**; pin exact output order and CPFP anchor.
+* **SIGHASH:** `SIGHASH_ALL` (MUST); annex absent (BIP‑341 `annex_present = 0`); bind tapleaf hash **and version**; pin exact output order and CPFP anchor; presig MUST bind to `ctx_hash` to prevent front-running/value redirection.
 * **MuSig2:** BIP‑327 two‑point nonces with fresh CSPRNG randomness per session (NOT deterministic from secret_key alone); mix in session data for defense-in-depth; maintain R blacklist; normalize $R$ to even y; erase secnonces; publish `AdaptorVerify(m,T,R,s′)` bound to `ctx_hash`.
 * **Adaptor compartmentalization:** one adaptor ⇒ one $T$, one $R$; fresh per path/template/epoch.
-* **ρ commit-reveal (MUST):** Phase 1: collect all commitments $\text{comm}_i = \text{SHA256}(\text{"PVUGC\_RHO\_COMMIT/v1"} \parallel \rho_i \parallel \text{salt}_i)$; Phase 2: reveal $(\rho_i, \text{salt}_i)$ with arming; Phase 3: verify commitment match before accepting arming package.
-* **KEM/DEM:** constant‑time pairings; subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$; GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
-* **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts + ρ commitments before pre‑sign; check per-share $T_i \neq \mathcal{O}$ and aggregated $T \neq \mathcal{O}$; abort on any mismatch.
+* **KEM/DEM:** constant‑time decap (pad to 96 pairings, no early returns); subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$ (compressed, little-endian, fixed 576 bytes for BLS12-381); GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
+* **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts before pre‑sign; check per-share $T_i \neq \mathcal{O}$ and aggregated $T \neq \mathcal{O}$; enforce per-phase timeouts (arming: 120s, presig: 180s); abort on timeout or mismatch.
 * **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
-* **Side-channel protection:** Pairings, scalars, and DEM MUST be constant-time; avoid cache-tunable table leakage across different `ctx_hash` values.
+* **Side-channel protection:** Decap, pairings, scalars, and DEM MUST be constant-time; no data-dependent branches; avoid cache-tunable table leakage across different `ctx_hash` values.
 
 ---
 
