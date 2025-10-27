@@ -120,7 +120,7 @@ $$
 
 **Arm‑time rule:** verify **all** PoK and PoCE before any pre‑signing; abort on any failure. Never reuse any $s_i$ (or $\alpha$) across contexts.
 
-It publicly proves that the published masks $\{D_\ell\}$ and $\{D_a\}$ were made with the same $\rho_i$, and that $T_i$ matches $s_i$. The ciphertext $\texttt{ct}_i$ is key‑committed at decapsulation time via PoCE‑B. Without PoCE an armer could publish structurally valid but semantically wrong artifacts, undermining decrypt‑on‑proof soundness.
+It publicly proves that the published masks $\{D_j\}$ and $D_\delta$ were made with the same $\rho_i$, and that $T_i$ matches $s_i$. The ciphertext $\texttt{ct}_i$ is key‑committed at decapsulation time via PoCE‑B. Without PoCE an armer could publish structurally valid but semantically wrong artifacts, undermining decrypt‑on‑proof soundness.
 
 ---
 
@@ -193,7 +193,7 @@ These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts eith
 
 **Encapsulation (arm‑time, per share $i$).** Choose $\rho_i \in \mathbb{Z}_r^*$ (where $r = \#\mathbb{G}_1 = \#\mathbb{G}_2 = \#\mathbb{G}_T$, non-zero). Compute:
 $$
-D_j=Y_j^{\rho_i}\in \mathbb{G}_2 \text{ for } j \in [1,n_B], \quad D_\delta=[\delta]_2^{\rho_i}\in \mathbb{G}_2, \quad M_i=R(\mathsf{vk},x)^{\rho_i}\in \mathbb{G}_T \text{ (do NOT publish)}
+D_j=Y_j^{\rho_i}\in \mathbb{G}_2 \text{ for } j \in [0,n_B-1], \quad D_\delta=[\delta]_2^{\rho_i}\in \mathbb{G}_2, \quad M_i=R(\mathsf{vk},x)^{\rho_i}\in \mathbb{G}_T \text{ (do NOT publish)}
 $$
 $$
 K_i=\mathrm{Poseidon2}(\mathrm{ser}_{\mathbb{G}_T}(M_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})
@@ -228,27 +228,7 @@ $$
 
 This means *every* valid attestation yields the **same** KEM key $K_i$, regardless of which proof was used.
 
-### 5.1) PoCE-A: Proof of Correct Exponentiation (Arm-time)
-
-**Purpose:** Prove that all armed columns share the same $\rho_i$ and that the published ciphertext is key-committed to the derived KEM key.
-
-**Security rationale:** Without PoCE-A, an armer could publish mixed-$\rho$ arms (some $Y_j^{\rho_1}$, some $Y_k^{\rho_2}$) which would break decapsulation, or publish a ciphertext not bound to the actual derived key.
-
-**Construction:** Multi-base Schnorr proof proving:
-- $\forall j: D_j = Y_j^{\rho_i}$ (all columns share same $\rho_i$)
-- $D_\delta = [\delta]_2^{\rho_i}$ (delta arm shares same $\rho_i$)
-- $T_i = s_i G$ (Schnorr proof for $s_i$)
-- Key-commitment: ciphertext is bound to $K_i = \mathrm{Poseidon2}(\mathrm{ser}(M_i) || \texttt{ctx\_hash} || \texttt{GS\_instance\_digest})$
-
-**Verification:** Accept arming only if PoCE-A verification passes.
-
-### 5.2) PoCE-B: Proof of Correct Exponentiation (Decap-time)
-
-**Purpose:** Decapper-local key-commitment verification to detect tampered ciphertexts.
-
-**Construction:** Recompute $K_i'$ from derived $\tilde{M}_i$ and verify the commitment tag $\tau_i$.
-
-**Verification:** Accept decapsulation only if PoCE-B verification passes.
+(See §8 for PoCE-A and PoCE-B details.)
 
 ---
 
@@ -324,9 +304,9 @@ Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify fo
 
 ### 9) Activation patterns (optimistic options, orthogonal to the core)
 
-* **N‑of‑N arming.** All armers must publish valid $(T_i,\text{PoK},\text{PoCE},\texttt{ct}_i,\{D_\ell\},\{D_a\})$ before pre‑signing. No one learns $\alpha$.
+* **N‑of‑N arming.** All armers must publish valid $(T_i,\text{PoK},\text{PoCE},\texttt{ct}_i,\{D_j\},D_\delta)$ before pre‑signing. No one learns $\alpha$.
 * **1‑of‑N trigger.** After arming, **any** prover who can produce a valid Groth16+GS attestation can finish the spend by decapsulating $\alpha$ (permissionless).
-* **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent deadlock if operators stall or provide malformed arming data. This is operator-agnostic liveness protection, not optional.
+* **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent indefinite liveness failure if any armer posts malformed masks/ciphertexts that pass PoK but fail PoCE-B at decap time. This is operator-agnostic liveness protection, not optional.
 * **Challenge path (optional).** If your application benefits from a *negative* predicate (e.g., "there exists a valid proof that $\neg R_{\mathcal{L}}$"), you may WE‑gate a separate script leaf under a different $(\mathsf{vk}',x')$. Not required by PVUGC itself.
 **Takeaway:** The **only requirement** to understand the main innovation is the WE‑gated **ComputeSpend** path. Timeout/Abort/Challenge are **patterns**, not prerequisites.
 
@@ -385,7 +365,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 * **SIGHASH:** `SIGHASH_ALL` (MUST); annex absent (BIP‑341 `annex_present = 0`); bind tapleaf hash **and version**; pin exact output order and CPFP anchor; presig MUST bind to `ctx_hash` to prevent front-running/value redirection.
 * **MuSig2:** BIP‑327 two‑point nonces with fresh CSPRNG randomness per session (NOT deterministic from secret_key alone); mix in session data for defense-in-depth; maintain R blacklist; normalize $R$ to even y; erase secnonces; publish `AdaptorVerify(m,T,R,s′)` bound to `ctx_hash`.
 * **Adaptor compartmentalization:** one adaptor ⇒ one $T$, one $R$; fresh per path/template/epoch.
-* **KEM/DEM:** constant‑time decap (pad to 96 pairings, no early returns); subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$ (compressed, little-endian, fixed 576 bytes for BLS12-381); GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
+* **KEM/DEM:** constant‑time decap (no early returns; verify all equations then branch on result); subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$ (fixed-length 576 bytes = 12×48B Fp limbs, little-endian for BLS12-381); GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
 * **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts before pre‑sign; check per-share $T_i \neq \mathcal{O}$ and aggregated $T \neq \mathcal{O}$; enforce per-phase timeouts (arming: 120s, presig: 180s); abort on timeout or mismatch.
 * **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
 * **Side-channel protection:** Decap, pairings, scalars, and DEM MUST be constant-time; no data-dependent branches; avoid cache-tunable table leakage across different `ctx_hash` values.
