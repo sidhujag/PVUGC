@@ -305,7 +305,7 @@ Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify fo
 ### 9) Activation patterns (optimistic options, orthogonal to the core)
 
 * **N‑of‑N arming.** All armers must publish valid $(T_i,\text{PoK},\text{PoCE},\texttt{ct}_i,\{D_j\},D_\delta)$ before pre‑signing. No one learns $\alpha$.
-* **1‑of‑N trigger.** After arming, **any** prover who can produce a valid Groth16+GS attestation can finish the spend by decapsulating $\alpha$ (permissionless).
+* **1‑of‑Any trigger.** After arming, **any** prover who can produce a valid Groth16+GS attestation can finish the spend by decapsulating $\alpha$ (permissionless).
 * **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent indefinite liveness failure if any armer posts malformed masks/ciphertexts that pass PoK but fail PoCE-B at decap time. This is operator-agnostic liveness protection, not optional.
 * **Challenge path (optional).** If your application benefits from a *negative* predicate (e.g., "there exists a valid proof that $\neg R_{\mathcal{L}}$"), you may WE‑gate a separate script leaf under a different $(\mathsf{vk}',x')$. Not required by PVUGC itself.
 **Takeaway:** The **only requirement** to understand the main innovation is the WE‑gated **ComputeSpend** path. Timeout/Abort/Challenge are **patterns**, not prerequisites.
