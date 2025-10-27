@@ -43,7 +43,7 @@ Timeout/Abort (optional) :
 * **Key‑path**: internal key is a public point with unknown discrete log (NUMS) so only script‑path is usable (a social burn of the key path). Derive deterministically (cycle‑free), using IETF hash‑to‑curve (simplified‑SWU) for secp256k1 with domain tag `"PVUGC/NUMS"` and canonical encodings:
 
 ```
-Q_nums <- hash_to_curve("PVUGC/NUMS" || vk_hash || H(x) || tapleaf_hash || tapleaf_version || epoch)
+Q_nums <- hash_to_curve("PVUGC/NUMS" || vk_hash || H(x) || tapleaf_hash || tapleaf_version || epoch_nonce)
 internal_key = xonly_even_y(Q_nums)
 ```
 * **Transaction binding**: all signatures use `SIGHASH_ALL`, bind tapleaf hash **and version**, **annex absent** (BIP‑341 `annex_present = 0`), and include a **small P2TR CPFP hook** output.
@@ -57,7 +57,8 @@ Use layered hashes to bind the environment without cycles. Transcripts bind to `
 
 ```
 y_cols_digest   = H_bytes("PVUGC/YCOLS" || ser([β]_2) || ser(b_g2_query[0]) || ...)
-ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || y_cols_digest)
+epoch_nonce     = CSPRNG(32 bytes)  // unique per instance
+ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || y_cols_digest || epoch_nonce)
 arming_pkg_hash = H_bytes("PVUGC/ARM"      || {D_j} || D_δ || header_meta)
 presig_pkg_hash = H_bytes("PVUGC/PRESIG"   || m || T || R || signer_set || musig_coeffs)
 ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || presig_pkg_hash || dlrep_transcripts)
@@ -76,6 +77,8 @@ ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || pre
 **Hash functions (normative).**
 
 Let `H_bytes = SHA-256` for byte-level context hashes (`ctx_*`) and tags like `H(x)`. Let `H_p2 = Poseidon2` for KDF/DEM/tag and in-circuit PoCE. Define `H_tag = Poseidon2` domain-tagged as "PVUGC/RHO_LINK"; set `ρ_link = H_tag(ser(ρ_i))`. All hashes MUST be domain‑separated with ASCII tags.
+
+**epoch_nonce (normative).** A 256-bit value sampled from OS CSPRNG (`getrandom`, `getentropy`, or `BCryptGenRandom`) that MUST be unique per protocol instance. Implementations MUST reject nonce reuse and verify all participants agree on the same value before arming. Include in `ctx_core`, NUMS derivation (line 46), and transaction metadata for verification.
 
 **Context/domain tags (normative).**
 
@@ -101,6 +104,8 @@ For each path that will be WE‑gated (at minimum **ComputeSpend**):
 
 * Run MuSig2 (BIP‑327) once to produce a pre‑signature $s'$ with **unique** session nonce $R$ and **unique** adaptor point $T$.
 * **Compartmentalization (MUST):** one adaptor ⇒ one unique $T$ and one unique $R$. Never reuse across paths/epochs or templates.
+* **Nonce generation (MUST - BIP‑327):** Each signer MUST generate fresh random nonces $k_{1,i}, k_{2,i}$ per session using a cryptographically secure random number generator. Nonces MUST NOT be fully deterministic from `secret_key` alone (prevents co-signer prediction attacks per BIP‑327 §NonceGen). Implementations SHOULD mix in session-specific data (`secret_key`, aggregate pubkey, message, `ctx_hash`) for defense-in-depth against RNG state repetition.
+* **Nonce reuse prevention (MUST):** Implementations MUST maintain a blacklist of aggregate nonce values $R$ and reject any reuse before signing. This provides operational protection against RNG or state management failures.
 * Publish an `AdaptorVerify(m,T,R,s′)` transcript **bound to** `ctx_hash`, the signer set, their MuSig coefficients, and the exact `txid_template`.
 
 ---
@@ -116,6 +121,12 @@ $$
 **Arm‑time rule:** verify **all** PoK and PoCE before any pre‑signing; abort on any failure. Never reuse any $s_i$ (or $\alpha$) across contexts.
 
 It publicly proves that the published masks $\{D_\ell\}$ and $\{D_a\}$ were made with the same $\rho_i$, and that $T_i$ matches $s_i$. The ciphertext $\texttt{ct}_i$ is key‑committed at decapsulation time via PoCE‑B. Without PoCE an armer could publish structurally valid but semantically wrong artifacts, undermining decrypt‑on‑proof soundness.
+
+---
+
+### 5.1) KEM Randomness Commitment (Fairness Protection)
+
+To prevent collusive randomness cancellation ($\prod \rho_i = 1$), use three-phase commit-reveal: (1) Each armer publishes $\text{comm}_i = \text{SHA256}(\text{"PVUGC\_RHO\_COMMIT/v1"} \parallel \text{ser}_{\mathbb{F}_r}(\rho_i) \parallel \text{salt}_i)$ before any revelation; (2) After all commitments collected, reveal $(\rho_i, \text{salt}_i)$ with arming packages; (3) Verify commitment match before accepting, abort on mismatch. Prevents adaptive coordination enabling griefing and grinding attacks.
 
 ---
 
@@ -177,11 +188,14 @@ These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts eith
 
 **MUST (Column profile):** If $n_B > N_{\max}$, reject under the Column profile and use the **Outer-Compressed profile** (tiny outer verifier + rank-1 PPE), documented separately. Typical column-based encodings require 16-32 pairings.
 
-**Implementation note:** For BLS12-381, 96 pairings is ~50-100ms on modern hardware - 
-acceptable for one-time decapsulation.
+**GS attestation size bounds (MUST - DoS prevention):** Implementations MUST reject GS attestations where the total number of pairings exceeds 96. Specifically, if $m_1$ is the number of G₁ commitments and $m_2$ is the number of G₂ commitments, then MUST enforce: $m_1 + m_2 \leq 96$. This prevents denial-of-service attacks via oversized attestations while allowing typical Groth16→GS encodings (20-40 pairings). For BLS12-381, 96 pairings requires ~50-100ms verification time on modern hardware - acceptable for one-time decapsulation.
 
 **Independence (MUST).** The statement-only bases $\{Y_j\}$ and $[\delta]_2$, along with the target $R(\mathsf{vk},x)$, are fixed by ($\mathsf{vk}$, $x$) before any armer chooses randomness. The bases are derived directly from the verifying key components. Armers cannot choose or influence these bases.
 **Implementation MUST NOT** allow armers to influence $\mathsf{vk}$ or $x$ once arming begins; these are fixed before any $\rho_i$ is chosen.
+
+**γ₂ exclusion enforcement (MUST).** The armed G₂ bases $\{Y_j = [\beta]_2, \text{b\_g2\_query}\}$ and $[\delta]_2$ deliberately exclude $[\gamma]_2$. Implementations MUST derive $Y_j$ from the verifying key's $\{\beta_2, \text{b\_g2\_query}\}$ components only. $[\gamma]_2$ MUST NOT be included in any armed base. This structural exclusion ensures:
+- **Algebraic independence:** $R(\mathsf{vk},x) = e(\alpha_1,\beta_2) \cdot e(L(x),\gamma_2)$ cannot be computed from armed bases alone, as the second factor requires $[\gamma]_2^\rho$ (never published).
+- **Standard hardness:** Computing $R(\mathsf{vk},x)^\rho$ from $\{Y_j^\rho, [\delta]_2^\rho\}$ reduces to discrete logarithm in $\mathbb{G}_2$ or $\mathbb{G}_T$, not a novel assumption.
 
 **Encapsulation (arm‑time, per share $i$).** Choose $\rho_i \in \mathbb{Z}_r^*$ (where $r = \#\mathbb{G}_1 = \#\mathbb{G}_2 = \#\mathbb{G}_T$, non-zero). Compute:
 $$
@@ -286,7 +300,8 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 **Implementation note (MUST):** PoCE-A MUST use per-column Schnorr commitments ($k_\rho\cdot U_\ell$, $k_\rho\cdot W_a$, $k_\rho\cdot [\delta]_2$) and verify each equal-exponent equation individually. Collapsing all columns into a single sum is insufficient and allows malformed arms that still satisfy the aggregated relation.
 
 **Public arming checks (performed by coordinator/auditors):**
-* Compute $T = \sum T_i$ and reject if $T = \mathcal{O}$ (point at infinity)
+* **Per-share validation (MUST):** For each arming package $i$, verify $T_i \neq \mathcal{O}$ (point at infinity). This detects $s_i = 0$ early (before aggregation) and prevents griefing via invalid null shares.
+* **Aggregated validation (MUST):** Compute $T = \sum T_i$ and reject if $T = \mathcal{O}$ (point at infinity). This prevents collusion where $\sum s_i = 0 \bmod n$ (which would make the pre-signature immediately valid without decryption).
 * Enforce unique `share_index`; reject duplicates and maintain a replay set keyed by $(\texttt{ctx\_core}, \texttt{presig\_pkg\_hash}, \texttt{header\_meta})$. If the same `header_meta` appears under a different `presig_pkg_hash` for the same `ctx_core`, reject as a replay/misbind.
 * Verify $R(\mathsf{vk},x) \neq 1$ (computable from $(\mathsf{vk},x)$ without proof)
 
@@ -374,10 +389,11 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 
 * **Script:** script‑path only; NUMS internal key; leaves for ComputeSpend (and optional Timeout/Abort).
 * **SIGHASH:** `SIGHASH_ALL`; annex absent (BIP‑341 `annex_present = 0`); bind tapleaf hash **and version**; pin exact output order and CPFP anchor.
-* **MuSig2:** BIP‑327 two‑point nonces; normalize $R$ to even y; erase secnonces; publish `AdaptorVerify(m,T,R,s′)` bound to `ctx_hash`.
+* **MuSig2:** BIP‑327 two‑point nonces with fresh CSPRNG randomness per session (NOT deterministic from secret_key alone); mix in session data for defense-in-depth; maintain R blacklist; normalize $R$ to even y; erase secnonces; publish `AdaptorVerify(m,T,R,s′)` bound to `ctx_hash`.
 * **Adaptor compartmentalization:** one adaptor ⇒ one $T$, one $R$; fresh per path/template/epoch.
-* **KEM/DEM:** constant‑time pairings; subgroup checks; $\rho_i\neq 0$; nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
-* **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts before pre‑sign; abort on any mismatch.
+* **ρ commit-reveal (MUST):** Phase 1: collect all commitments $\text{comm}_i = \text{SHA256}(\text{"PVUGC\_RHO\_COMMIT/v1"} \parallel \rho_i \parallel \text{salt}_i)$; Phase 2: reveal $(\rho_i, \text{salt}_i)$ with arming; Phase 3: verify commitment match before accepting arming package.
+* **KEM/DEM:** constant‑time pairings; subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$; GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (Poseidon2); reject non‑canonical encodings.
+* **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts + ρ commitments before pre‑sign; check per-share $T_i \neq \mathcal{O}$ and aggregated $T \neq \mathcal{O}$; abort on any mismatch.
 * **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
 * **Side-channel protection:** Pairings, scalars, and DEM MUST be constant-time; avoid cache-tunable table leakage across different `ctx_hash` values.
 

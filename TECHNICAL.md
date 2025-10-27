@@ -242,6 +242,9 @@ Therefore K₁ = K₂ = target^ρ, and the extraction is proof-agnostic. ∎
 - ρ is the armer's secret
 - No reference to π or w in arms construction. ∎
 
+**Critical security property (γ₂ exclusion):**
+The Y_j basis excludes [γ]₂. Specifically, Y_j ∈ {[β]₂, b_g2_query}, which are the components used to form B in Groth16. The target R(vk,x) = e(α, β) · e(L(x), γ) contains a factor involving [γ]₂, but since [γ]₂^ρ is never published in the armed bases, computing R(vk,x)^ρ without a valid proof reduces to standard discrete logarithm hardness in 𝔾₂ or 𝔾_T.
+
 ## 5. Implementation Details
 
 ### 5.1 Coefficient Extraction

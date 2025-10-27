@@ -115,6 +115,7 @@ $$\boxed{e(A,B) \cdot e(-C,\delta_2) \;=\; R(\mathsf{vk},x)}$$
 
 - $Y_j$: columns from which B is assembled (includes $\beta_2$ and $b_{g2\_query}$)
 - $\delta_2$: single base for the C-side term
+- **CRITICAL: $\gamma_2$ is deliberately EXCLUDED from armed bases**
 
 **Column-based arming (no Γ matrix needed):**
 
@@ -123,6 +124,9 @@ Publish $\{Y_j^\rho\}$ and $\delta_2^\rho$ plus a single **PoCE-A** proof showin
 Note: Column approach directly arms each Y_j without aggregation, eliminating the need for Γ matrices.
 
 **These are statement-only; no anchor-arm like T₀^ρ is ever published.**
+
+**Security property (γ₂ exclusion):**
+The target R(vk,x) = e(α, β) · e(L(x), γ) contains [γ]₂ in the second factor. Since [γ]₂^ρ is never armed, computing R^ρ from {Y_j^ρ, δ₂^ρ} alone is infeasible (requires either discrete log in 𝔾₂ to recover ρ, or access to γ₂^ρ which is never published). This is standard bilinear hardness, not a novel assumption.
 
 ---
 
