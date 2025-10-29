@@ -25,6 +25,7 @@ pub mod api;
 pub mod error;
 pub mod ct;
 pub mod io;
+pub mod bitcoin;  // Bitcoin integration module (new)
 
 // Recursive demonstration modules (not for production use)
 // These modules demonstrate how PVUGC could work with proof-of-proof recursion
@@ -49,7 +50,7 @@ pub use dlrep::{
 };
 pub use ppe::{compute_groth16_target, build_one_sided_ppe, extract_y_bases, PvugcVk};
 pub use decap::OneSidedCommitments;
-pub use poce::{PoceColumnProof, prove_poce_column, verify_poce_column, verify_poce_b};
+pub use poce::{PoceColumnProof, prove_poce_column, verify_poce_column};
 pub use api::{OneSidedPvugc, PvugcBundle};
 
 // Recursive demonstration types (not for production use)

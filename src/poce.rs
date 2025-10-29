@@ -14,7 +14,7 @@ use ark_std::rand::RngCore;
 use sha2::{Digest, Sha256};
 
 /// PoCE-A proof for column arming
-/// Proves: ∀j, D_j = Y_j^ρ AND D_δ = δ^ρ AND ciphertext is key-committed to K = Poseidon2(ser(R^ρ)|ctx|GSdig)
+/// Proves: ∀j, D_j = Y_j^ρ AND D_δ = δ^ρ AND ciphertext is key-committed to a K derived from R^ρ and context (see DEM-SHA256)
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PoceColumnProof<E: Pairing> {
     /// Per-column commitments: k_ρ · Y_j for each column
@@ -167,24 +167,6 @@ pub fn verify_poce_column<E: Pairing>(
     t_left.into_affine() == t_right.into_affine()
 }
 
-/// PoCE-B: Decapper-local key-commitment verification
-///
-/// Verifies that ciphertext ct_i is key-committed to the derived key K
-pub fn verify_poce_b<E: Pairing>(
-    derived_m: &ark_ec::pairing::PairingOutput<E>, // R^ρ derived from attestation
-    ctx_hash: &[u8],                               // Context hash
-    gs_digest: &[u8],                              // GS instance digest
-    ct_i: &[u8],                                   // Ciphertext
-    tau_i: &[u8],                                  // Key-commitment tag
-) -> bool {
-    // Recompute key: K = Poseidon2(ser(R^ρ) || ctx_hash || gs_digest)
-    let key = derive_kem_key::<E>(derived_m, ctx_hash, gs_digest);
-
-    // Verify tag: τ_i = Poseidon2(K, AD_core, ct_i)
-    let expected_tag = compute_key_commitment_tag(&key, ctx_hash, ct_i);
-
-    expected_tag == tau_i
-}
 
 /// Compute Fiat-Shamir challenge for PoCE
 fn compute_poce_challenge<E: Pairing>(
@@ -256,32 +238,6 @@ fn compute_poce_challenge<E: Pairing>(
 }
 
 /// Derive KEM key from pairing output
-fn derive_kem_key<E: Pairing>(
-    pairing_output: &ark_ec::pairing::PairingOutput<E>,
-    ctx_hash: &[u8],
-    gs_digest: &[u8],
-) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-
-    // Serialize pairing output
-    let mut bytes = Vec::new();
-    pairing_output.serialize_compressed(&mut bytes).unwrap();
-    hasher.update(&bytes);
-
-    hasher.update(ctx_hash);
-    hasher.update(gs_digest);
-
-    hasher.finalize().to_vec()
-}
-
-/// Compute key-commitment tag
-fn compute_key_commitment_tag(key: &[u8], ad_core: &[u8], ciphertext: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(key);
-    hasher.update(ad_core);
-    hasher.update(ciphertext);
-    hasher.finalize().to_vec()
-}
 
 #[cfg(test)]
 mod tests {

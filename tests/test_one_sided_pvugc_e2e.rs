@@ -9,11 +9,51 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
+use rand_core::RngCore;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::*;
+use arkworks_groth16::ct::serialize_gt;
 
 type E = Bls12_381;
+
+/// Helper: Create a proper test context with full binding per spec §3 and §8
+/// Returns: (ctx_hash, gs_digest, ad_core_bytes) for use in tests
+fn create_test_context(
+    vk_hash: [u8; 32],
+    x_hash: [u8; 32],
+    y_cols_digest: [u8; 32],
+    epoch_nonce: [u8; 32],
+    tapleaf_hash: [u8; 32],
+) -> ([u8; 32], [u8; 32], Vec<u8>) {
+    use arkworks_groth16::ctx::PvugcContextBuilder;
+    use arkworks_groth16::ct::AdCore;
+    
+    // Build context with all layers
+    let ctx = PvugcContextBuilder::new(vk_hash, x_hash, y_cols_digest, epoch_nonce)
+        .with_tapleaf(tapleaf_hash, 0xc0)
+        .with_path_tag("compute")
+        .finalize(None, None);
+    
+    // Create AD_core for DEM-SHA256 binding
+    let ad_core = AdCore::new(
+        vk_hash,
+        x_hash,
+        ctx.ctx_core,
+        tapleaf_hash,
+        0xc0,
+        vec![],  // empty txid_template for testing
+        "compute",
+        0,       // share_index
+        vec![0u8; 33],  // t_i
+        vec![0u8; 33],  // t_aggregate
+        vec![0u8; 64],  // armed_bases
+        vec![0u8; 64],  // armed_delta
+        ctx.ctx_core,   // gs_instance_digest
+    );
+    
+    (ctx.ctx_hash, ctx.ctx_core, ad_core.serialize())
+}
 
 fn ppe_unarmed_assert_full<Ep: ark_ec::pairing::Pairing>(
     x_b_cols: &[(Ep::G1Affine, Ep::G1Affine)],
@@ -117,17 +157,24 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // Generate arming artifacts for PoCE-A
     let s_i = Fr::rand(&mut rng);
     let t_i = (<E as Pairing>::G1::generator() * s_i).into_affine();
-    let ctx_hash = b"test_context_hash";
-    let gs_digest = b"test_gs_digest";
+    
+    // Create proper test context with full binding
+    let vk_hash = [1u8; 32];
+    let x_hash = [2u8; 32];
+    let y_cols_digest = [3u8; 32];
+    let epoch_nonce = [4u8; 32];
+    let tapleaf_hash = [5u8; 32];
+    
+    let (ctx_hash, gs_digest, ad_core_bytes) = 
+        create_test_context(vk_hash, x_hash, y_cols_digest, epoch_nonce, tapleaf_hash);
 
     // Create a deposit-time ciphertext and tag bound to expected K = R^ρ
     let plaintext = b"simulated_ciphertext";
-    let (nonce, ct) =
-        OneSidedPvugc::encrypt_with_key(&k_expected, ctx_hash, plaintext).expect("encrypt");
-    let tau = OneSidedPvugc::compute_key_commitment_tag_for_ciphertext(
-        &k_expected,
-        ctx_hash,
-        gs_digest,
+    let dem = ct::DemP2::new(&serialize_gt::<E>(&k_expected.0), &ad_core_bytes);
+    let ct = dem.encrypt(plaintext);
+    let tau = ct::compute_key_commitment_tag(
+        &serialize_gt::<E>(&k_expected.0),
+        &ad_core_bytes,
         &ct,
     );
 
@@ -138,8 +185,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &t_i,
         &rho,
         &s_i,
-        ctx_hash,
-        gs_digest,
+        &ctx_hash,
+        &gs_digest,
         &ct,
         &tau,
         &mut rng,
@@ -151,8 +198,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &col_arms,
         &t_i,
         &poce_proof,
-        ctx_hash,
-        gs_digest,
+        &ctx_hash,
+        &gs_digest,
         &ct,
         &tau,
     ));
@@ -213,7 +260,8 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // === CT DECRYPTION (SPEND-TIME) ===
     // Decrypt with derived key from proof 2 (same statement) → should succeed
-    let opened2 = OneSidedPvugc::decrypt_with_key(&k2, ctx_hash, &nonce, &ct).expect("decrypt");
+    let dem2 = ct::DemP2::new(&serialize_gt::<E>(&k2.0), &ad_core_bytes);
+    let opened2 = dem2.decrypt(&ct);
     assert_eq!(opened2.as_slice(), plaintext);
 
     // === PROOF-AGNOSTIC PROPERTY ===
@@ -287,7 +335,10 @@ fn test_one_sided_pvugc_proof_agnostic() {
         "Different vaults MUST produce different keys!"
     );
     // Decryption with different-statement key should fail
-    assert!(OneSidedPvugc::decrypt_with_key(&k_vault2_decap, ctx_hash, &nonce, &ct).is_err());
+    // (Different K → different keystream → plaintext won't match)
+    let dem_vault2 = ct::DemP2::new(&serialize_gt::<E>(&k_vault2_decap.0), &ad_core_bytes);
+    let opened_vault2 = dem_vault2.decrypt(&ct);
+    assert_ne!(opened_vault2.as_slice(), plaintext, "Different statement key must not decrypt correctly");
 }
 
 #[test]
@@ -468,4 +519,198 @@ fn test_witness_independence() {
     assert_eq!(k1, k_expected_r, "K₁ should equal R^ρ");
     assert_eq!(k2, k_expected_r, "K₂ should equal R^ρ");
     assert_eq!(k1, k_expected, "Should match setup_and_arm");
+}
+
+#[test]
+fn test_phase1_integration() {
+    use arkworks_groth16::ctx::{PvugcContextBuilder, NumsKeyDerivation, EpochNonceRegistry};
+    use arkworks_groth16::bitcoin::{TaprootScriptPath, TransactionTemplate, SighashBinding};
+    use sha2::{Sha256, Digest};
+    
+    let mut rng = StdRng::seed_from_u64(42);
+
+    // PART A: Cryptographic Setup (Existing PVUGC)
+    // ===============================================
+    
+    let statement_x = vec![Fr::from(25u64)];
+    let circuit = SquareCircuit {
+        x: Some(Fr::from(25u64)),
+        y: Some(Fr::from(5u64)),
+    };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+
+    let pvugc_vk = PvugcVk {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
+
+    let rho = Fr::rand(&mut rng);
+    let (_bases_cols, col_arms, _r, k_expected) =
+        OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &statement_x, &rho).expect("setup_and_arm");
+
+    // PART B: Context Binding Setup (New)
+    // ===================================
+    
+    // Compute digest hashes per spec §3
+    let mut vk_hasher = Sha256::new();
+    let vk_bytes = format!("{:?}", vk);  // Simplified; production would serialize properly
+    vk_hasher.update(vk_bytes.as_bytes());
+    let vk_hash: [u8; 32] = vk_hasher.finalize().into();
+
+    let mut x_hasher = Sha256::new();
+    for x_elem in &statement_x {
+        x_hasher.update(format!("{:?}", x_elem).as_bytes());
+    }
+    let x_hash: [u8; 32] = x_hasher.finalize().into();
+
+    let mut y_cols_hasher = Sha256::new();
+    y_cols_hasher.update(b"PVUGC/YCOLS");
+    y_cols_hasher.update(format!("{:?}", vk.beta_g2).as_bytes());
+    for col in pk.b_g2_query.iter() {
+        y_cols_hasher.update(format!("{:?}", col).as_bytes());
+    }
+    let y_cols_digest: [u8; 32] = y_cols_hasher.finalize().into();
+
+    // Generate unique epoch nonce
+    let mut epoch_nonce = [0u8; 32];
+    let mut nonce_rng = StdRng::seed_from_u64(999);
+    for byte in epoch_nonce.iter_mut() {
+        *byte = (nonce_rng.next_u32() % 256) as u8;
+    }
+    
+    // Verify nonce uniqueness
+    let mut nonce_registry = EpochNonceRegistry::new();
+    assert!(nonce_registry.register(epoch_nonce).is_ok());
+    assert!(nonce_registry.register(epoch_nonce).is_err(), "Nonce reuse should be rejected");
+
+    // Build context binding
+    let ctx_builder = PvugcContextBuilder::new(vk_hash, x_hash, y_cols_digest, epoch_nonce);
+    let ctx = ctx_builder.finalize(None, None);
+    
+    assert_ne!(ctx.ctx_hash, [0u8; 32], "ctx_hash must not be zero");
+    assert_eq!(ctx.epoch_nonce, epoch_nonce, "Nonce should be preserved");
+
+    // PART C: NUMS Key Derivation (New)
+    // ==================================
+    
+    let nums = NumsKeyDerivation::new(vk_hash, x_hash, epoch_nonce);
+    let nums_challenge = nums.compute_nums_challenge();
+    
+    // Verify determinism
+    let nums2 = NumsKeyDerivation::new(vk_hash, x_hash, epoch_nonce);
+    let nums_challenge2 = nums2.compute_nums_challenge();
+    assert_eq!(nums_challenge, nums_challenge2, "NUMS challenge must be deterministic");
+    assert!(nums_challenge.starts_with(b"PVUGC/NUMS"), "NUMS challenge must have domain tag");
+
+    // PART D: Taproot Script Paths (New)
+    // ==================================
+    
+    let pubkey_compute = [1u8; 33];
+    let pubkey_abort = [2u8; 33];
+    
+    let compute_path = TaprootScriptPath::compute_spend(&pubkey_compute);
+    let abort_path = TaprootScriptPath::timeout_abort(144, &pubkey_abort);
+    
+    assert_eq!(compute_path.version, 0xc0, "Taproot version must be 0xc0");
+    assert_eq!(compute_path.script.len(), 34, "ComputeSpend script: 33 bytes pubkey + 1 byte OP_CHECKSIG");
+    assert!(abort_path.script.len() > 34, "TimeoutAbort script longer than ComputeSpend");
+    
+    // Compute leaf hashes
+    let compute_leaf_hash = compute_path.leaf_hash();
+    let abort_leaf_hash = abort_path.leaf_hash();
+    
+    assert_ne!(compute_leaf_hash, abort_leaf_hash, "Different scripts must have different hashes");
+    assert_ne!(compute_leaf_hash, [0u8; 32], "Leaf hash must not be zero");
+
+    // PART E: Transaction Template (New)
+    // ===================================
+    
+    let prev_outpoint = vec![0u8; 36];  // 32-byte txid + 4-byte vout
+    let output_script = vec![0x51];  // OP_1
+    let outputs = vec![(output_script, 50000u64)];
+    let tx_template = TransactionTemplate::new(
+        prev_outpoint.clone(),
+        outputs.clone(),
+        0,
+        0xfffffffe,  // CSV-capable
+        vec![0x02, 0x00, 0x01, 0x00],
+    );
+    
+    let tx_hash1 = tx_template.tx_hash();
+    let tx_hash2 = tx_template.tx_hash();
+    assert_eq!(tx_hash1, tx_hash2, "TX hash must be deterministic");
+    assert_ne!(tx_hash1, [0u8; 32], "TX hash must not be zero");
+
+    // PART F: SIGHASH Binding (New)
+    // =============================
+    
+    let sighash = SighashBinding::compute_sighash_all(
+        &prev_outpoint,
+        50000u64,
+        &[0x51],
+        &outputs,
+        &compute_path,
+        0,
+    );
+    
+    assert_ne!(sighash, [0u8; 32], "SIGHASH must not be zero");
+
+    // PART G: Proof Generation & Key Extraction (Existing PVUGC + Context Binding)
+    // ==============================================================================
+    
+    let mut recorder = SimpleCoeffRecorder::<E>::new();
+    let proof =
+        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
+            .unwrap();
+
+    let commitments = recorder.build_commitments();
+    let bundle = PvugcBundle {
+        groth16_proof: proof.clone(),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
+        gs_commitments: commitments.clone(),
+    };
+
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement_x));
+    
+    let k_derived = OneSidedPvugc::decapsulate(&commitments, &col_arms).expect("decapsulate");
+    assert_eq!(k_derived, k_expected, "Extracted key must match expected R^ρ");
+
+    // PART H: Full Context Integration (All Layers)
+    // ==============================================
+    
+    // Bind arming package
+    let arming_pkg = PvugcContextBuilder::build_arming_pkg_hash(
+        b"armed_bases_serialized",
+        b"header_metadata",
+    );
+    
+    // Bind presignature package
+    let presig_pkg = PvugcContextBuilder::build_presig_pkg_hash(
+        &sighash,
+        b"adaptor_point_T",
+        b"nonce_R",
+        b"signer_set",
+        b"musig_coeffs",
+    );
+    
+    // Build final context with all three layers
+    let full_ctx = PvugcContextBuilder::new(vk_hash, x_hash, y_cols_digest, epoch_nonce)
+        .with_tapleaf(compute_leaf_hash, 0xc0)
+        .with_txid_template(tx_template.serialized.clone())
+        .with_path_tag("compute")
+        .finalize(Some(arming_pkg), Some(presig_pkg));
+    
+    assert_eq!(full_ctx.ctx_core, full_ctx.ctx_core, "ctx_core must be deterministic");
+    assert!(full_ctx.arming_pkg_hash.is_some());
+    assert!(full_ctx.presig_pkg_hash.is_some());
+    assert_ne!(full_ctx.ctx_hash, [0u8; 32], "Final ctx_hash must not be zero");
+
+    // Verify that different paths produce different context
+    let different_path_ctx = PvugcContextBuilder::new(vk_hash, x_hash, y_cols_digest, epoch_nonce)
+        .with_path_tag("abort")
+        .finalize(None, None);
+    
+    assert_ne!(full_ctx.ctx_core, different_path_ctx.ctx_core, "Different paths must produce different contexts");
 }

@@ -8,12 +8,11 @@ use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
 use crate::arming::{arm_columns, ColumnArms, ColumnBases};
 use crate::dlrep::{verify_b_msm, verify_ties_per_column};
 use crate::error::{Error, Result as PvugcResult};
-use crate::poce::{prove_poce_column, verify_poce_b, verify_poce_column, PoceColumnProof};
+use crate::poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
 use crate::ppe::validate_groth16_vk_subgroups;
 pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
 use crate::{compute_groth16_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
 use ark_std::rand::RngCore;
-use sha2::{Digest, Sha256};
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
@@ -68,7 +67,7 @@ impl OneSidedPvugc {
     /// Produce PoCE-A attestation for column arming (arm-time)
     ///
     /// Proves that all column arms share the same ρ and ciphertext is key-committed
-    /// to K = Poseidon2(ser(R^ρ)|ctx|GSdig)
+    /// to K derived from R^ρ via DEM-SHA256 KDF binding ctx_hash and GS digest
     pub fn attest_column_arming<E: Pairing, R: RngCore + rand_core::CryptoRng>(
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
@@ -161,7 +160,7 @@ impl OneSidedPvugc {
 
     /// Verify PoCE-B key-commitment (decap-time, decapper-local)
     ///
-    /// Verifies that ciphertext is key-committed to the derived key
+    /// Verifies that ciphertext is key-committed to the derived key using DEM-SHA256
     pub fn verify_key_commitment<E: Pairing>(
         derived_m: &PairingOutput<E>, // R^ρ derived from attestation
         ctx_hash: &[u8],              // Context hash
@@ -169,36 +168,39 @@ impl OneSidedPvugc {
         ct_i: &[u8],                  // Ciphertext
         tau_i: &[u8],                 // Key-commitment tag
     ) -> bool {
-        verify_poce_b::<E>(derived_m, ctx_hash, gs_digest, ct_i, tau_i)
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        // Combine ctx_hash and gs_digest to form AD_core for DEM-SHA256
+        let mut ad_core = Vec::new();
+        ad_core.extend_from_slice(ctx_hash);
+        ad_core.extend_from_slice(gs_digest);
+        
+        // Ensure tau_i is 32 bytes
+        if tau_i.len() != 32 {
+            return false;
+        }
+        let mut tau_array = [0u8; 32];
+        tau_array.copy_from_slice(tau_i);
+        
+        crate::ct::verify_key_commitment(&k_bytes, &ad_core, ct_i, &tau_array)
     }
 
     /// Compute PoCE-B key-commitment tag for a ciphertext (deposit-time helper)
     ///
-    /// τ = SHA256( K || ctx_hash || ct ), where K = SHA256( ser(R^ρ) || ctx_hash || gs_digest )
+    /// τ = SHA-256("PVUGC/DEM-SHA256/tag" || K || AD_core || ct), where K is derived from R^ρ
     pub fn compute_key_commitment_tag_for_ciphertext<E: Pairing>(
         derived_m: &PairingOutput<E>,
         ctx_hash: &[u8],
         gs_digest: &[u8],
         ciphertext: &[u8],
     ) -> Vec<u8> {
-        use ark_serialize::CanonicalSerialize;
-        // Derive K the same way PoCE-B does
-        let mut h = Sha256::new();
-        let mut buf = Vec::new();
-        derived_m
-            .serialize_compressed(&mut buf)
-            .expect("serialize GT");
-        h.update(&buf);
-        h.update(ctx_hash);
-        h.update(gs_digest);
-        let k = h.finalize();
-
-        // Compute τ
-        let mut h2 = Sha256::new();
-        h2.update(&k);
-        h2.update(ctx_hash);
-        h2.update(ciphertext);
-        h2.finalize().to_vec()
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        // Combine ctx_hash and gs_digest to form AD_core for DEM-SHA256
+        let mut ad_core = Vec::new();
+        ad_core.extend_from_slice(ctx_hash);
+        ad_core.extend_from_slice(gs_digest);
+        
+        let tau = crate::ct::compute_key_commitment_tag(&k_bytes, &ad_core, ciphertext);
+        tau.to_vec()
     }
 
     /// Verify complete bundle
@@ -386,26 +388,50 @@ impl OneSidedPvugc {
         PairingOutput(r_to_rho)
     }
 
-    /// Encrypt using derived key K (PairingOutput), binding to ctx_digest
-    pub fn encrypt_with_key<E: Pairing>(
+    /// Encrypt using derived key K (PairingOutput) with DEM-SHA256
+    /// Per spec §8: ct_i = (s_i || h_i) ⊕ SHA-256("PVUGC/DEM-SHA256/keystream" || K_i || AD_core)
+    ///
+    /// Returns: (ciphertext) encrypted plaintext
+    pub fn encrypt_with_key_dem<E: Pairing>(
         derived_m: &PairingOutput<E>,
-        ctx_digest: &[u8],
+        ad_core: &[u8],
         plaintext: &[u8],
-    ) -> core::result::Result<(Vec<u8>, Vec<u8>), String> {
+    ) -> core::result::Result<Vec<u8>, String> {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
-        crate::ct::seal_with_k_bytes(&k_bytes, ctx_digest, plaintext)
-            .map_err(|e| e.to_string())
+        let dem = crate::ct::DemP2::new(&k_bytes, ad_core);
+        Ok(dem.encrypt(plaintext))
     }
 
-    /// Decrypt using derived key K (PairingOutput), bound to ctx_digest
-    pub fn decrypt_with_key<E: Pairing>(
+    /// Decrypt using derived key K (PairingOutput) with DEM-SHA256
+    /// Per spec §8: pt = ct ⊕ SHA-256("PVUGC/DEM-SHA256/keystream" || K_i || AD_core)
+    pub fn decrypt_with_key_dem<E: Pairing>(
         derived_m: &PairingOutput<E>,
-        ctx_digest: &[u8],
-        nonce: &[u8],
+        ad_core: &[u8],
         ciphertext: &[u8],
     ) -> core::result::Result<Vec<u8>, String> {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
-        crate::ct::open_with_k_bytes(&k_bytes, ctx_digest, nonce, ciphertext)
-            .map_err(|e| e.to_string())
+        let dem = crate::ct::DemP2::new(&k_bytes, ad_core);
+        Ok(dem.decrypt(ciphertext))
+    }
+
+    /// Compute key-commitment tag τ_i per spec §8:286 (DEM-SHA256)
+    pub fn compute_key_commitment_tag_dem<E: Pairing>(
+        derived_m: &PairingOutput<E>,
+        ad_core: &[u8],
+        ciphertext: &[u8],
+    ) -> [u8; 32] {
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        crate::ct::compute_key_commitment_tag(&k_bytes, ad_core, ciphertext)
+    }
+
+    /// Verify key-commitment tag (PoCE-B check)
+    pub fn verify_key_commitment_dem<E: Pairing>(
+        derived_m: &PairingOutput<E>,
+        ad_core: &[u8],
+        ciphertext: &[u8],
+        tau_i: &[u8; 32],
+    ) -> bool {
+        let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
+        crate::ct::verify_key_commitment(&k_bytes, ad_core, ciphertext, tau_i)
     }
 }

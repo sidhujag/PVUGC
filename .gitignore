@@ -40,3 +40,9 @@ coverage/
 # Backup files
 *.bak
 *.backup
+
+# Local build/output directories
+/target_release/
+
+# Local Cargo home (if used for isolated builds)
+/.cargo_home/
