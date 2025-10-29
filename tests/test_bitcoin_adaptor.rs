@@ -174,7 +174,6 @@ impl BridgeContext {
 
 #[derive(Clone)]
 struct EncryptedShare {
-    nonce: Vec<u8>,
     ciphertext: Vec<u8>,
     tau: Vec<u8>,
 }
@@ -229,8 +228,6 @@ impl<Ep: Pairing> DepositPackage<Ep> {
                 .serialize_compressed(&mut buf)
                 .expect("serialize column arms");
             hasher.update(&buf);
-            hasher.update(&(armer.encrypted_share.nonce.len() as u64).to_le_bytes());
-            hasher.update(&armer.encrypted_share.nonce);
             hasher.update(&(armer.encrypted_share.ciphertext.len() as u64).to_le_bytes());
             hasher.update(&armer.encrypted_share.ciphertext);
             hasher.update(&(armer.encrypted_share.tau.len() as u64).to_le_bytes());
@@ -545,11 +542,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             adaptor_share: share,
             adaptor_commitment: affine_from_projective(&commitment),
             column_arms: col_arms.clone(),
-            encrypted_share: EncryptedShare {
-                nonce: Vec::new(),
-                ciphertext: Vec::new(),
-                tau: Vec::new(),
-            },
+            encrypted_share: EncryptedShare { ciphertext: Vec::new(), tau: Vec::new() },
             expected_key,
         });
     }
@@ -570,15 +563,9 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     public_input.serialize_compressed(&mut x_bytes).expect("serialize x");
     let x_hash = sha256(&x_bytes);
 
-    // Build full PVUGC context for DEM-SHA256 AD_core construction
+    // Build PVUGC context inputs used later for final layered ctx_hash
     let epoch_nonce = sha256(b"epoch_nonce");
     let tapleaf_hash_bytes = sha256(b"PVUGC/TAPSCRIPT/COMPUTE");
-    let pvugc_ctx = PvugcContextBuilder::new(vk_hash, x_hash, [0u8; 32], epoch_nonce)
-        .with_tapleaf(tapleaf_hash_bytes, 0xc0)
-        .with_path_tag("compute")
-        .finalize(None, None);
-
-    let ctx_core = pvugc_ctx.ctx_core;
 
     // Re-encrypt shares with final context bindings now that adaptor sum is fixed
     // 3-of-3 arming checks
@@ -868,16 +855,8 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         pok_msg.copy_from_slice(&pok_digest);
         let pok_sig = bip340_sign_with_scalar(&operator.adaptor_share, &pok_msg, &mut rng);
         assert!(verify_schnorr_signature(&operator.adaptor_commitment, &pok_msg, &pok_sig));
-        operator.encrypted_share = EncryptedShare {
-            nonce: Vec::new(),
-            ciphertext,
-            tau: tau.to_vec(),
-        };
+        operator.encrypted_share = EncryptedShare { ciphertext, tau: tau.to_vec() };
     }
-    for operator in &operator_armings {
-        assert!(operator.encrypted_share.nonce.is_empty(), "DEM-SHA256 must not use nonces");
-    }
-
     // Recompute armers and deposit package with updated encrypted shares
     armers = operator_armings
         .iter()
@@ -1019,6 +998,13 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
                 a
             },
         ));
+        // Tag round-trip: recompute and compare with published τ
+        let tau_re = OneSidedPvugc::compute_key_commitment_tag_dem(
+            &derived_key,
+            &ad_bytes,
+            &operator.encrypted_share.ciphertext,
+        );
+        assert_eq!(operator.encrypted_share.tau, tau_re.to_vec());
         let decrypted = OneSidedPvugc::decrypt_with_key_dem(
             &derived_key,
             &ad_bytes,
@@ -1132,10 +1118,10 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     let ad_core0 = AdCore::new(
         vk_hash,
         x_hash,
-        ctx_core,
+        ctx_hash_final,
         tapleaf_hash_bytes,
         0xc0,
-        Vec::new(),
+        tx_template_bytes.clone(),
         "compute",
         0,
         t_i0.clone(),
@@ -1165,7 +1151,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         mismatched_ctx,
         tapleaf_hash_bytes,
         0xc0,
-        Vec::new(),
+        tx_template_bytes.clone(),
         "compute",
         0,
         t_i0,
@@ -1215,16 +1201,57 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     )
     .unwrap();
     let wrong_commitments = commitments_from_recorder(&wrong_recorder);
-    for operator in &operator_armings {
+    for (idx, operator) in operator_armings.iter().enumerate() {
         let wrong_key =
             OneSidedPvugc::decapsulate(&wrong_commitments, &operator.column_arms).unwrap();
         assert_ne!(wrong_key, operator.expected_key);
-        assert!(!OneSidedPvugc::verify_key_commitment(
+        // Rebuild AD_core exactly as in the honest path for this operator
+        let t_i = {
+            let aff = operator.adaptor_commitment;
+            let x = encoded_x(&aff);
+            let mut v = Vec::with_capacity(33);
+            let tag = if y_is_even(&aff) { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
+            v.extend_from_slice(&x);
+            v
+        };
+        let t_agg = {
+            let mut v = Vec::with_capacity(33);
+            let tag = if adaptor_y_is_even { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
+            v.extend_from_slice(&encoded_x(&adaptor_point));
+            v
+        };
+        let mut bases_bytes = Vec::new();
+        operator
+            .column_arms
+            .serialize_compressed(&mut bases_bytes)
+            .expect("serialize column arms");
+        let ad_core = AdCore::new(
+            vk_hash,
+            x_hash,
+            ctx_hash_final,
+            tapleaf_hash_bytes,
+            0xc0,
+            tx_template_bytes.clone(),
+            "compute",
+            idx as u32,
+            t_i,
+            t_agg,
+            bases_bytes,
+            Vec::new(),
+            gs_digest,
+        );
+        let ad_bytes = ad_core.serialize();
+        assert!(!OneSidedPvugc::verify_key_commitment_dem(
             &wrong_key,
-            &ctx_hash,
-            &gs_digest,
+            &ad_bytes,
             &operator.encrypted_share.ciphertext,
-            &operator.encrypted_share.tau,
+            &{
+                let mut a = [0u8;32];
+                a.copy_from_slice(&operator.encrypted_share.tau);
+                a
+            },
         ));
     }
 }
