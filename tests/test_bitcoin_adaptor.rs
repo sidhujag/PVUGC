@@ -790,11 +790,18 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             let aff = operator.adaptor_commitment;
             let x = encoded_x(&aff);
             let mut v = Vec::with_capacity(33);
-            v.extend_from_slice(&[0x02]);
+            let tag = if y_is_even(&aff) { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
             v.extend_from_slice(&x);
             v
         };
-        let t_agg = t_bytes.clone();
+        let t_agg = {
+            let mut v = Vec::with_capacity(33);
+            let tag = if adaptor_y_is_even { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
+            v.extend_from_slice(&encoded_x(&adaptor_point));
+            v
+        };
         let mut bases_bytes = Vec::new();
         operator
             .column_arms
@@ -969,15 +976,16 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             let aff = operator.adaptor_commitment;
             let x = encoded_x(&aff);
             let mut v = Vec::with_capacity(33);
-            v.extend_from_slice(&[0x02]);
+            let tag = if y_is_even(&aff) { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
             v.extend_from_slice(&x);
             v
         };
         let t_agg = {
-            let x = encoded_x(&adaptor_point);
             let mut v = Vec::with_capacity(33);
-            v.extend_from_slice(&[0x02]);
-            v.extend_from_slice(&x);
+            let tag = if adaptor_y_is_even { 0x02 } else { 0x03 };
+            v.extend_from_slice(&[tag]);
+            v.extend_from_slice(&encoded_x(&adaptor_point));
             v
         };
         let mut bases_bytes = Vec::new();
@@ -1104,15 +1112,16 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         let aff = op0.adaptor_commitment;
         let x = encoded_x(&aff);
         let mut v = Vec::with_capacity(33);
-        v.extend_from_slice(&[0x02]);
+        let tag = if y_is_even(&aff) { 0x02 } else { 0x03 };
+        v.extend_from_slice(&[tag]);
         v.extend_from_slice(&x);
         v
     };
     let t_agg0 = {
-        let x = encoded_x(&adaptor_point);
         let mut v = Vec::with_capacity(33);
-        v.extend_from_slice(&[0x02]);
-        v.extend_from_slice(&x);
+        let tag = if adaptor_y_is_even { 0x02 } else { 0x03 };
+        v.extend_from_slice(&[tag]);
+        v.extend_from_slice(&encoded_x(&adaptor_point));
         v
     };
     let mut bases_bytes0 = Vec::new();
