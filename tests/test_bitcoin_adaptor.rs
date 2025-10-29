@@ -629,7 +629,6 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         armers,
     };
 
-    let deposit_id = deposit_package.hash();
 
     let sorted_pk_x: Vec<[u8; 32]> = deposit_package
         .armers
@@ -807,7 +806,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             ctx_hash_final,
             tapleaf_hash_bytes,
             0xc0,
-            Vec::new(),
+            tx_template_bytes.clone(),
             "compute",
             idx as u32,
             t_i,
@@ -892,10 +891,11 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         anti_replay: bridge_context.anti_replay.clone(),
         armers,
     };
+    let deposit_id = deposit_package.hash();
 
     // Ready attestation binds the context, package hash and pre-signature hash
     let mut ready_hasher = Sha256::new();
-    ready_hasher.update(&ctx_hash);
+    ready_hasher.update(&ctx_hash_final);
     ready_hasher.update(&deposit_id);
     ready_hasher.update(&pre_signature_hash);
     ready_hasher.update(&bridge_context.anti_replay.to_bytes());
@@ -991,7 +991,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             ctx_hash_final,
             tapleaf_hash_bytes,
             0xc0,
-            Vec::new(),
+            tx_template_bytes.clone(),
             "compute",
             idx as u32,
             t_i,
