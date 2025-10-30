@@ -341,13 +341,19 @@ impl OneSidedPvugc {
         }
 
         let mut lhs = PairingOutput::<E>(One::one());
-        for ((x0, x1), y) in bundle.gs_commitments.x_b_cols.iter().zip(&y_cols) {
-            lhs += E::pairing(*x0, *y);
-            lhs += E::pairing(*x1, *y);
+        // Fixed-shape pairing schedule derived from pinned column counts
+        let num_cols = y_cols.len();
+        for i in 0..num_cols {
+            let (x0, x1) = bundle.gs_commitments.x_b_cols[i];
+            let y = y_cols[i];
+            lhs += E::pairing(x0, y);
+            lhs += E::pairing(x1, y);
         }
-        for (t0, t1) in &bundle.gs_commitments.theta {
-            lhs += E::pairing(*t0, pvugc_vk.delta_g2);
-            lhs += E::pairing(*t1, pvugc_vk.delta_g2);
+        let num_theta = bundle.gs_commitments.theta.len();
+        for i in 0..num_theta {
+            let (t0, t1) = bundle.gs_commitments.theta[i];
+            lhs += E::pairing(t0, pvugc_vk.delta_g2);
+            lhs += E::pairing(t1, pvugc_vk.delta_g2);
         }
         let (c0, c1) = bundle.gs_commitments.theta_delta_cancel;
         lhs += E::pairing(c0, pvugc_vk.delta_g2);

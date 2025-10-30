@@ -52,13 +52,19 @@ pub fn decap<E: Pairing>(
     
     use ark_std::One;
     let mut k = PairingOutput::<E>(One::one());
-    for ((x0, x1), y_rho) in commitments.x_b_cols.iter().zip(&col_arms.y_cols_rho) {
-        k += E::pairing(*x0, *y_rho);
-        k += E::pairing(*x1, *y_rho);
+    // Fixed-shape pairing schedule derived from pinned column counts
+    let num_cols = commitments.x_b_cols.len();
+    for i in 0..num_cols {
+        let (x0, x1) = commitments.x_b_cols[i];
+        let y_rho = col_arms.y_cols_rho[i];
+        k += E::pairing(x0, y_rho);
+        k += E::pairing(x1, y_rho);
     }
-    for (t0, t1) in &commitments.theta {
-        k += E::pairing(*t0, col_arms.delta_rho);
-        k += E::pairing(*t1, col_arms.delta_rho);
+    let num_theta = commitments.theta.len();
+    for i in 0..num_theta {
+        let (t0, t1) = commitments.theta[i];
+        k += E::pairing(t0, col_arms.delta_rho);
+        k += E::pairing(t1, col_arms.delta_rho);
     }
     let (c0, c1) = commitments.theta_delta_cancel;
     k += E::pairing(c0, col_arms.delta_rho);
