@@ -26,7 +26,19 @@ pub struct PvugcBundle<E: Pairing> {
 pub struct VerifyLimits {
     /// Maximum allowed number of B-columns (length of b_g2_query)
     pub max_b_columns: Option<usize>,
+    /// Maximum allowed number of theta rows (δ-side rows)
+    pub max_theta_rows: Option<usize>,
+    /// Maximum allowed total pairing budget for PPE verify
+    /// total_pairings = 2*|X_B| + 2*|theta| + 2 (for canceller limbs)
+    pub max_total_pairings: Option<usize>,
 }
+
+/// Recommended default for total pairing budget per verification (spec §6 size bound)
+pub const DEFAULT_MAX_TOTAL_PAIRINGS: usize = 96;
+/// Recommended default maximum for B-columns (statement-only Y columns)
+pub const DEFAULT_MAX_B_COLUMNS: usize = 48;
+/// Recommended default maximum for theta rows (δ-side rows)
+pub const DEFAULT_MAX_THETA_ROWS: usize = 24;
 
 /// Main API for one-sided PVUGC
 pub struct OneSidedPvugc;
@@ -53,6 +65,10 @@ impl OneSidedPvugc {
         }
 
         let r = compute_groth16_target(vk, public_inputs)?;
+        // Early guard: R must not be identity (spec §6/§7)
+        if crate::ct::gt_eq_ct::<E>(&r, &PairingOutput::<E>(One::one())) {
+            return Err(Error::Crypto("R_is_identity".to_string()));
+        }
         let mut y_cols = vec![pvugc_vk.beta_g2];
         y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
         let bases = ColumnBases {
@@ -216,7 +232,10 @@ impl OneSidedPvugc {
             vk,
             public_inputs,
             &VerifyLimits {
-                max_b_columns: None,
+                max_b_columns: Some(DEFAULT_MAX_B_COLUMNS),
+                max_theta_rows: Some(DEFAULT_MAX_THETA_ROWS),
+                // Enforce safe default pairing budget to mitigate DoS by oversized attestations
+                max_total_pairings: Some(DEFAULT_MAX_TOTAL_PAIRINGS),
             },
         )
     }
@@ -338,6 +357,33 @@ impl OneSidedPvugc {
         }
         if bundle.gs_commitments.theta.is_empty() {
             return false;
+        }
+
+        // Optional DoS limits: enforce theta rows and total pairing budget
+        if let Some(max_theta) = limits.max_theta_rows {
+            if bundle.gs_commitments.theta.len() > max_theta {
+                return false;
+            }
+        }
+        if let Some(max_pairings) = limits.max_total_pairings {
+            // total_pairings = 2*|X_B| + 2*|theta| + 2 (for canceller limbs)
+            let num_cols = y_cols.len();
+            let num_theta = bundle.gs_commitments.theta.len();
+            let total_pairings = 2usize
+                .saturating_mul(num_cols)
+                .saturating_add(2usize.saturating_mul(num_theta))
+                .saturating_add(2);
+            if total_pairings > max_pairings {
+                return false;
+            }
+        }
+
+        // Structural exclusion: γ₂ must not appear among statement-only bases
+        // (y_cols = {β₂} ∪ b_g2_query). Reject if any Y equals vk.gamma_g2.
+        for y in &y_cols {
+            if *y == vk.gamma_g2 {
+                return false;
+            }
         }
 
         let mut lhs = PairingOutput::<E>(One::one());

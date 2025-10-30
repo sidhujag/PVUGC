@@ -9,6 +9,7 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
+use ark_std::Zero;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::PoceColumnProof;
 use arkworks_groth16::*;
@@ -434,4 +435,107 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
             &vault_utxo
         ));
     }
+}
+
+#[test]
+fn test_r_independence_from_rho() {
+    let mut rng = StdRng::seed_from_u64(12345);
+
+    // Statement: x = y^2 with x fixed
+    let x = Fr::from(25u64);
+    let y = Fr::from(5u64);
+    let public_x = vec![x];
+
+    // Setup Groth16
+    let circuit = TestCircuit { x: Some(x), y: Some(y) };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+
+    // PVUGC VK wrapper (statement-only bases)
+    let pvugc_vk = PvugcVk::<E> {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
+
+    // Two fresh exponents ρ1 != 0 and ρ2 != 0
+    let mut rho1 = Fr::rand(&mut rng);
+    if rho1.is_zero() { rho1 = Fr::from(7u64); }
+    let mut rho2 = Fr::rand(&mut rng);
+    if rho2.is_zero() { rho2 = Fr::from(11u64); }
+
+    // Compute R directly from (vk, x) twice; must be identical and ρ-independent
+    let r1 = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
+    let r2 = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
+    assert_eq!(r1, r2, "R(vk,x) must be deterministic and ρ-independent");
+
+    // Canonical setup_and_arm for each ρ; returned R must match direct computation
+    let (_bases1, arms1, r_setup1, k1_expected) =
+        OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &public_x, &rho1).expect("setup_and_arm");
+    let (_bases2, arms2, r_setup2, k2_expected) =
+        OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &public_x, &rho2).expect("setup_and_arm");
+
+    assert_eq!(r1, r_setup1, "setup_and_arm must not mix ρ into R");
+    assert_eq!(r1, r_setup2, "setup_and_arm must not mix ρ into R");
+
+    // Build two valid proofs and commitments (proof randomness differs)
+    let mut rec1 = SimpleCoeffRecorder::<E>::new();
+    let _proof1 = Groth16::<E>::create_random_proof_with_hook(
+        circuit.clone(), &pk, &mut rng, &mut rec1,
+    ).unwrap();
+    let comm1: OneSidedCommitments<E> = rec1.build_commitments();
+
+    let mut rec2 = SimpleCoeffRecorder::<E>::new();
+    let _proof2 = Groth16::<E>::create_random_proof_with_hook(
+        circuit, &pk, &mut rng, &mut rec2,
+    ).unwrap();
+    let comm2: OneSidedCommitments<E> = rec2.build_commitments();
+
+    // Decap with (comm1, arms1) and (comm2, arms2)
+    let k1 = OneSidedPvugc::decapsulate::<E>(&comm1, &arms1).expect("decap");
+    let k2 = OneSidedPvugc::decapsulate::<E>(&comm2, &arms2).expect("decap");
+
+    // Keys must equal R^ρ for the respective ρ and differ if ρ differ
+    assert_eq!(k1, k1_expected, "Decap must produce R^ρ₁");
+    assert_eq!(k2, k2_expected, "Decap must produce R^ρ₂");
+    if rho1 != rho2 {
+        assert_ne!(k1, k2, "Different ρ must yield different keys for fixed (vk,x)");
+    }
+}
+
+#[test]
+fn test_rejects_gamma2_in_statement_bases() {
+    let mut rng = StdRng::seed_from_u64(777);
+
+    // Setup circuit
+    let circuit = TestCircuit {
+        x: Some(Fr::from(25u64)),
+        y: Some(Fr::from(5u64)),
+    };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+
+    let pvugc_vk = PvugcVk::<E> {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
+
+    // Produce a valid bundle for the honest pvugc_vk
+    let mut recorder = SimpleCoeffRecorder::<E>::new();
+    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
+        .unwrap();
+    let commitments = recorder.build_commitments();
+    let bundle = PvugcBundle {
+        groth16_proof: proof,
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
+        gs_commitments: commitments,
+    };
+
+    let public_x = vec![Fr::from(25u64)];
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_x));
+
+    // Tamper pvugc_vk so that β₂ is replaced with γ₂ → must be rejected
+    let mut pvugc_vk_bad = pvugc_vk.clone();
+    pvugc_vk_bad.beta_g2 = vk.gamma_g2;
+    assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk_bad, &vk, &public_x));
 }

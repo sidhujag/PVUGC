@@ -1,75 +1,126 @@
 GT-XPDH Reduction to DDH in G2 (and Generic-Model Bound)
 
-This doc formalizes GT-XPDH (“external power in GT”) and proves:
-- A tight black-box reduction to DDH in G2 (hence implied by SXDH), and
-- A standard algebraic generic bilinear group bound (~O(q^2/r)).
+This note formalizes the GT-XPDH ("external power in GT") assumption and records:
 
-It also states the PVUGC corollary for No-Proof-Spend. (All probabilities are over the challenger’s and adversary’s randomness.)
+- a tight black-box reduction from GT-XPDH to DDH in G2, hence that SXDH implies GT-XPDH, and
+- the algebraic generic bilinear group (GBGM) bound of Õ(q² / r) for any adversary making q oracle calls.
 
----
-
-Setting
-Let (G1, G2, GT, e) be asymmetric prime-order bilinear groups of order r. Let g1 ∈ G1, g2 ∈ G2 be generators and gT := e(g1, g2) generate GT. Encodings are canonical and efficiently testable (so equality tests in GT are exact).
-
-SXDH means DDH is hard in both G1 and G2; below we only need the G2 half (DDH in G2).
+We conclude with the PVUGC "No-Proof-Spend" corollary. All probabilities below are taken over the randomness of both the challenger and the adversary.
 
 ---
 
-Problem (GT-XPDH: external power in GT)
-Let m ≥ 0. Sample independent statement-only bases Y0,…,Ym, Δ ←$ G2, sample ρ ←$ Zr*, and sample R ←$ GT uniformly and independently.
-Give the adversary ( {Yj}j=0..m, Δ, {Yj^ρ}j=0..m, Δ^ρ, R ). Goal: output R^ρ ∈ GT.
+## Setting
 
-We also consider the decisional variant GT-XPDH-DEC: given the same tuple and an extra W ∈ GT, decide whether W = R^ρ.
+Let (G1, G2, GT, e) be asymmetric prime-order, non-degenerate bilinear groups of order r. Let g1 ∈ G1 and g2 ∈ G2 be generators, and write gT := e(g1, g2) for the induced generator of GT. We assume canonical encodings with efficient equality testing in every group.
 
----
-
-Lemma (Uniform “pairing form” of R)
-For u ←$ Zr^*, v ←$ Zr, the element R0 := e(g1^u, g2^v) is uniform in GT and independent of ρ and {Yj, Δ}.
-
-Thus, in GT-XPDH we may set R = e(g1^u, g2^v) without changing the distribution.
+SXDH asserts that DDH is hard in both G1 and G2; throughout this document we only rely on the G2-half (DDH in G2).
 
 ---
 
-Theorem 1 (Tight reduction to DDH in G2)
-If a PPT adversary A solves GT-XPDH with advantage ε, there is a PPT adversary B that solves DDH in G2 with advantage at least ε − 1/r. The reduction is tight (one call to A) and uses O(1) pairings.
+## GT-XPDH (external power in GT)
 
-DDH_G2 game: Challenger samples g2^ρ, g2^v and gives (g2, g2^ρ, g2^v, T), where T = g2^{ρv} (DH) or T ←$ G2 (random). Goal: decide which.
+Fix m ≥ 0. Sample independently (statement-only) bases Y0, …, Ym, Δ ←R G2, a non-zero exponent ρ ←R Zr*, and R ←R GT. Give the adversary the tuple
 
-Reduction B:
-1) Embed exponent: For random α0,…,αm, αΔ ←$ Zr, set Yj := g2^{αj}, Yj^ρ := (g2^ρ)^{αj}, Δ := g2^{αΔ}, Δ^ρ := (g2^ρ)^{αΔ}.
-2) Program R: Pick u ←$ Zr^*. Set R := e(g1^u, g2^v). (Uniform by lemma.)
-3) Run A on ({Yj}, Δ, {Yj^ρ}, Δ^ρ, R) to get S.
-4) Decide: Compute T' := e(g1^u, T) ∈ GT and output “DH” iff S = T'.
+( {Yj}j=0..m, Δ, {Yj^ρ}j=0..m, Δ^ρ, R ).
 
-Correctness: If T = g2^{ρv}, then T' = e(g1^u, g2^{ρv}) = (e(g1^u, g2^v))^ρ = R^ρ, so S = T' with prob. ε. If T ←$ G2, then T' is uniform in GT and independent of S = R^ρ, so Pr[S = T'] = 1/r. Hence Adv_DDH_G2(B) ≥ ε − 1/r.
+The adversary succeeds in the computational GT-XPDH game if it outputs R^ρ ∈ GT. In the decisional GT-XPDH-DEC variant the challenger additionally samples b ←R {0,1} and sets
 
-Consequence: Under SXDH (indeed, under DDH in G2), GT‑XPDH is hard. No target‑group assumption is required for the computational or decisional variants.
+W := R^ρ if b = 1, and
+W := U for U ←R GT if b = 0,
 
----
+giving W to the adversary, whose goal is to recover b. The advantages are defined in the usual way: for a computational adversary
 
-Theorem 2 (Algebraic Generic Bilinear Group Bound)
-In the algebraic generic bilinear group model (GBGM), any adversary A making at most q oracle queries (group ops in G1, G2, GT, pairings) satisfies Adv_GT‑XPDH(A) ≤ ~O(q^2/r) (i.e., O(q^2/r) up to polylog factors in q).
+Adv_GT-XPDH(A) := Pr[A outputs R^ρ],
 
-Sketch: Handles in GT span Zr-linear combinations of bilinear images e(X, ·) where “·” ∈ {Yj, Δ, Yj^ρ, Δ^ρ}; these carry at most affine dependence on ρ. In the algebraic model, all GT handles the adversary forms lie in the Zr-span of e(X, Yj), e(X, Δ), e(X, Yj^ρ), e(X, Δ^ρ); the fresh symbol R never appears with a ρ‑bearing operand, so creating R^ρ forces a new monomial R·ρ that cannot be generated from the span. By Schwartz–Zippel counting in the algebraic model, success ≤ ~O(q^2/r).
+and for a decisional adversary
+
+Adv_GT-XPDH-DEC(A) := |Pr[A outputs 1 | b = 1] − Pr[A outputs 1 | b = 0]|.
 
 ---
 
-Corollary (PVUGC No‑Proof‑Spend)
-Fix (vk, x). Let statement‑only bases {Yj}, Δ be derived from vk (excluding γ2), and require an accepting DLREP+GS attestation to introduce the G1 witnesses into pairings. For any ρ_i sampled per armer, given only ({Yj^{ρ_i}}, Δ^{ρ_i}, R(vk, x)), computing M_i := R(vk, x)^{ρ_i} without an accepting attestation is infeasible:
-- Under GBGM: success ≤ Õ(q^2/r).
-- Under SXDH (DDH in G2): any PPT algorithm for M_i yields a PPT DDH_G2 solver with essentially the same advantage (Theorem 1).
+## Lemma 1 (Uniform "pairing form" of R)
 
-Hence the PVUGC key K_i = Hash(ser_GT(M_i) || …) remains hidden and the adaptor cannot be finalized without a valid attestation.
+For u ←R Zr* and v ←R Zr, the element
 
----
+R0 := e(g1^u, g2^v) = gT^{uv}
 
-Note on “DLIP” (target‑group assumptions)
-The results above do not require any GT‑side assumption. We may still cite GT‑DLIN/DLIP if formulating alternates where R is synthetically built from GT combinations, but it is not needed for GT‑XPDH as we have defined (R uniform and independent).
+is uniform in GT and independent of all other sampled values. Indeed, since u is invertible modulo r, the product uv is uniform in Zr, implying that R0 is uniform in GT. Because the samplings of u and v are independent of ρ and of {Yj, Δ}, the value R0 is jointly independent of those elements as required.
+
+Consequently, the GT-XPDH game is equivalent to the variant in which the challenger sets R = e(g1^u, g2^v) for fresh uniformly random u ∈ Zr*, v ∈ Zr. Moreover, R0 is independent not only of ρ and {Yj, Δ}, but also of their powered forms {Yj^ρ} and Δ^ρ, which are functions of X = g2^ρ and the independently sampled {Yj, Δ}.
 
 ---
 
-Summary
-- GT‑XPDH ≤ DDH in G2 (tight). Therefore GT‑XPDH is implied by SXDH (using only the G2 half).
-- GBGM bound: ~O(q^2/r) (polylog factors in q suppressed).
-- PVUGC No‑Proof‑Spend follows under standard assumptions.
+## Theorem 1 (Tight reduction to DDH in G2)
+
+Let A be any PPT adversary for GT-XPDH with success probability ε. There exists a PPT algorithm B that solves DDH in G2 with advantage at least ε − 1/r. The reduction is tight: B makes a single black-box call to A and performs only a constant number of pairings.
+
+### DDH_G2 game
+
+The DDH challenger samples ρ, v ←R Zr, sets X := g2^ρ and Y := g2^v, and returns
+
+(g2, X, Y, T)
+
+where either T = g2^{ρv} (the Diffie–Hellman case) or T ←R G2 (the random case). The adversary must decide which distribution it received.
+
+### Construction of B
+
+Given (g2, X, Y, T) from the DDH challenger:
+
+1. Embed the exponent. Sample independent coefficients α0, …, αm, αΔ ←R Zr and set
+   Yj := g2^{αj},   Yj^ρ := X^{αj},   Δ := g2^{αΔ},   Δ^ρ := X^{αΔ}.
+   This matches the distribution in the GT-XPDH game because X = g2^ρ.
+2. Program R. Using the lemma, sample u ←R Zr* and set
+   R := e(g1^u, Y) = e(g1^u, g2^v).
+3. Run A. Provide ({Yj}, Δ, {Yj^ρ}, Δ^ρ, R) to A and record its output S.
+4. Decide. Compute
+   T' := e(g1^u, T) ∈ GT
+   and output “DH” if and only if S = T'.
+
+### Correctness analysis
+
+- If T = g2^{ρv}, then
+  T' = e(g1^u, g2^{ρv}) = e(g1^u, g2^{v})^ρ = R^ρ.
+  Hence S = T' exactly when A solves the GT-XPDH instance, which occurs with probability ε.
+- If T ←R G2, then by bilinearity T' = e(g1^u, T) is uniform in GT and independent of S (since S = R^ρ). Therefore Pr[S = T'] = 1/r.
+
+The distinguishing advantage of B is thus at least ε − 1/r. Consequently DDH hardness in G2 implies both the computational and decisional variants of GT-XPDH.
+
+---
+
+## Theorem 2 (Algebraic GBGM bound)
+
+In the algebraic generic bilinear group model, let A issue at most q oracle queries (group operations in G1, G2, GT, and pairings). Then
+
+Adv_GT-XPDH(A) ≤ Õ(q² / r).
+
+Sketch. In the GBGM, each handle in GT corresponds to an explicitly known polynomial over indeterminates representing the underlying exponents. The challenger’s inputs give rise to at most affine dependence on the unknown ρ through symbols e(X, Yj^ρ) and e(X, Δ^ρ). Because R is sampled independently of those symbols, the algebraic span of all handles obtained by the adversary contains no term in which R is multiplied by ρ. Producing R^ρ therefore requires the adversary to guess a new root of a non-zero degree-≤ q polynomial over Zr. The standard Schwartz–Zippel argument for algebraic adversaries bounds the success probability by Õ(q² / r).
+
+---
+
+## Corollary (PVUGC No-Proof-Spend)
+
+Fix a statement (vk, x). Let the statement-only bases {Yj}, Δ be derived from vk (excluding γ2), and require an accepting DLREP+GS attestation before any G1 witnesses may appear inside pairings. For a fresh exponent ρi sampled per armer, and given only the public data ({Yj^{ρi}}, Δ^{ρi}, R(vk, x)), computing
+
+Mi := R(vk, x)^{ρi}
+
+without an accepting attestation is infeasible:
+
+- GBGM: the success probability is at most Õ(q² / r).
+- SXDH / DDH in G2: any PPT adversary for the computation gives a PPT DDH_G2 solver with essentially the same advantage (Theorem 1).
+
+Consequently the PVUGC key Ki = Hash(ser_GT(Mi) ∥ …) remains hidden and the adaptor cannot be finalized without producing a valid attestation.
+
+---
+
+## Note on “DLIP” (target-group assumptions)
+
+The above results do not rely on any additional GT-side assumptions. One may still cite target-group assumptions such as GT-DLIN/DLIP when considering alternate formulations in which R is algebraically derived from public GT combinations, but they are unnecessary for the GT-XPDH formulation used here (in which R is uniform and independent).
+
+---
+
+## Summary
+
+- GT-XPDH tightly reduces to DDH in G2; thus SXDH (using only the G2 half) suffices.
+- In the algebraic GBGM the success probability is bounded by Õ(q² / r).
+- PVUGC’s No-Proof-Spend property follows directly under these standard assumptions.
 
