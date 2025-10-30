@@ -278,6 +278,8 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 * DEM correctness (external): $\texttt{ct}_i = (s_i\|h_i) \oplus \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/keystream"} || K_i, \text{AD\_core})$ and $\tau_i = \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/tag"} || K_i, \text{AD\_core}, \texttt{ct}_i)$.
 * $\rho_i\neq 0$ (via auxiliary $\rho_i\cdot u_i=1$)
 
+**MUST NOT aggregate exponents (per-share invariant).** Implementations MUST NOT combine multiple parties’ exponents into a single effective $\rho$ for any arming set or address computation. Each share $i$ carries its own $\rho_i$, its own arms $\{D_j\}$, $D_\delta$, and its own KEM header; the adaptor secret $\alpha = \sum s_i$ is independent of any $\sum\rho_i$.
+
 **Implementation note (MUST):** PoCE-A MUST use per-column Schnorr commitments ($k_\rho\cdot U_\ell$, $k_\rho\cdot W_a$, $k_\rho\cdot [\delta]_2$) and verify each equal-exponent equation individually. Collapsing all columns into a single sum is insufficient and allows malformed arms that still satisfy the aggregated relation.
 
 **Public arming checks (performed by coordinator/auditors):**
