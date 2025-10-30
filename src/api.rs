@@ -36,9 +36,9 @@ pub struct VerifyLimits {
 /// Recommended default for total pairing budget per verification (spec §6 size bound)
 pub const DEFAULT_MAX_TOTAL_PAIRINGS: usize = 96;
 /// Recommended default maximum for B-columns (statement-only Y columns)
-pub const DEFAULT_MAX_B_COLUMNS: usize = 48;
+pub const DEFAULT_MAX_B_COLUMNS: usize = 24;
 /// Recommended default maximum for theta rows (δ-side rows)
-pub const DEFAULT_MAX_THETA_ROWS: usize = 24;
+pub const DEFAULT_MAX_THETA_ROWS: usize = 22;
 
 /// Main API for one-sided PVUGC
 pub struct OneSidedPvugc;
