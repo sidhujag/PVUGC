@@ -1,9 +1,9 @@
-GT-XPDH Reduction to DDH in G2 (and Generic-Model Bound)
+# GT-XPDH Reduction to DDH in G2 (and Generic-Model Bound)
 
 This note formalizes the GT-XPDH ("external power in GT") assumption and records:
 
 - a tight black-box reduction from GT-XPDH to DDH in G2, hence that SXDH implies GT-XPDH, and
-- the algebraic generic bilinear group (GBGM) bound of Õ(q² / r) for any adversary making q oracle calls.
+- the algebraic generic bilinear group (GBGM) bound of ~O(q^2 / r) (polylog factors in q suppressed) for any adversary making q oracle calls.
 
 We conclude with the PVUGC "No-Proof-Spend" corollary. All probabilities below are taken over the randomness of both the challenger and the adversary.
 
@@ -44,7 +44,11 @@ For u ←R Zr* and v ←R Zr, the element
 
 R0 := e(g1^u, g2^v) = gT^{uv}
 
-is uniform in GT and independent of all other sampled values. Indeed, since u is invertible modulo r, the product uv is uniform in Zr, implying that R0 is uniform in GT. Because the samplings of u and v are independent of ρ and of {Yj, Δ}, the value R0 is jointly independent of those elements as required.
+is uniform in GT and independent of all other sampled values. Indeed, for any t ∈ Zr,
+
+Pr[uv = t] = ∑_{u∈Zr*} Pr[u] · Pr[v = t·u^{-1}] = (r−1)/((r−1)·r) = 1/r,
+
+so uv is uniform in Zr, implying that R0 is uniform in GT. Because the samplings of u and v are independent of ρ and of {Yj, Δ}, the value R0 is jointly independent of those elements as required.
 
 Consequently, the GT-XPDH game is equivalent to the variant in which the challenger sets R = e(g1^u, g2^v) for fresh uniformly random u ∈ Zr*, v ∈ Zr. Moreover, R0 is independent not only of ρ and {Yj, Δ}, but also of their powered forms {Yj^ρ} and Δ^ρ, which are functions of X = g2^ρ and the independently sampled {Yj, Δ}.
 
@@ -91,9 +95,9 @@ The distinguishing advantage of B is thus at least ε − 1/r. Consequently DDH 
 
 In the algebraic generic bilinear group model, let A issue at most q oracle queries (group operations in G1, G2, GT, and pairings). Then
 
-Adv_GT-XPDH(A) ≤ Õ(q² / r).
+Adv_GT-XPDH(A) ≤ ~O(q^2 / r).
 
-Sketch. In the GBGM, each handle in GT corresponds to an explicitly known polynomial over indeterminates representing the underlying exponents. The challenger’s inputs give rise to at most affine dependence on the unknown ρ through symbols e(X, Yj^ρ) and e(X, Δ^ρ). Because R is sampled independently of those symbols, the algebraic span of all handles obtained by the adversary contains no term in which R is multiplied by ρ. Producing R^ρ therefore requires the adversary to guess a new root of a non-zero degree-≤ q polynomial over Zr. The standard Schwartz–Zippel argument for algebraic adversaries bounds the success probability by Õ(q² / r).
+Sketch. In the GBGM, each handle in GT corresponds to an explicitly known polynomial over indeterminates representing the underlying exponents. The challenger’s inputs give rise to at most affine dependence on the unknown ρ through symbols e(X, Yj^ρ) and e(X, Δ^ρ). Because R is sampled independently of those symbols, the algebraic span of all handles obtained by the adversary contains no term in which R is multiplied by ρ. Producing R^ρ therefore requires the adversary to guess a new root of a non-zero degree-≤ q polynomial over Zr. The standard Schwartz–Zippel argument for algebraic adversaries bounds the success probability by ~O(q^2 / r).
 
 ---
 
@@ -105,7 +109,7 @@ Mi := R(vk, x)^{ρi}
 
 without an accepting attestation is infeasible:
 
-- GBGM: the success probability is at most Õ(q² / r).
+- GBGM: the success probability is at most ~O(q^2 / r).
 - SXDH / DDH in G2: any PPT adversary for the computation gives a PPT DDH_G2 solver with essentially the same advantage (Theorem 1).
 
 Consequently the PVUGC key Ki = Hash(ser_GT(Mi) ∥ …) remains hidden and the adaptor cannot be finalized without producing a valid attestation.
@@ -121,6 +125,6 @@ The above results do not rely on any additional GT-side assumptions. One may sti
 ## Summary
 
 - GT-XPDH tightly reduces to DDH in G2; thus SXDH (using only the G2 half) suffices.
-- In the algebraic GBGM the success probability is bounded by Õ(q² / r).
+- In the algebraic GBGM the success probability is bounded by ~O(q^2 / r).
 - PVUGC’s No-Proof-Spend property follows directly under these standard assumptions.
 
