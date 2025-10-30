@@ -212,10 +212,10 @@ MIT or Apache 2.0
 If you use this implementation in academic work, please cite:
 
 ```
-@software{pvugc_2024,
+@software{pvugc_2025,
   title={PVUGC: One-Sided Groth-Sahai Implementation},
-  author={[Contributors]},
-  year={2024},
-  url={https://github.com/[repository]}
+  author={J Sidhu et al},
+  year={2025},
+  url={https://github.com/sidhujag/pvugc}
 }
 ```
