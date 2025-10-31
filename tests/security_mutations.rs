@@ -1,5 +1,5 @@
 //! Targeted mutation checks around `OneSidedPvugc::verify`.
-//! These exercises a few structured tamperings of otherwise-valid bundles
+//! This exercises a few structured tamperings of otherwise-valid bundles
 //! to ensure the verifier rejects manipulated artifacts.
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
