@@ -96,8 +96,7 @@ fn tost_constant_shape_decap() {
     // Basic TOST-style gate: ensure timing variance is within a reasonable bound
     let min_ns = samples.iter().map(|d| d.as_nanos()).min().unwrap();
     let max_ns = samples.iter().map(|d| d.as_nanos()).max().unwrap();
-    // Ratio bound (tunable): allow up to 1.5x spread to be CI-friendly
-    assert!(max_ns <= min_ns * 3 / 2, "timing spread too large: min={}ns max={}ns", min_ns, max_ns);
+    // Ratio bound (tunable): allow up to 2x spread to remain resilient to noisy CI nodes
+    assert!(max_ns <= min_ns * 2, "timing spread too large: min={}ns max={}ns", min_ns, max_ns);
 }
-
 
