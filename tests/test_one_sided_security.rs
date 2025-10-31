@@ -11,6 +11,12 @@ use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use ark_std::Zero;
 use arkworks_groth16::ppe::PvugcVk;
+use arkworks_groth16::api::VerifyLimits;
+use arkworks_groth16::api::{
+    DEFAULT_MAX_B_COLUMNS,
+    DEFAULT_MAX_THETA_ROWS,
+    DEFAULT_MAX_TOTAL_PAIRINGS,
+};
 use arkworks_groth16::PoceColumnProof;
 use arkworks_groth16::*;
 
@@ -538,4 +544,93 @@ fn test_rejects_gamma2_in_statement_bases() {
     let mut pvugc_vk_bad = pvugc_vk.clone();
     pvugc_vk_bad.beta_g2 = vk.gamma_g2;
     assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk_bad, &vk, &public_x));
+}
+
+#[test]
+fn test_r_is_not_identity_for_typical_statement() {
+    let mut rng = StdRng::seed_from_u64(4242);
+
+    let circuit = TestCircuit {
+        x: Some(Fr::from(25u64)),
+        y: Some(Fr::from(5u64)),
+    };
+    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let r = compute_groth16_target(&vk, &[Fr::from(25u64)]).expect("compute_groth16_target");
+    use ark_std::One;
+    assert!(r != PairingOutput::<E>(One::one()), "R(vk,x) must not be identity");
+}
+
+#[test]
+fn test_size_caps_enforced_in_verify() {
+    let mut rng = StdRng::seed_from_u64(7777);
+
+    let circuit = TestCircuit {
+        x: Some(Fr::from(25u64)),
+        y: Some(Fr::from(5u64)),
+    };
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+
+    let pvugc_vk = PvugcVk::<E> {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
+
+    // Build a valid bundle via recorder
+    let mut recorder = SimpleCoeffRecorder::<E>::new();
+    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
+        .unwrap();
+    let commitments = recorder.build_commitments();
+    let bundle = PvugcBundle {
+        groth16_proof: proof,
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
+        gs_commitments: commitments,
+    };
+
+    let public_x = &[Fr::from(25u64)];
+
+    // Passing path: defaults via verify()
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, public_x));
+    // Passing path: explicit defaults via VerifyLimits and constants
+    let ok_defaults = OneSidedPvugc::verify_with_limits(
+        &bundle,
+        &pvugc_vk,
+        &vk,
+        public_x,
+        &VerifyLimits {
+            max_b_columns: Some(DEFAULT_MAX_B_COLUMNS),
+            max_theta_rows: Some(DEFAULT_MAX_THETA_ROWS),
+            max_total_pairings: Some(DEFAULT_MAX_TOTAL_PAIRINGS),
+        },
+    );
+    assert!(ok_defaults, "verify_with_limits should pass under default size caps");
+
+    // Failing caps: zero theta rows
+    let fail_theta = OneSidedPvugc::verify_with_limits(
+        &bundle,
+        &pvugc_vk,
+        &vk,
+        public_x,
+        &VerifyLimits {
+            max_b_columns: None,
+            max_theta_rows: Some(0),
+            max_total_pairings: None,
+        },
+    );
+    assert!(!fail_theta, "verify must fail when theta rows cap is too small");
+
+    // Failing caps: too small pairing budget
+    let fail_pairings = OneSidedPvugc::verify_with_limits(
+        &bundle,
+        &pvugc_vk,
+        &vk,
+        public_x,
+        &VerifyLimits {
+            max_b_columns: None,
+            max_theta_rows: None,
+            max_total_pairings: Some(1),
+        },
+    );
+    assert!(!fail_pairings, "verify must fail when total pairing budget is too small");
 }
