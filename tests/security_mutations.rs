@@ -205,7 +205,7 @@ fn build_fixture(seed: u64) -> Fixture {
 
 #[test]
 fn verify_rejects_mutated_bundles() {
-    for offset in 0u64..5 {
+    for offset in 0u64..32 {
         let seed = 0xF1AFA2_u64 + offset;
         let Fixture {
             bundle,
@@ -288,24 +288,31 @@ fn verify_rejects_mutated_bundles() {
 
 #[test]
 fn poce_cross_session_replay_fails() {
-    let fixture_a = build_fixture(0xABCDEF01);
-    let fixture_b = build_fixture(0x13572468);
+    let seeds = [
+        (0xABCDEF01_u64, 0x13572468_u64),
+        (0x11111111_u64, 0x22222222_u64),
+        (0x33333333_u64, 0x44444444_u64),
+    ];
 
-    assert!(
-        OneSidedPvugc::verify_column_arming(
-            &fixture_a.bases,
-            &fixture_a.column_arms,
-            &fixture_a.t_i,
-            &fixture_a.poce_proof,
-            &fixture_a.ctx_hash,
-            &fixture_a.gs_digest,
-            &fixture_a.ciphertext,
-            &fixture_a.tau,
-        ),
-        "baseline PoCE verification must succeed"
-    );
+    for (seed_a, seed_b) in seeds {
+        let fixture_a = build_fixture(seed_a);
+        let fixture_b = build_fixture(seed_b);
 
-    let tamper_cases = vec![
+        assert!(
+            OneSidedPvugc::verify_column_arming(
+                &fixture_a.bases,
+                &fixture_a.column_arms,
+                &fixture_a.t_i,
+                &fixture_a.poce_proof,
+                &fixture_a.ctx_hash,
+                &fixture_a.gs_digest,
+                &fixture_a.ciphertext,
+                &fixture_a.tau,
+            ),
+            "baseline PoCE verification must succeed"
+        );
+
+        let tamper_cases = vec![
         (
             "replay_with_other_ctx_hash",
             fixture_b.ctx_hash,
@@ -342,85 +349,88 @@ fn poce_cross_session_replay_fails() {
             fixture_b.bases.clone(),
             fixture_b.column_arms.clone(),
         ),
-    ];
+        ];
 
-    for (label, ctx_hash, gs_digest, ciphertext, tau, bases, column_arms) in tamper_cases {
-        assert!(
-            !OneSidedPvugc::verify_column_arming(
-                &bases,
-                &column_arms,
-                &fixture_a.t_i,
-                &fixture_a.poce_proof,
-                &ctx_hash,
-                &gs_digest,
-                &ciphertext,
-                &tau,
-            ),
-            "PoCE verification unexpectedly succeeded for case {label}"
-        );
+        for (label, ctx_hash, gs_digest, ciphertext, tau, bases, column_arms) in tamper_cases {
+            assert!(
+                !OneSidedPvugc::verify_column_arming(
+                    &bases,
+                    &column_arms,
+                    &fixture_a.t_i,
+                    &fixture_a.poce_proof,
+                    &ctx_hash,
+                    &gs_digest,
+                    &ciphertext,
+                    &tau,
+                ),
+                "PoCE verification unexpectedly succeeded for case {label}"
+            );
+        }
     }
 }
 
 #[test]
 fn dem_tag_binding_checks_metadata() {
-    let fixture = build_fixture(0x42424242);
+    for seed in [0x42424242_u64, 0x51515151_u64, 0x61616161_u64] {
+        let fixture = build_fixture(seed);
 
-    let derived_key = fixture.honest_key;
-    let ok = OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
-        &derived_key,
-        &fixture.ad_core_bytes,
-        &fixture.ciphertext,
-        &fixture.tau,
-    );
-    assert!(ok, "baseline verify_key_commitment_dem should succeed");
-
-    let mut wrong_ad = fixture.ad_core_bytes.clone();
-    if let Some(first) = wrong_ad.first_mut() {
-        *first ^= 0x01;
-    }
-    assert!(
-        !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
-            &derived_key,
-            &wrong_ad,
-            &fixture.ciphertext,
-            &fixture.tau,
-        ),
-        "ad_core mutation must be rejected"
-    );
-
-    let mut wrong_ct = fixture.ciphertext.clone();
-    if let Some(first) = wrong_ct.first_mut() {
-        *first ^= 0x02;
-    }
-    assert!(
-        !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
-            &derived_key,
-            &fixture.ad_core_bytes,
-            &wrong_ct,
-            &fixture.tau,
-        ),
-        "ciphertext mutation must be rejected"
-    );
-
-    let mut wrong_tau = fixture.tau;
-    wrong_tau[0] ^= 0x04;
-    assert!(
-        !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
+        let derived_key = fixture.honest_key;
+        let ok = OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
             &derived_key,
             &fixture.ad_core_bytes,
             &fixture.ciphertext,
-            &wrong_tau,
-        ),
-        "modified tau must be rejected"
-    );
+            &fixture.tau,
+        );
+        assert!(ok, "baseline verify_key_commitment_dem should succeed");
 
-    let recomputed = OneSidedPvugc::compute_key_commitment_tag_dem(
-        &derived_key,
-        &fixture.ad_core_bytes,
-        &fixture.ciphertext,
-    );
-    assert_eq!(
-        recomputed, fixture.tau,
-        "tag recomputation should match published tau"
-    );
+        let mut wrong_ad = fixture.ad_core_bytes.clone();
+        if let Some(first) = wrong_ad.first_mut() {
+            *first ^= 0x01;
+        }
+        assert!(
+            !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
+                &derived_key,
+                &wrong_ad,
+                &fixture.ciphertext,
+                &fixture.tau,
+            ),
+            "ad_core mutation must be rejected"
+        );
+
+        let mut wrong_ct = fixture.ciphertext.clone();
+        if let Some(first) = wrong_ct.first_mut() {
+            *first ^= 0x02;
+        }
+        assert!(
+            !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
+                &derived_key,
+                &fixture.ad_core_bytes,
+                &wrong_ct,
+                &fixture.tau,
+            ),
+            "ciphertext mutation must be rejected"
+        );
+
+        let mut wrong_tau = fixture.tau;
+        wrong_tau[0] ^= 0x04;
+        assert!(
+            !OneSidedPvugc::verify_key_commitment_dem::<PairingE>(
+                &derived_key,
+                &fixture.ad_core_bytes,
+                &fixture.ciphertext,
+                &wrong_tau,
+            ),
+            "modified tau must be rejected"
+        );
+
+        let recomputed = OneSidedPvugc::compute_key_commitment_tag_dem(
+            &derived_key,
+            &fixture.ad_core_bytes,
+            &fixture.ciphertext,
+        );
+        assert_eq!(
+            recomputed, fixture.tau,
+            "tag recomputation should match published tau"
+        );
+    }
 }
