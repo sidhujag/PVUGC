@@ -92,7 +92,7 @@ where
     AIR: Air,
     HashFn: ElementHasher<BaseField = AIR::BaseField>,
     RandCoin: RandomCoin<BaseField = AIR::BaseField, Hasher = HashFn>,
-    VC: VectorCommitment<HashFn>,
+    VC: VectorCommitment<HashFn, MultiProof = crypto::BatchMerkleProof<HashFn>>,
 {
     // check that `proof` was generated with an acceptable set of parameters from the point of view
     // of the verifier
@@ -167,7 +167,7 @@ where
     A: Air,
     H: ElementHasher<BaseField = A::BaseField>,
     R: RandomCoin<BaseField = A::BaseField, Hasher = H>,
-    V: VectorCommitment<H>,
+    V: VectorCommitment<H, MultiProof = crypto::BatchMerkleProof<H>>,
 {
     // 1 ----- trace commitment -------------------------------------------------------------------
     // Read the commitments to evaluations of the trace polynomials over the LDE domain sent by the
@@ -184,6 +184,14 @@ where
 
     // reseed the coin with the commitment to the main trace segment
     public_coin.reseed(trace_commitments[MAIN_TRACE_IDX]);
+    // PVUGC: Log main trace LDE root
+    #[cfg(feature = "pvugc-hooks")]
+    if let Some(ref mut l) = log {
+        let root_bytes_vec = trace_commitments[MAIN_TRACE_IDX].to_bytes();
+        let mut root_bytes: [u8;32] = [0u8;32];
+        root_bytes.copy_from_slice(&root_bytes_vec);
+        l.trace_lde_root_le_32 = Some(root_bytes);
+    }
 
     // process auxiliary trace segments (if any), to build a set of random elements for each segment
     let aux_trace_rand_elements = if air.trace_info().is_multi_segment() {
@@ -211,6 +219,14 @@ where
     // and sends the results back to the verifier.
     let constraint_commitment = channel.read_constraint_commitment();
     public_coin.reseed(constraint_commitment);
+    // PVUGC: Log composition LDE root
+    #[cfg(feature = "pvugc-hooks")]
+    if let Some(ref mut l) = log {
+        let root_bytes_vec = constraint_commitment.to_bytes();
+        let mut root_bytes: [u8;32] = [0u8;32];
+        root_bytes.copy_from_slice(&root_bytes_vec);
+        l.comp_lde_root_le_32 = Some(root_bytes);
+    }
     let z = public_coin.draw::<E>().map_err(|_| VerifierError::RandomCoinError)?;
 
     // PVUGC: Log OOD point ζ
@@ -263,6 +279,11 @@ where
     let ood_evals = merge_ood_evaluations(&ood_trace_frame, &ood_constraint_evaluations);
     let digest = H::hash_elements(&ood_evals);
     public_coin.reseed(digest);
+    // PVUGC: Log OOD commitment digest bytes
+    #[cfg(feature = "pvugc-hooks")]
+    if let Some(ref mut l) = log {
+        l.ood_commitment_le = digest.to_bytes().to_vec();
+    }
 
     // PVUGC: Log merged OOD evaluations
     #[cfg(feature = "pvugc-hooks")]
@@ -326,6 +347,43 @@ where
     let (queried_main_trace_states, queried_aux_trace_states) =
         channel.read_queried_trace_states(&query_positions)?;
     let queried_constraint_evaluations = channel.read_constraint_evaluations(&query_positions)?;
+
+    // PVUGC: Export per-query Merkle paths and FRI roots
+    #[cfg(feature = "pvugc-hooks")]
+    if let Some(ref mut l) = log {
+        if let Some(pos) = channel.pvugc_trace_paths_pos.take() { l.trace_paths_pos = pos; }
+        if let Some(pos) = channel.pvugc_comp_paths_pos.take() { l.comp_paths_pos = pos; }
+        if let Some(nodes) = channel.pvugc_trace_paths_nodes.take() {
+            l.trace_paths_nodes_le_32 = nodes
+                .into_iter()
+                .map(|v| v.into_iter().map(|d| { let b = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&b); a }).collect())
+                .collect();
+        }
+        if let Some(nodes) = channel.pvugc_comp_paths_nodes.take() {
+            l.comp_paths_nodes_le_32 = nodes
+                .into_iter()
+                .map(|v| v.into_iter().map(|d| { let b = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&b); a }).collect())
+                .collect();
+        }
+        if !channel.pvugc_fri_layer_roots.is_empty() {
+            l.fri_layer_roots_le_32 = channel.pvugc_fri_layer_roots
+                .iter()
+                .map(|d| { let v = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&v); a })
+                .collect();
+        }
+        if let Some(dig) = channel.pvugc_trace_leaf_digests.take() {
+            l.trace_leaf_digests_le_32 = dig
+                .into_iter()
+                .map(|d| { let v = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&v); a })
+                .collect();
+        }
+        if let Some(dig) = channel.pvugc_comp_leaf_digests.take() {
+            l.comp_leaf_digests_le_32 = dig
+                .into_iter()
+                .map(|d| { let v = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&v); a })
+                .collect();
+        }
+    }
 
     // PVUGC: Build strict DEEP per-term components before composing (upstream remains untouched)
     #[cfg(feature = "pvugc-hooks")]
@@ -454,6 +512,30 @@ where
         fri_verifier
             .verify_with_hooks(&mut channel, &deep_evaluations, &query_positions, Some(&mut hooks))
             .map_err(VerifierError::FriVerificationFailed)?;
+
+        // Export FRI per-layer commitments and decommitment artifacts to the log
+        if !channel.pvugc_fri_layer_roots.is_empty() {
+            l.fri_layer_roots_le_32 = channel
+                .pvugc_fri_layer_roots
+                .iter()
+                .map(|d| { let v = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&v); a })
+                .collect();
+        }
+        if !channel.pvugc_fri_layer_positions.is_empty() {
+            l.fri_layer_positions = core::mem::take(&mut channel.pvugc_fri_layer_positions);
+        }
+        if !channel.pvugc_fri_layer_leaf_digests.is_empty() {
+            l.fri_layer_leaf_digests_le_32 = channel
+                .pvugc_fri_layer_leaf_digests
+                .iter()
+                .map(|vecd| {
+                    vecd.iter().map(|d| { let v = d.to_bytes(); let mut a=[0u8;32]; a.copy_from_slice(&v); a }).collect()
+                })
+                .collect();
+        }
+        if !channel.pvugc_fri_layer_paths_nodes.is_empty() {
+            // no path nodes exported in channel; skip
+        }
     }
     
     #[cfg(not(feature = "pvugc-hooks"))]

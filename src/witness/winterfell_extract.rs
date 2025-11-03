@@ -27,6 +27,12 @@ pub struct ExtractedForInner {
     pub fri_layers: usize,                 // L
     pub queries: Vec<HybridQueryWitness>,  // per-oracle × per-query
     pub query_positions: Vec<usize>,       // positions used by Winterfell verifier
+    // Optional LDE/FRI/OOD exports (to be filled once hooks are wired)
+    pub trace_lde_root_le_32: Option<[u8; 32]>,
+    pub comp_lde_root_le_32: Option<[u8; 32]>,
+    pub fri_layer_roots_le_32: Vec<[u8; 32]>,
+    pub ood_commitment_le: Vec<u8>,
+    pub ood_evals_merged_gl: Vec<u64>,
 }
 
 /// Extract HybridQueryWitness data from Winterfell proof (EXPERT'S EXACT DESIGN)
@@ -72,14 +78,24 @@ where
     ).expect("winterfell verify with logging");
     
     // 2) Now use the witness_log to build HybridQueryWitness
-    let num_oracles = gl_commitment_roots_le32.len() as u32;
+    // CRITICAL: Use REAL GL roots from witness_log, not dummy passed-in values!
+    let real_gl_roots: Vec<[u8; 32]> = if let Some(trace_root) = witness_log.trace_lde_root_le_32 {
+        vec![trace_root]  // For now, single oracle (main trace commitment)
+    } else {
+        gl_commitment_roots_le32.clone()  // Fallback to passed-in (for tests without logging)
+    };
+    let num_oracles = real_gl_roots.len() as u32;
     let fri_layers = witness_log.fri_layers.len();
     let used_positions = witness_log.query_positions.clone();
     
     // Re-derive circuit challenges (MUST match inner_stark.rs exactly!)
-    let (alpha_gl, betas_gl, _zeta_gl) = derive_challenges_from_transcript(
+    let (alpha_gl, betas_gl, zeta_host) = derive_challenges_from_transcript(
         num_oracles,
-        &gl_commitment_roots_le32,
+        &real_gl_roots,
+        witness_log.trace_lde_root_le_32,
+        witness_log.comp_lde_root_le_32,
+        &witness_log.fri_layer_roots_le_32,
+        &witness_log.ood_commitment_le,
         &tail_bytes,
         fri_layers,
     );
@@ -116,6 +132,11 @@ where
     for q_idx in 0..max_q {
         let x = witness_log.x_points[q_idx];
         let comp = witness_log.comp_claims[q_idx];
+        // Use Winterfell-logged zeta to match DEEP/comp_claim
+        // NOTE: This zeta may differ from circuit-derived zeta if FS transcripts diverge
+        // TODO: To enable ENF_ZETA_EQUAL, need to either:
+        //   1) Re-compute all DEEP data (ox, oz, comp) using circuit's zeta, OR
+        //   2) Ensure Winterfell uses identical FS transcript as circuit
         let zeta = witness_log.zeta.expect("zeta must be logged");
         let den = x - zeta;
         
@@ -276,11 +297,45 @@ where
             (poseidon_path_nodes[0], poseidon_path_pos[0])
         } else { (leaf_fr, false) };
         
+        // Fill LDE placeholders from witness_log if present
+        let trace_lde_path_nodes_le32 = witness_log.trace_paths_nodes_le_32.get(q_idx).cloned().unwrap_or_default();
+        let trace_lde_path_pos = witness_log.trace_paths_pos.get(q_idx).cloned().unwrap_or_default();
+        let comp_lde_path_nodes_le32 = witness_log.comp_paths_nodes_le_32.get(q_idx).cloned().unwrap_or_default();
+        let comp_lde_path_pos = witness_log.comp_paths_pos.get(q_idx).cloned().unwrap_or_default();
+
+        // Prefer logged leaf digests (32B) if present
+        let trace_lde_leaf_bytes = witness_log
+            .trace_leaf_digests_le_32
+            .get(q_idx)
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| Vec::new());
+        let comp_lde_leaf_bytes = witness_log
+            .comp_leaf_digests_le_32
+            .get(q_idx)
+            .map(|a| a.to_vec())
+            .unwrap_or_else(|| Vec::new());
+
         queries.push(HybridQueryWitness {
             oracle_idx: 0,
             leaf_bytes,
             poseidon_path_nodes: poseidon_path_nodes.clone(),
             poseidon_path_pos: path_pos_for_circuit.clone(),
+            trace_lde_leaf_bytes,
+            trace_lde_path_nodes_le32,
+            trace_lde_path_pos,
+            comp_lde_leaf_bytes,
+            comp_lde_path_nodes_le32,
+            comp_lde_path_pos,
+            fri_leaf_digests_le32: if !witness_log.fri_layer_leaf_digests_le_32.is_empty() {
+                let mut out: Vec<[u8;32]> = Vec::with_capacity(witness_log.fri_layer_leaf_digests_le_32.len());
+                for layer in 0..witness_log.fri_layer_leaf_digests_le_32.len() {
+                    let vec_for_layer = &witness_log.fri_layer_leaf_digests_le_32[layer];
+                    if q_idx < vec_for_layer.len() { out.push(vec_for_layer[q_idx]); }
+                }
+                out
+            } else { Vec::new() },
+            fri_paths_nodes_le32: Vec::new(),
+            fri_paths_pos: Vec::new(),
             gl_leaf_limbs: gl_limbs,
             
             fri_x_gl: x.as_int(),
@@ -322,12 +377,17 @@ where
     
     ExtractedForInner {
         queries,
-        gl_roots_le_32: gl_commitment_roots_le32,
+        gl_roots_le_32: real_gl_roots,  // Use REAL roots for FS derivation
         poseidon_roots: final_poseidon_roots,
         p2_roots_le_48,
         tail_bytes,
         fri_layers,
         query_positions: used_positions,
+        trace_lde_root_le_32: witness_log.trace_lde_root_le_32,
+        comp_lde_root_le_32: witness_log.comp_lde_root_le_32,
+        fri_layer_roots_le_32: witness_log.fri_layer_roots_le_32.clone(),
+        ood_commitment_le: witness_log.ood_commitment_le.clone(),
+        ood_evals_merged_gl: witness_log.ood_evals_merged.iter().map(|e| e.as_int()).collect(),
     }
 }
 

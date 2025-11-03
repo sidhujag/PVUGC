@@ -14,6 +14,16 @@ fn fixture(num_oracles: usize) -> (InnerStarkMaterial, HybridQueryWitness, Winte
         leaf_bytes: fr377_to_le48(&leaves[0]).to_vec(),
         poseidon_path_nodes: path,
         poseidon_path_pos: pos_for_circuit,
+        // new fields defaulted for this test
+        trace_lde_leaf_bytes: Vec::new(),
+        trace_lde_path_nodes_le32: Vec::new(),
+        trace_lde_path_pos: Vec::new(),
+        comp_lde_leaf_bytes: Vec::new(),
+        comp_lde_path_nodes_le32: Vec::new(),
+        comp_lde_path_pos: Vec::new(),
+        fri_leaf_digests_le32: Vec::new(),
+        fri_paths_nodes_le32: Vec::new(),
+        fri_paths_pos: Vec::new(),
         gl_leaf_limbs: vec![],
         fri_x_gl: 1,
         fri_zetas_gl: vec![],
@@ -42,7 +52,7 @@ fn fixture(num_oracles: usize) -> (InnerStarkMaterial, HybridQueryWitness, Winte
         poseidon_l0_bit: false,
         fri_zeta_gl: 0,
     };
-    let mat = setup_inner_stark(num_oracles, &q, 0, 1);
+    let mat = setup_inner_stark(num_oracles, &q, 0, 1, None);
     let meta = WinterfellTailMeta {
         domain_log2: 0,
         blowup_log2: 0,
@@ -61,7 +71,7 @@ fn tamper_poseidon_root_bytes_fails() {
     let poseidon_roots: Vec<InnerFr> = vec![root];
     let gl_roots_le_32: Vec<[u8; 32]> = vec![[0u8; 32]];
 
-    let (proof, vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0);
+    let (proof, vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0, None);
 
     // Build correct p2 roots for verify
     let p2_roots_le_48: Vec<[u8; 48]> = vec![fr377_to_le48(&root)];
@@ -79,7 +89,7 @@ fn tamper_gl_roots_bytes_fails_fs() {
     let poseidon_roots: Vec<InnerFr> = vec![root];
     let mut gl_roots_le_32: Vec<[u8; 32]> = vec![[0u8; 32]];
 
-    let (proof, vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0);
+    let (proof, vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0, None);
 
     // Tamper GL root byte; FS should change and verification should fail
     gl_roots_le_32[0][0] ^= 1;

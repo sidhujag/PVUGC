@@ -18,7 +18,7 @@ pub fn prove_outer_with_inner(
     rng: &mut (impl RngCore + CryptoRng),
 ) -> (OuterProof, OuterVk, crate::outer_compressed::InnerVkDefault, ark_groth16::Proof<crate::outer_compressed::InnerE>, Vec<crate::outer_compressed::OuterFr>) {
     // Prove inner
-    let mat = crate::setup_inner_stark(gl_roots_le_32.len(), &queries[0], fri_num_layers_public, queries.len());
+    let mat = crate::setup_inner_stark(gl_roots_le_32.len(), &queries[0], fri_num_layers_public, queries.len(), None);
     let (inner_proof, inner_vk_out) = prove_inner_stark(
         &mat,
         poseidon_roots,
@@ -26,6 +26,7 @@ pub fn prove_outer_with_inner(
         tail_meta,
         queries,
         fri_num_layers_public,
+        None,
     );
 
     // Build inner public inputs for outer circuit
@@ -34,7 +35,19 @@ pub fn prove_outer_with_inner(
     let gl_roots_bytes = flatten_roots_32(gl_roots_le_32);
     let p2_roots_bytes = flatten_roots(&p2_roots_le_48);
     let tail = build_winterfell_tail(tail_meta);
-    let x_inner = compute_inner_public_inputs(poseidon_roots, &gl_roots_bytes, &p2_roots_bytes, &tail, fri_num_layers_public);
+    // No commitments passed in this API (legacy behavior)
+    let x_inner = compute_inner_public_inputs(
+        poseidon_roots, 
+        &gl_roots_bytes, 
+        &p2_roots_bytes, 
+        &tail, 
+        fri_num_layers_public,
+        &[],  // trace_lde_root
+        &[],  // comp_lde_root
+        &[],  // fri_layer_roots
+        &[],  // ood_commitment
+        &[],  // query_positions
+    );
 
     // Prove outer (returns compressed public inputs)
     let (outer_proof, outer_vk, compressed_public_inputs) = oc::prove_outer(pk_outer, inner_vk, &x_inner, &inner_proof, rng).unwrap();

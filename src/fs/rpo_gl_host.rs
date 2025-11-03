@@ -71,6 +71,10 @@ impl Default for RpoHost {
 pub fn derive_challenges_from_transcript(
     num_oracles: u32,
     gl_roots_le32: &[[u8; 32]],
+    trace_lde_root_le32: Option<[u8;32]>,
+    comp_lde_root_le32: Option<[u8;32]>,
+    fri_layer_roots_le32: &[[u8;32]],
+    ood_commitment_le: &[u8],
     tail_bytes: &[u8],
     num_fri_layers: usize,
 ) -> (GL, Vec<GL>, GL) {
@@ -78,10 +82,12 @@ pub fn derive_challenges_from_transcript(
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"dual_root_v1");
     bytes.extend_from_slice(&num_oracles.to_le_bytes());
-    for r in gl_roots_le32 {
-        bytes.extend_from_slice(r);
-    }
-    // NOTE: P2 roots are NOT included (see inner_stark.rs line 215)
+    for r in gl_roots_le32 { bytes.extend_from_slice(r); }
+    // Absorb optional commitments to match in-circuit FS
+    if let Some(t) = trace_lde_root_le32 { bytes.extend_from_slice(&t); }
+    if let Some(c) = comp_lde_root_le32 { bytes.extend_from_slice(&c); }
+    for r in fri_layer_roots_le32 { bytes.extend_from_slice(r); }
+    if !ood_commitment_le.is_empty() { bytes.extend_from_slice(ood_commitment_le); }
     bytes.extend_from_slice(tail_bytes);
 
     // Derive challenges
@@ -121,6 +127,10 @@ mod tests {
         let (alpha, betas, zeta) = derive_challenges_from_transcript(
             1,
             &gl_roots,
+            None,
+            None,
+            &[],
+            &[],
             &tail,
             3,
         );

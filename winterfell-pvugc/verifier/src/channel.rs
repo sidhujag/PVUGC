@@ -16,6 +16,134 @@ use math::{FieldElement, StarkField};
 
 use crate::VerifierError;
 
+#[cfg(feature = "pvugc-hooks")]
+fn compute_openings_from_batch<E, H>(
+    proof: &crate::crypto::BatchMerkleProof<H>,
+    leaves: &[H::Digest],
+    indexes: &[usize],
+) -> Result<Vec<(H::Digest, Vec<H::Digest>)>, VerifierError>
+where
+    E: FieldElement,
+    H: crypto::Hasher,
+{
+    use alloc::collections::BTreeMap;
+    // Build partial tree map as in into_openings without consuming proof
+    let mut partial_tree_map = BTreeMap::new();
+    let depth = proof.depth as usize;
+    // Seed leaves
+    for (&i, leaf) in indexes.iter().zip(leaves.iter()) {
+        partial_tree_map.insert(i + (1 << depth), *leaf);
+    }
+
+    // Replace odd indexes, offset, and sort
+    // Reuse normalize_indexes/map_indexes from merkle::mod via functions not exposed; instead, mimic
+    // Build map from original index to compacted position
+    let num_leaves = 1usize << depth;
+    let mut map = BTreeMap::new();
+    for (pos, &idx) in indexes.iter().enumerate() {
+        if idx >= num_leaves { return Err(VerifierError::ProofDeserializationError("index OOB".into())); }
+        if map.insert(idx, pos).is_some() { return Err(VerifierError::ProofDeserializationError("dup index".into())); }
+    }
+    // Normalize indexes (set even indices for sibling pairs)
+    let mut norm: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    for &idx in indexes {
+        let even = idx - (idx & 1);
+        if norm.last().copied() != Some(even) { norm.push(even); }
+    }
+    if norm.len() != proof.nodes.len() {
+        return Err(VerifierError::ProofDeserializationError("invalid batch proof".into()));
+    }
+
+    // For each normalized index, compute parents and fill partial tree map similarly to get_root
+    let offset = 1usize << depth;
+    let mut next_indexes: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+    let mut proof_pointers: alloc::vec::Vec<usize> = alloc::vec::Vec::with_capacity(norm.len());
+    let mut buf = [H::Digest::default(); 2];
+    for (i, index) in norm.iter().copied().enumerate() {
+        match map.get(&index) {
+            Some(&i1) => {
+                if leaves.len() <= i1 { return Err(VerifierError::ProofDeserializationError("invalid leaves".into())); }
+                buf[0] = leaves[i1];
+                match map.get(&(index + 1)) {
+                    Some(&i2) => {
+                        if leaves.len() <= i2 { return Err(VerifierError::ProofDeserializationError("invalid leaves".into())); }
+                        buf[1] = leaves[i2];
+                        proof_pointers.push(0);
+                    }
+                    None => {
+                        if proof.nodes[i].is_empty() { return Err(VerifierError::ProofDeserializationError("invalid proof".into())); }
+                        buf[1] = proof.nodes[i][0];
+                        proof_pointers.push(1);
+                    }
+                }
+            }
+            None => {
+                if proof.nodes[i].is_empty() { return Err(VerifierError::ProofDeserializationError("invalid proof".into())); }
+                buf[0] = proof.nodes[i][0];
+                match map.get(&(index + 1)) {
+                    Some(&i2) => {
+                        if leaves.len() <= i2 { return Err(VerifierError::ProofDeserializationError("invalid leaves".into())); }
+                        buf[1] = leaves[i2];
+                    }
+                    None => return Err(VerifierError::ProofDeserializationError("invalid proof".into())),
+                }
+                proof_pointers.push(1);
+            }
+        }
+        let parent = H::merge(&buf);
+        partial_tree_map.insert(offset + index, buf[0]);
+        partial_tree_map.insert((offset + index) ^ 1, buf[1]);
+        let parent_index = (offset + index) >> 1;
+        partial_tree_map.insert(parent_index, parent);
+        next_indexes.push(parent_index);
+    }
+    // Iterate up
+    for _ in 1..depth {
+        let cur = next_indexes.clone();
+        next_indexes.clear();
+        let mut i = 0;
+        while i < cur.len() {
+            let node_index = cur[i];
+            let sibling_index = node_index ^ 1;
+            let sibling = if i + 1 < cur.len() && cur[i + 1] == sibling_index {
+                i += 1;
+                match partial_tree_map.get(&sibling_index) {
+                    Some(s) => *s,
+                    None => return Err(VerifierError::ProofDeserializationError("missing sibling".into())),
+                }
+            } else {
+                let pointer = proof_pointers[i];
+                if proof.nodes[i].len() <= pointer { return Err(VerifierError::ProofDeserializationError("invalid pointer".into())); }
+                // record sibling
+                proof_pointers[i] += 1;
+                proof.nodes[i][pointer]
+            };
+            partial_tree_map.insert(node_index ^ 1, sibling);
+            let node = match partial_tree_map.get(&node_index) { Some(n) => *n, None => return Err(VerifierError::ProofDeserializationError("missing node".into())), };
+            let parent = if node_index & 1 != 0 { H::merge(&[sibling, node]) } else { H::merge(&[node, sibling]) };
+            let parent_index = node_index >> 1;
+            partial_tree_map.insert(parent_index, parent);
+            next_indexes.push(parent_index);
+            i += 1;
+        }
+    }
+    // Build per-index proofs directly from partial tree
+    let mut outs = alloc::vec::Vec::with_capacity(indexes.len());
+    for &idx in indexes {
+        let mut cur = idx + (1 << depth);
+        let leaf = match partial_tree_map.get(&cur) { Some(v) => *v, None => return Err(VerifierError::ProofDeserializationError("leaf missing".into())) };
+        let mut proof_vec: alloc::vec::Vec<H::Digest> = alloc::vec::Vec::new();
+        while cur > 1 {
+            let sib_idx = cur ^ 1;
+            let sib = match partial_tree_map.get(&sib_idx) { Some(v) => *v, None => return Err(VerifierError::ProofDeserializationError("sib missing".into())) };
+            proof_vec.push(sib);
+            cur >>= 1;
+        }
+        outs.push((leaf, proof_vec));
+    }
+    Ok(outs)
+}
+
 // VERIFIER CHANNEL
 // ================================================================================================
 
@@ -50,13 +178,34 @@ pub struct VerifierChannel<
     ood_constraint_evaluations: Option<QuotientOodFrame<E>>,
     // query proof-of-work
     pow_nonce: u64,
+    // PVUGC logging fields (feature-gated)
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_trace_paths_nodes: Option<Vec<Vec<H::Digest>>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_trace_paths_pos: Option<Vec<Vec<bool>>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_comp_paths_nodes: Option<Vec<Vec<H::Digest>>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_comp_paths_pos: Option<Vec<Vec<bool>>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_fri_layer_roots: Vec<H::Digest>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_trace_leaf_digests: Option<Vec<H::Digest>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_comp_leaf_digests: Option<Vec<H::Digest>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_fri_layer_positions: Vec<Vec<usize>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_fri_layer_leaf_digests: Vec<Vec<H::Digest>>,
+    #[cfg(feature = "pvugc-hooks")]
+    pub pvugc_fri_layer_paths_nodes: Vec<Vec<H::Digest>>,
 }
 
 impl<E, H, V> VerifierChannel<E, H, V>
 where
     E: FieldElement,
     H: ElementHasher<BaseField = E::BaseField>,
-    V: VectorCommitment<H>,
+    V: VectorCommitment<H, MultiProof = crate::crypto::BatchMerkleProof<H>>,
 {
     // CONSTRUCTOR
     // --------------------------------------------------------------------------------------------
@@ -147,6 +296,26 @@ where
             ood_constraint_evaluations: Some(ood_constraint_evaluations),
             // query seed
             pow_nonce,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_trace_paths_nodes: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_trace_paths_pos: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_comp_paths_nodes: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_comp_paths_pos: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_fri_layer_roots: Vec::new(),
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_trace_leaf_digests: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_comp_leaf_digests: None,
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_fri_layer_positions: Vec::new(),
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_fri_layer_leaf_digests: Vec::new(),
+            #[cfg(feature = "pvugc-hooks")]
+            pvugc_fri_layer_paths_nodes: Vec::new(),
         })
     }
 
@@ -197,7 +366,7 @@ where
         &mut self,
         positions: &[usize],
     ) -> Result<(Table<E::BaseField>, Option<Table<E>>), VerifierError> {
-        let queries = self.trace_queries.take().expect("already read");
+        let mut queries = self.trace_queries.take().expect("already read");
 
         // make sure the states included in the proof correspond to the trace commitment
         let items: Vec<H::Digest> = queries
@@ -213,6 +382,36 @@ where
             &queries.query_proofs[0],
         )
         .map_err(|_| VerifierError::TraceQueryDoesNotMatchCommitment)?;
+        #[cfg(feature = "pvugc-hooks")]
+        { self.pvugc_trace_leaf_digests = Some(items.clone()); }
+
+        #[cfg(feature = "pvugc-hooks")]
+        {
+            // Reconstruct individual Merkle openings for each queried position
+            let openings: Vec<(H::Digest, Vec<H::Digest>)> = compute_openings_from_batch::<E, H>(&queries.query_proofs[0], &items, positions)?;
+
+            // Compute position bits per query from the leaf index
+            let mut paths_nodes: Vec<Vec<H::Digest>> = Vec::with_capacity(openings.len());
+            let mut paths_pos: Vec<Vec<bool>> = Vec::with_capacity(openings.len());
+            for (i, opening) in openings.iter().enumerate() {
+                let sibs: &Vec<H::Digest> = &opening.1;
+                let depth: usize = sibs.len();
+                let mut idx = positions[i];
+                let mut pos_bits = Vec::with_capacity(depth);
+                for _ in 0..depth {
+                    pos_bits.push((idx & 1) == 1);
+                    idx >>= 1;
+                }
+                paths_nodes.push(sibs.clone());
+                paths_pos.push(pos_bits);
+            }
+            self.pvugc_trace_paths_nodes = Some(paths_nodes);
+            self.pvugc_trace_paths_pos = Some(paths_pos);
+        }
+
+        // PVUGC: also log main trace leaf digests
+        #[cfg(feature = "pvugc-hooks")]
+        { self.pvugc_trace_leaf_digests = Some(items.clone()); }
 
         if let Some(ref aux_states) = queries.aux_states {
             let items: Vec<H::Digest> = aux_states
@@ -254,6 +453,34 @@ where
             &queries.query_proofs,
         )
         .map_err(|_| VerifierError::ConstraintQueryDoesNotMatchCommitment)?;
+        #[cfg(feature = "pvugc-hooks")]
+        { self.pvugc_comp_leaf_digests = Some(items.clone()); }
+
+        #[cfg(feature = "pvugc-hooks")]
+        {
+            // Reconstruct per-query Merkle openings for composition
+            let openings: Vec<(H::Digest, Vec<H::Digest>)> = compute_openings_from_batch::<E, H>(&queries.query_proofs, &items, positions)?;
+            let mut paths_nodes: Vec<Vec<H::Digest>> = Vec::with_capacity(openings.len());
+            let mut paths_pos: Vec<Vec<bool>> = Vec::with_capacity(openings.len());
+            for (i, opening) in openings.iter().enumerate() {
+                let sibs: &Vec<H::Digest> = &opening.1;
+                let depth: usize = sibs.len();
+                let mut idx = positions[i];
+                let mut pos_bits = Vec::with_capacity(depth);
+                for _ in 0..depth {
+                    pos_bits.push((idx & 1) == 1);
+                    idx >>= 1;
+                }
+                paths_nodes.push(sibs.clone());
+                paths_pos.push(pos_bits);
+            }
+            self.pvugc_comp_paths_nodes = Some(paths_nodes);
+            self.pvugc_comp_paths_pos = Some(paths_pos);
+        }
+
+        // PVUGC: also log composition leaf digests
+        #[cfg(feature = "pvugc-hooks")]
+        { self.pvugc_comp_leaf_digests = Some(items.clone()); }
 
         Ok(queries.evaluations)
     }
@@ -270,13 +497,44 @@ where
 {
     type Hasher = H;
     type VectorCommitment = V;
+    fn read_layer_queries<const N: usize>(
+        &mut self,
+        positions: &[usize],
+        commitment: &<Self::Hasher as crypto::Hasher>::Digest,
+    ) -> Result<Vec<[E; N]>, fri::VerifierError> {
+        let layer_proof = self.take_next_fri_layer_proof();
+        let layer_queries = self.take_next_fri_layer_queries();
+        let leaf_values = utils::group_slice_elements(&layer_queries);
+        let hashed_values: Vec<<Self::Hasher as crypto::Hasher>::Digest> = leaf_values
+            .iter()
+            .map(|seg| <Self::Hasher as crypto::ElementHasher>::hash_elements(seg))
+            .collect();
+        <V as crypto::VectorCommitment<Self::Hasher>>::verify_many(
+            *commitment,
+            positions,
+            &hashed_values,
+            &layer_proof,
+        )
+        .map_err(|_| fri::VerifierError::LayerCommitmentMismatch)?;
+
+        #[cfg(feature = "pvugc-hooks")]
+        {
+            self.pvugc_fri_layer_positions.push(positions.to_vec());
+            self.pvugc_fri_layer_leaf_digests.push(hashed_values.clone());
+        }
+
+        Ok(leaf_values.to_vec())
+    }
 
     fn read_fri_num_partitions(&self) -> usize {
         self.fri_num_partitions
     }
 
     fn read_fri_layer_commitments(&mut self) -> Vec<H::Digest> {
-        self.fri_commitments.take().expect("already read")
+        let v = self.fri_commitments.take().expect("already read");
+        #[cfg(feature = "pvugc-hooks")]
+        { self.pvugc_fri_layer_roots = v.clone(); }
+        v
     }
 
     fn take_next_fri_layer_proof(&mut self) -> V::MultiProof {

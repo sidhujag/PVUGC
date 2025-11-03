@@ -21,6 +21,22 @@ pub struct PvugcLog<E: FieldElement> {
     pub fri_layers: Vec<Vec<FriFold<E>>>,
     // Strict DEEP per-query components: flattened per-term vectors matching composer order
     pub deep_strict_per_query: Vec<DeepStrictPerQuery<E>>,
+    // Optional: RPO Merkle data and commitments for LDE trace/comp and FRI roots
+    pub trace_lde_root_le_32: Option<[u8;32]>,
+    pub comp_lde_root_le_32: Option<[u8;32]>,
+    pub fri_layer_roots_le_32: Vec<[u8;32]>,
+    pub trace_paths_nodes_le_32: Vec<Vec<[u8;32]>>,
+    pub trace_paths_pos: Vec<Vec<bool>>,
+    pub comp_paths_nodes_le_32: Vec<Vec<[u8;32]>>,
+    pub comp_paths_pos: Vec<Vec<bool>>,
+    pub ood_commitment_le: Vec<u8>,
+    // Optional: leaf digests per query (32-byte each) for trace and composition
+    pub trace_leaf_digests_le_32: Vec<[u8;32]>,
+    pub comp_leaf_digests_le_32: Vec<[u8;32]>,
+    // FRI per-layer logs
+    pub fri_layer_positions: Vec<Vec<usize>>,           // per-layer queried positions
+    pub fri_layer_leaf_digests_le_32: Vec<Vec<[u8;32]>>, // per-layer leaf digests (commitment leaves)
+    pub fri_layer_paths_nodes_le_32: Vec<Vec<[u8;32]>>,  // flattened nodes per layer (batch nodes)
 }
 
 impl<E: FieldElement> PvugcLog<E> {
@@ -35,6 +51,19 @@ impl<E: FieldElement> PvugcLog<E> {
             comp_claims: Vec::new(),
             fri_layers: Vec::new(),
             deep_strict_per_query: Vec::new(),
+            trace_lde_root_le_32: None,
+            comp_lde_root_le_32: None,
+            fri_layer_roots_le_32: Vec::new(),
+            trace_paths_nodes_le_32: Vec::new(),
+            trace_paths_pos: Vec::new(),
+            comp_paths_nodes_le_32: Vec::new(),
+            comp_paths_pos: Vec::new(),
+            ood_commitment_le: Vec::new(),
+            trace_leaf_digests_le_32: Vec::new(),
+            comp_leaf_digests_le_32: Vec::new(),
+            fri_layer_positions: Vec::new(),
+            fri_layer_leaf_digests_le_32: Vec::new(),
+            fri_layer_paths_nodes_le_32: Vec::new(),
         }
     }
 }

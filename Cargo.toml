@@ -64,6 +64,10 @@ codegen-units = 1
 [profile.test]
 opt-level = 3
 
+[dev-dependencies]
+tracing = "0.1"
+tracing-subscriber = "=0.2.25"
+
 [patch.crates-io]
 # Use our modified Winterfell with PVUGC witness extraction hooks
 winterfell = { path = "winterfell-pvugc/winterfell", features = ["pvugc-hooks"] }

@@ -22,6 +22,15 @@ fn outer_recursion_verifies_inner_v2() {
         leaf_bytes: fr377_to_le48(&b).to_vec(),
         poseidon_path_nodes: path,
         poseidon_path_pos: pos_for_circuit,
+        trace_lde_leaf_bytes: Vec::new(),
+        trace_lde_path_nodes_le32: Vec::new(),
+        trace_lde_path_pos: Vec::new(),
+        comp_lde_leaf_bytes: Vec::new(),
+        comp_lde_path_nodes_le32: Vec::new(),
+        comp_lde_path_pos: Vec::new(),
+        fri_leaf_digests_le32: Vec::new(),
+        fri_paths_nodes_le32: Vec::new(),
+        fri_paths_pos: Vec::new(),
         gl_leaf_limbs: vec![],
         fri_x_gl: 1,
         fri_zetas_gl: vec![],
@@ -50,18 +59,29 @@ fn outer_recursion_verifies_inner_v2() {
         poseidon_l0_bit: false,
         fri_zeta_gl: 0,
     };
-    let mat = setup_inner_stark(num_oracles, &q, 0, 1);
+    let mat = setup_inner_stark(num_oracles, &q, 0, 1, None);
     let poseidon_roots: Vec<InnerFr> = vec![root];
     let gl_roots_le_32: Vec<[u8; 32]> = vec![[0u8; 32]];
     let meta = WinterfellTailMeta { domain_log2: 0, blowup_log2: 0, num_queries: 0, commitment_roots_le_32: &[], query_positions_le: &[], ood_frame_le: &[], extra: &[] };
-    let (inner_proof, inner_vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0);
+    let (inner_proof, inner_vk) = prove_inner_stark(&mat, &poseidon_roots, &gl_roots_le_32, &meta, vec![q], 0, None);
 
     // Build inner public inputs for outer circuit
     let p2_roots_le_48: Vec<[u8; 48]> = poseidon_roots.iter().map(fr377_to_le48).collect();
     let gl_roots_bytes = flatten_roots_32(&gl_roots_le_32);
     let p2_roots_bytes = flatten_roots(&p2_roots_le_48);
     let tail = build_winterfell_tail(&meta);
-    let x_inner = compute_inner_public_inputs(&poseidon_roots, &gl_roots_bytes, &p2_roots_bytes, &tail, 0);
+    let x_inner = compute_inner_public_inputs(
+        &poseidon_roots, 
+        &gl_roots_bytes, 
+        &p2_roots_bytes, 
+        &tail, 
+        0,
+        &[],  // trace_lde_root
+        &[],  // comp_lde_root
+        &[],  // fri_layer_roots
+        &[],  // ood_commitment
+        &[],  // query_positions
+    );
 
     // Outer setup and verify inner proof in-circuit
     let (pk_outer, vk_outer) = oc::setup_outer_params(&inner_vk, x_inner.len(), &mut rng).unwrap();

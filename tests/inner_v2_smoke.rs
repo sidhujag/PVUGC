@@ -22,6 +22,15 @@ fn inner_smoke_minimal() {
         leaf_bytes: fr377_to_le48(&b).to_vec(),
         poseidon_path_nodes: path,
         poseidon_path_pos: pos_for_circuit,
+        trace_lde_leaf_bytes: Vec::new(),
+        trace_lde_path_nodes_le32: Vec::new(),
+        trace_lde_path_pos: Vec::new(),
+        comp_lde_leaf_bytes: Vec::new(),
+        comp_lde_path_nodes_le32: Vec::new(),
+        comp_lde_path_pos: Vec::new(),
+        fri_leaf_digests_le32: Vec::new(),
+        fri_paths_nodes_le32: Vec::new(),
+        fri_paths_pos: Vec::new(),
         gl_leaf_limbs: vec![],
         fri_x_gl: 1,
         fri_zetas_gl: vec![],
@@ -52,7 +61,7 @@ fn inner_smoke_minimal() {
     };
 
     // Setup with L=0
-    let mat = setup_inner_stark(num_oracles, &q, 0, 1);
+    let mat = setup_inner_stark(num_oracles, &q, 0, 1, None);
 
     // Public inputs
     let poseidon_roots: Vec<InnerFr> = vec![root];
@@ -78,6 +87,7 @@ fn inner_smoke_minimal() {
         &meta,
         vec![q],
         0,
+        None,
     );
 
     let p2_roots_le_48: Vec<[u8; 48]> = vec![fr377_to_le48(&root)];

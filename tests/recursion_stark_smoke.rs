@@ -3,15 +3,24 @@ use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::inner_stark::*;
 use arkworks_groth16::outer_compressed as oc;
-use arkworks_groth16::outer_compressed::InnerFr;
 use arkworks_groth16::WinterfellTailMeta;
-use arkworks_groth16::fs::transcript::fr377_to_le48;
-use arkworks_groth16::crypto::poseidon_merkle_helpers::merkle_path_default;
 use winter_crypto::hashers::Blake3_256;
 use winterfell::{ProofOptions, FieldExtension, BatchingMethod, Trace};
 use winterfell::math::fields::f64::BaseElement;
 mod helpers;
 use helpers::simple_vdf::{generate_test_vdf_proof, VdfAir, extract_query_leaves};
+
+// Enable arkworks constraint tracing to satisfy runtime checks
+fn init_constraint_tracing() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Registry};
+        // Install only the ConstraintLayer (tracing-subscriber 0.2 API)
+        let subscriber = Registry::default()
+            .with(ark_relations::r1cs::ConstraintLayer::default());
+        let _ = subscriber.try_init();
+    });
+}
 
 // Full STARK Recursion Test
 //
@@ -33,8 +42,8 @@ use helpers::simple_vdf::{generate_test_vdf_proof, VdfAir, extract_query_leaves}
 #[test]
 #[ignore]
 fn recursion_stark_smoke() {
+    init_constraint_tracing();
     // End-to-end recursion with inner STARK constraints using real Winterfell proof extraction
-    let mut rng = StdRng::seed_from_u64(2025);
 
     // 1) Generate a small real Winterfell proof (VDF)
     let start = BaseElement::new(3);
@@ -85,19 +94,39 @@ fn recursion_stark_smoke() {
     assert!(!extracted.queries.is_empty(), "should contain at least one query witness");
     let sample_q = extracted.queries[0].clone();
     let num_queries = extracted.queries.len();
+    // Compute commitment sizes for setup
+    let trace_lde_size = extracted.trace_lde_root_le_32.map(|_| 32).unwrap_or(0);
+    let comp_lde_size = extracted.comp_lde_root_le_32.map(|_| 32).unwrap_or(0);
+    let fri_layers_size = extracted.fri_layer_roots_le_32.len() * 32;
+    let ood_size = extracted.ood_commitment_le.len();
+    let query_pos_size = extracted.query_positions.len() * 8;  // 8 bytes per usize
+    let commitment_sizes = Some((trace_lde_size, comp_lde_size, fri_layers_size, ood_size, query_pos_size));
     let mat = setup_inner_stark(
         extracted.poseidon_roots.len(), 
         &sample_q, 
         extracted.fri_layers as u8,
-        num_queries,  // FIX: Pass actual number of queries!
+        num_queries,
+        commitment_sizes,
     );
     let (inner_proof, inner_vk) = prove_inner_stark(
         &mat,
         &extracted.poseidon_roots,
         &extracted.gl_roots_le_32,
         &meta,
-        extracted.queries,
+        extracted.queries.clone(),
         extracted.fri_layers as u8,
+        Some(arkworks_groth16::inner_stark::PublicCommitmentsInputs {
+            trace_lde_root_le_32: extracted.trace_lde_root_le_32,
+            comp_lde_root_le_32: extracted.comp_lde_root_le_32,
+            fri_layer_roots_le_32: extracted.fri_layer_roots_le_32.clone(),
+            ood_commitment_le: extracted.ood_commitment_le.clone(),
+            ood_evals_merged_gl: extracted.ood_evals_merged_gl.clone(),
+            query_positions_le: extracted
+                .query_positions
+                .iter()
+                .flat_map(|p| (p.to_le_bytes()).to_vec())
+                .collect(),
+        }),
     );
 
     // 7) Outer compressed proof and verify
@@ -107,7 +136,23 @@ fn recursion_stark_smoke() {
         let gl_bytes = flatten_roots_32(&extracted.gl_roots_le_32);
         let p2_bytes = flatten_roots(&p2_le);
         let tail = build_winterfell_tail(&meta);
-        compute_inner_public_inputs(&extracted.poseidon_roots, &gl_bytes, &p2_bytes, &tail, extracted.fri_layers as u8)
+        // Include commitment bytes in public inputs
+        let trace_lde = extracted.trace_lde_root_le_32.map(|r| r.to_vec()).unwrap_or_default();
+        let comp_lde = extracted.comp_lde_root_le_32.map(|r| r.to_vec()).unwrap_or_default();
+        let fri_roots = flatten_roots_32(&extracted.fri_layer_roots_le_32);
+        let query_pos_le: Vec<u8> = extracted.query_positions.iter().flat_map(|p| p.to_le_bytes().to_vec()).collect();
+        compute_inner_public_inputs(
+            &extracted.poseidon_roots, 
+            &gl_bytes, 
+            &p2_bytes, 
+            &tail, 
+            extracted.fri_layers as u8,
+            &trace_lde,
+            &comp_lde,
+            &fri_roots,
+            &extracted.ood_commitment_le,
+            &query_pos_le,
+        )
     };
     let (pk_outer, vk_outer) = oc::setup_outer_params(&inner_vk, x_inner.len(), &mut StdRng::seed_from_u64(123)).expect("outer setup");
     let (proof_outer, _, compressed_public_inputs) = oc::prove_outer(&pk_outer, &inner_vk, &x_inner, &inner_proof, &mut StdRng::seed_from_u64(456)).expect("outer prove");
