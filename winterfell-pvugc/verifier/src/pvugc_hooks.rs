@@ -33,6 +33,9 @@ pub struct PvugcLog<E: FieldElement> {
     // Optional: leaf digests per query (32-byte each) for trace and composition
     pub trace_leaf_digests_le_32: Vec<[u8;32]>,
     pub comp_leaf_digests_le_32: Vec<[u8;32]>,
+    // NEW: Actual LDE query VALUES (field elements) per query
+    pub trace_lde_values: Vec<Vec<E>>,  // [query_idx][column] - LDE trace row values
+    pub comp_lde_values: Vec<Vec<E>>,   // [query_idx][column] - LDE comp row values
     // FRI per-layer logs
     pub fri_layer_positions: Vec<Vec<usize>>,           // per-layer queried positions
     pub fri_layer_leaf_digests_le_32: Vec<Vec<[u8;32]>>, // per-layer leaf digests (commitment leaves)
@@ -61,6 +64,8 @@ impl<E: FieldElement> PvugcLog<E> {
             ood_commitment_le: Vec::new(),
             trace_leaf_digests_le_32: Vec::new(),
             comp_leaf_digests_le_32: Vec::new(),
+            trace_lde_values: Vec::new(),
+            comp_lde_values: Vec::new(),
             fri_layer_positions: Vec::new(),
             fri_layer_leaf_digests_le_32: Vec::new(),
             fri_layer_paths_nodes_le_32: Vec::new(),

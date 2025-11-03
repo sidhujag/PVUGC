@@ -100,12 +100,25 @@ where
         fri_layers,
     );
     
-    // Build Poseidon Merkle tree from the exact leaf bytes we pass to the circuit
-    // For now, single oracle support: use gl_query_leaves[0]
-    let (p2_root, p2_paths_nodes, p2_paths_pos, p2_leaves_fr): (InnerFr, Vec<Vec<InnerFr>>, Vec<Vec<bool>>, Vec<InnerFr>) = if let Some(first_oracle) = gl_query_leaves.get(0) {
+    // Build Poseidon Merkle tree from LDE VALUES (from hooks), not trace-domain leaves
+    // This ensures consistency: Poseidon shadow tree uses same LDE data as Winterfell's RPO tree
+    let lde_leaves_for_poseidon: Vec<Vec<u64>> = if !witness_log.trace_lde_values.is_empty() {
+        // Use LDE values BUT respect the test's query limit (gl_query_leaves count)
+        let num_leaves_wanted = gl_query_leaves.get(0).map(|v| v.len()).unwrap_or(witness_log.trace_lde_values.len());
+        let num_to_use = core::cmp::min(num_leaves_wanted, witness_log.trace_lde_values.len());
+        witness_log.trace_lde_values.iter()
+            .take(num_to_use)  // Respect test's query limit!
+            .map(|row| row.iter().map(|e| e.as_int()).collect())
+            .collect()
+    } else {
+        // Fallback to passed-in gl_query_leaves for tests without hooks
+        gl_query_leaves.get(0).cloned().unwrap_or_default()
+    };
+    
+    let (p2_root, p2_paths_nodes, p2_paths_pos, p2_leaves_fr): (InnerFr, Vec<Vec<InnerFr>>, Vec<Vec<bool>>, Vec<InnerFr>) = if !lde_leaves_for_poseidon.is_empty() {
         // Materialize leaf bytes from limbs and convert to Fr377 identically to the circuit
-        let mut leaves_fr: Vec<InnerFr> = Vec::with_capacity(first_oracle.len());
-        for limbs in first_oracle.iter() {
+        let mut leaves_fr: Vec<InnerFr> = Vec::with_capacity(lde_leaves_for_poseidon.len());
+        for limbs in lde_leaves_for_poseidon.iter() {
             let mut leaf_bytes = Vec::with_capacity(limbs.len() * 8);
             for limb in limbs.iter() { leaf_bytes.extend_from_slice(&limb.to_le_bytes()); }
             leaves_fr.push(InnerFr::from_le_bytes_mod_order(&leaf_bytes));
@@ -124,11 +137,17 @@ where
         (InnerFr::from(0u64), Vec::new(), Vec::new(), Vec::new())
     };
     
-    // Build queries using logged witness but limited to available GL leaves
+    // Build queries: limited by how many Poseidon paths we actually built
+    let available_lde = witness_log.trace_lde_values.len();
     let available_gl = gl_query_leaves.get(0).map(|v| v.len()).unwrap_or(0);
-    let max_q = core::cmp::min(available_gl, witness_log.x_points.len());
+    let num_poseidon_paths = p2_paths_nodes.len();
+    
+    // CRITICAL: Use whichever is smaller - Poseidon paths built OR Winterfell queries
+    let max_q = core::cmp::min(num_poseidon_paths, witness_log.x_points.len());
     let mut queries = Vec::with_capacity(max_q);
     
+    eprintln!("DEBUG: Building {} queries (Poseidon paths={}, LDE values={}, GL leaves={})", 
+        max_q, num_poseidon_paths, available_lde, available_gl);
     for q_idx in 0..max_q {
         let x = witness_log.x_points[q_idx];
         let comp = witness_log.comp_claims[q_idx];
@@ -239,6 +258,9 @@ where
         
         // Sanity: sum of terms equals comp mod p_gl
         let sum_terms_mod: u128 = deep_terms_gl.iter().fold(0u128, |acc, t| (acc + *t as u128) % p_gl_u128);
+        if sum_terms_mod as u64 != comp.as_int() {
+            eprintln!("ERROR q_idx={}: sum_terms={}, comp={}", q_idx, sum_terms_mod, comp.as_int());
+        }
         assert_eq!(sum_terms_mod as u64, comp.as_int(), "sum terms != comp_claim (mod p_gl) at query {q_idx}");
         
         // FRI fold data per layer
@@ -258,25 +280,44 @@ where
             assert_eq!(lhs, rhs, "FRI fold mismatch at q={q_idx}, layer={layer}");
         }
         
-        // Get GL leaf limbs for this query
-        let gl_limbs = gl_query_leaves
-            .get(0)  // First oracle (extend for multi-oracle later)
+        // Get GL leaf limbs for this query - use LDE VALUES from hooks!
+        let gl_limbs = if !witness_log.trace_lde_values.is_empty() && q_idx < witness_log.trace_lde_values.len() {
+            // Use actual LDE values from Winterfell (correct domain!)
+            witness_log.trace_lde_values[q_idx].iter().map(|e| e.as_int()).collect()
+        } else {
+            // Fallback to passed-in trace-domain values (for legacy tests)
+            gl_query_leaves
+                .get(0)
             .and_then(|qs| qs.get(q_idx))
             .cloned()
-            .unwrap_or_default();
+                .unwrap_or_default()
+        };
         
         // Build leaf_bytes from GL limbs (LE 8-byte encoding)
         let mut leaf_bytes = Vec::with_capacity(gl_limbs.len() * 8);
         for limb in &gl_limbs { leaf_bytes.extend_from_slice(&limb.to_le_bytes()); }
+        
         // Convert to Fr377 for Poseidon Merkle using the same LE-bytes
         let leaf_fr = InnerFr::from_le_bytes_mod_order(&leaf_bytes);
+        
+        // DEBUG: Verify this leaf matches what was used to build the Poseidon tree
+        if !lde_leaves_for_poseidon.is_empty() && q_idx < lde_leaves_for_poseidon.len() {
+            let tree_leaf_limbs = &lde_leaves_for_poseidon[q_idx];
+            if &gl_limbs != tree_leaf_limbs {
+                eprintln!("ERROR q_idx={}: gl_limbs != tree_leaf!", q_idx);
+                eprintln!("  gl_limbs={:?}", &gl_limbs[..core::cmp::min(4, gl_limbs.len())]);
+                eprintln!("  tree_leaf={:?}", &tree_leaf_limbs[..core::cmp::min(4, tree_leaf_limbs.len())]);
+            }
+        }
         // Real Poseidon path per query (if available)
         let (poseidon_path_nodes, poseidon_path_pos) = if !p2_paths_nodes.is_empty() && q_idx < p2_paths_nodes.len() {
             (p2_paths_nodes[q_idx].clone(), p2_paths_pos[q_idx].clone())
         } else { (Vec::new(), Vec::new()) };
         if !poseidon_path_nodes.is_empty() {
+            eprintln!("DEBUG: HOST verifying Poseidon path for q_idx={}", q_idx);
             let ok = verify_path_default(leaf_fr, &poseidon_path_nodes, &poseidon_path_pos, p2_root);
             assert!(ok, "poseidon merkle path failed at query {q_idx}");
+            eprintln!("DEBUG: HOST Poseidon path OK for q_idx={}", q_idx);
         }
 
         // Use path_pos directly - circuit uses same convention as host

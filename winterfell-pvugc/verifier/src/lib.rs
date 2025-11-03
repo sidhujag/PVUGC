@@ -348,9 +348,18 @@ where
         channel.read_queried_trace_states(&query_positions)?;
     let queried_constraint_evaluations = channel.read_constraint_evaluations(&query_positions)?;
 
-    // PVUGC: Export per-query Merkle paths and FRI roots
+    // PVUGC: Export per-query Merkle paths, FRI roots, and ACTUAL LDE VALUES
     #[cfg(feature = "pvugc-hooks")]
     if let Some(ref mut l) = log {
+        // Export actual LDE query values (field elements per column)
+        // Convert base field to extension field E for storage
+        l.trace_lde_values = queried_main_trace_states.rows()
+            .map(|row| row.iter().map(|&v| E::from(v)).collect())
+            .collect();
+        l.comp_lde_values = queried_constraint_evaluations.rows()
+            .map(|row| row.iter().map(|&v| E::from(v)).collect())
+            .collect();
+        
         if let Some(pos) = channel.pvugc_trace_paths_pos.take() { l.trace_paths_pos = pos; }
         if let Some(pos) = channel.pvugc_comp_paths_pos.take() { l.comp_paths_pos = pos; }
         if let Some(nodes) = channel.pvugc_trace_paths_nodes.take() {

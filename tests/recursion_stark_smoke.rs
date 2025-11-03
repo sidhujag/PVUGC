@@ -128,6 +128,7 @@ fn recursion_stark_smoke() {
                 .collect(),
         }),
     );
+    eprintln!("SUCCESS: Inner proof generated!");
 
     // 7) Outer compressed proof and verify
     let x_inner = {

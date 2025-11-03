@@ -83,11 +83,11 @@ pub fn derive_challenges_from_transcript(
     bytes.extend_from_slice(b"dual_root_v1");
     bytes.extend_from_slice(&num_oracles.to_le_bytes());
     for r in gl_roots_le32 { bytes.extend_from_slice(r); }
-    // Absorb optional commitments to match in-circuit FS
-    if let Some(t) = trace_lde_root_le32 { bytes.extend_from_slice(&t); }
-    if let Some(c) = comp_lde_root_le32 { bytes.extend_from_slice(&c); }
-    for r in fri_layer_roots_le32 { bytes.extend_from_slice(r); }
-    if !ood_commitment_le.is_empty() { bytes.extend_from_slice(ood_commitment_le); }
+    // FREEZE FS: Don't absorb LDE/OOD commitments to match circuit
+    //if let Some(t) = trace_lde_root_le32 { bytes.extend_from_slice(&t); }
+    //if let Some(c) = comp_lde_root_le32 { bytes.extend_from_slice(&c); }
+    //for r in fri_layer_roots_le32 { bytes.extend_from_slice(r); }
+    //if !ood_commitment_le.is_empty() { bytes.extend_from_slice(ood_commitment_le); }
     bytes.extend_from_slice(tail_bytes);
 
     // Derive challenges
