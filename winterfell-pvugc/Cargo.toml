@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "utils/core",
+  "utils/maybe_async",
+  "utils/rand",
+  "math",
+  "crypto",
+  "fri",
+  "air",
+  "prover",
+  "verifier",
+  "winterfell",
+  "examples"
+]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+
+[profile.bench]
+codegen-units = 1
+lto = true

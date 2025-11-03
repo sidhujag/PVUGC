@@ -1,0 +1,48 @@
+[package]
+name = "examples"
+version = "0.13.1"
+description = "Examples of using Winterfell STARK prover/verifier"
+authors = ["winterfell contributors"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/novifinancial/winterfell"
+categories = ["cryptography"]
+edition = "2021"
+rust-version = "1.87"
+
+[lib]
+bench = false
+doc = false
+
+[[bin]]
+name = "winterfell"
+path = "src/main.rs"
+bench = false
+doc = false
+
+[features]
+concurrent = ["winterfell/concurrent", "std"]
+default = ["std"]
+std = ["core-utils/std", "hex/std", "rand-utils", "winterfell/std"]
+
+[dependencies]
+blake3 = { version = "1.8", default-features = false }
+core-utils = { version = "0.13", path = "../utils/core", package = "winter-utils", default-features = false }
+hex = { version = "0.4", optional = true }
+rand-utils = { version = "0.13", path = "../utils/rand", package = "winter-rand-utils", optional = true }
+structopt = { version = "0.3", default-features = false }
+tracing = { version = "0.1", default-features = false }
+tracing-forest = { version = "0.1", features = ["ansi", "smallvec"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["std", "env-filter"] }
+winterfell = { version = "0.13", path = "../winterfell", default-features = false }
+
+[dev-dependencies]
+criterion = "0.6"
+
+[[bench]]
+name = "fibonacci"
+harness = false
+
+[[bench]]
+name = "rescue"
+harness = false
