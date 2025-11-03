@@ -37,6 +37,22 @@ pub mod pvugc_outer;
 pub mod test_circuits; // Shared test circuits
 pub mod test_fixtures;  // Shared fixtures with disk caching
 
+// Inner STARK verifier (hybrid) in a single module
+pub mod inner_stark;
+pub mod host_api;
+pub mod fs;
+pub mod witness;
+pub use fs::transcript::assemble_transcript_bytes;
+pub use fs::transcript::{TranscriptBuilder, TailBuilder, WinterfellTailMeta, build_winterfell_tail, build_tail_from_proof_bytes, derive_fri_layers, fr377_to_le48, flatten_roots, flatten_roots_32};
+#[cfg(feature = "serde")]
+pub use fs::transcript::build_tail_from_proof_serde;
+
+// Crypto helpers (Poseidon params + host Merkle helpers)
+pub mod crypto {
+    pub mod poseidon_fr377_t3;
+    pub mod poseidon_merkle_helpers;
+}
+
 // Re-exports - Public API
 pub use arming::{ColumnBases, ColumnArms, arm_columns};
 pub use coeff_recorder::{CoefficientRecorder, BCoefficients, SimpleCoeffRecorder};
@@ -77,3 +93,14 @@ pub use outer_compressed::{
 // Test utilities re-exports
 pub use test_circuits::AddCircuit;
 pub use test_fixtures::{get_fixture, get_fixture_mnt, DefaultFixture, GlobalFixture, MntFixture};
+
+// Public exports for the inner STARK verifier circuit helpers
+pub use inner_stark::{
+    HybridQueryWitness,
+    InnerStarkVerifierCircuit,
+    setup_inner_stark,
+    prove_inner_stark,
+    verify_inner_stark,
+    compute_inner_public_inputs,
+};
+pub use host_api::prove_outer_with_inner;
