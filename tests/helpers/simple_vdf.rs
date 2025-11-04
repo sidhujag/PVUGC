@@ -64,24 +64,25 @@ impl Air for VdfAir {
 }
 
 // ===========================================================================================
-// VDF PROVER
+// VDF PROVER (Generic over hasher)
 // ===========================================================================================
 
-pub struct VdfProver {
+pub struct VdfProver<H: ElementHasher<BaseField = BaseElement> + Send + Sync> {
     options: ProofOptions,
+    _hasher: core::marker::PhantomData<H>,
 }
 
-impl VdfProver {
+impl<H: ElementHasher<BaseField = BaseElement> + Send + Sync> VdfProver<H> {
     pub fn new(options: ProofOptions) -> Self {
-        Self { options }
+        Self { options, _hasher: core::marker::PhantomData }
     }
 }
 
-impl Prover for VdfProver {
+impl<H: ElementHasher<BaseField = BaseElement> + Send + Sync> Prover for VdfProver<H> {
     type BaseField = BaseElement;
     type Air = VdfAir;
     type Trace = TraceTable<BaseElement>;
-    type HashFn = winterfell::crypto::hashers::Blake3_256<BaseElement>;
+    type HashFn = H;
     type VC = MerkleTree<Self::HashFn>;
     type RandomCoin = DefaultRandomCoin<Self::HashFn>;
     type TraceLde<E: FieldElement<BaseField = BaseElement>> = DefaultTraceLde<E, Self::HashFn, Self::VC>;
@@ -182,9 +183,32 @@ pub fn generate_test_vdf_proof(
         winterfell::BatchingMethod::Linear,
     );
 
-    // Prove
-    let prover = VdfProver::new(options);
+    // Prove with Blake3 (default)
+    let prover = VdfProver::<winter_crypto::hashers::Blake3_256<BaseElement>>::new(options);
     let proof = prover.prove(trace.clone()).expect("VDF proof generation failed");
+    
+    (proof, trace)
+}
+
+/// Generate VDF proof with RPO-256 hasher (for circuit compatibility!)
+pub fn generate_test_vdf_proof_rpo(
+    start: BaseElement,
+    steps: usize,
+) -> (Proof, TraceTable<BaseElement>) {
+    let trace = build_vdf_trace(start, steps);
+    
+    let options = ProofOptions::new(
+        28, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    
+    // Use RPO-256 hasher to match circuit!
+    type RpoHasher = winter_crypto::hashers::Rp64_256;
+    let prover = VdfProver::<RpoHasher>::new(options);
+    let proof = prover.prove(trace.clone()).expect("VDF proof with RPO-256 failed");
     
     (proof, trace)
 }

@@ -37,9 +37,11 @@ ark-snark = "0.5"
 ark-std = "0.5"
 ark-crypto-primitives = "0.5"
 winterfell = { version = "0.13.1", features = ["pvugc-hooks"] } # Patched below
-# Direct access to Winterfell internals for witness extraction
+# Direct access to Winterfell internals for witness extraction and full verifier
 winter-crypto = { version = "0.13.1", path = "winterfell-pvugc/crypto" }
 winter-math = { version = "0.13.1", path = "winterfell-pvugc/math" }
+winter-air = { version = "0.13.1", path = "winterfell-pvugc/air" }
+winter-fri = { version = "0.13.1", path = "winterfell-pvugc/fri" }
 winter-verifier = { version = "0.13.1", path = "winterfell-pvugc/verifier", features = ["pvugc-hooks"] }
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }

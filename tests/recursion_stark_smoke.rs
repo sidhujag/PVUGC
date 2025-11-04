@@ -4,11 +4,11 @@ use ark_std::rand::SeedableRng;
 use arkworks_groth16::inner_stark::*;
 use arkworks_groth16::outer_compressed as oc;
 use arkworks_groth16::WinterfellTailMeta;
-use winter_crypto::hashers::Blake3_256;
+use winter_crypto::hashers::Rp64_256;  // Changed to RPO-256 to match circuit!
 use winterfell::{ProofOptions, FieldExtension, BatchingMethod, Trace};
 use winterfell::math::fields::f64::BaseElement;
 mod helpers;
-use helpers::simple_vdf::{generate_test_vdf_proof, VdfAir, extract_query_leaves};
+use helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir, extract_query_leaves};
 
 // Enable arkworks constraint tracing to satisfy runtime checks
 fn init_constraint_tracing() {
@@ -45,17 +45,17 @@ fn recursion_stark_smoke() {
     init_constraint_tracing();
     // End-to-end recursion with inner STARK constraints using real Winterfell proof extraction
 
-    // 1) Generate a small real Winterfell proof (VDF)
+    // 1) Generate a small real Winterfell proof (VDF) with RPO-256 hasher
     let start = BaseElement::new(3);
     let steps = 16;
-    let (proof, trace) = generate_test_vdf_proof(start, steps);
+    let (proof, trace) = generate_test_vdf_proof_rpo(start, steps);
 
     // 2) Build matching options and public input
     let options = ProofOptions::new(28, 8, 0, FieldExtension::None, 2, 31, BatchingMethod::Linear, BatchingMethod::Linear);
     let pub_inputs = trace.get(1, trace.length() - 1);
 
     // 3) Extract GL query leaves first to compute real Poseidon root
-    let selected_positions_lde = arkworks_groth16::witness::winterfell_extract::peek_positions_from_proof::<Blake3_256<BaseElement>, VdfAir>(
+    let selected_positions_lde = arkworks_groth16::witness::winterfell_extract::peek_positions_from_proof::<Rp64_256, VdfAir>(
         &proof, pub_inputs, &options,
     );
     let trace_len = trace.length();
@@ -80,7 +80,7 @@ fn recursion_stark_smoke() {
 
     // 5) Extract real witnesses via verifier replay (pvugc-hooks)
     // Pass empty poseidon_roots - extractor will compute from GL leaves
-    let extracted = arkworks_groth16::witness::winterfell_extract::extract_for_inner_from_proof::<Blake3_256<BaseElement>, VdfAir>(
+    let extracted = arkworks_groth16::witness::winterfell_extract::extract_for_inner_from_proof::<Rp64_256, VdfAir>(
         &proof,
         pub_inputs,
         &options,

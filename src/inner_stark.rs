@@ -169,8 +169,8 @@ impl ConstraintSynthesizer<InnerFr> for InnerStarkVerifierCircuit {
         const ENF_FRI_PATHS: bool = false; // Gate for per-layer FRI Merkle path checks
         const ENF_QUERY_IDX: bool = true;  // ✅ STEP 4: PASS
         const ENF_ZETA_EQUAL: bool = false;  // ❌ BLOCKED: Winterfell's zeta != circuit's zeta
-        const ENF_LDE_TRACE: bool = false; // ❌ BLOCKER: LDE+DEEP interaction issue (see TECHNICAL.md)
-        const ENF_LDE_COMP: bool = false;  // Test separately
+        const ENF_LDE_TRACE: bool = true; // TESTING: With RPO-256 hasher matching!
+        const ENF_LDE_COMP: bool = true;  // Test both
         const ENF_OOD_BIND: bool = false;  // TODO
         const ENF_QUERY_IDX_PUBLIC: bool = false; // TODO
         
@@ -817,7 +817,7 @@ impl ConstraintSynthesizer<InnerFr> for InnerStarkVerifierCircuit {
                 }}
             }
         }
-        
+
         Ok(())
     }
 }

@@ -37,8 +37,12 @@ pub mod pvugc_outer;
 pub mod test_circuits; // Shared test circuits
 pub mod test_fixtures;  // Shared fixtures with disk caching
 
-// Inner STARK verifier (hybrid) in a single module
-pub mod inner_stark;
+// Inner STARK verifier modules
+pub mod inner_stark;         // Hybrid approach (current, 4/9 checks working)
+pub mod inner_stark_full;    // Full verifier approach (new, clean)
+pub mod stark_proof_parser;  // Parser for full verifier (no hooks!)
+pub use inner_stark_full::{FullStarkVerifierCircuit, AirParams, TraceQuery, CompQuery};
+pub mod gl_u64;              // Goldilocks u64 arithmetic (for witness computation)
 pub mod host_api;
 pub mod fs;
 pub mod witness;
