@@ -163,8 +163,8 @@ pub fn gl_mul_const(
     a: &FpGLVar,
     c_u64: u64,
 ) -> Result<FpGLVar, SynthesisError> {
-    // Use witness instead of constant to ensure proper CS attachment
-    let c = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c_u64)))?;
+    // Use constant instead of witness (the constant is public, not malleable)
+    let c = FpGLVar::new_constant(cs.clone(), InnerFr::from(c_u64))?;
     gl_mul_var(cs, a, &c)
 }
 

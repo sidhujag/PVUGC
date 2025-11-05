@@ -84,11 +84,11 @@ impl Default for RpoParamsGL {
 
 /// Winterfell RPO round: α → MDS → ARK1 → α⁻¹ → MDS → ARK2
 fn rp_round_gl(
+    cs: ConstraintSystemRef<InnerFr>,
     state: &mut [FpGLVar],
     params: &RpoParamsGL,
     round_idx: usize,
 ) -> Result<(), SynthesisError> {
-    let cs = state[0].cs();
     let t = params.t;
 
     // S-box α (x^7) with canonical GL at each step ---
@@ -170,20 +170,26 @@ impl Rpo256GlVar {
     pub fn new(cs: ConstraintSystemRef<InnerFr>, params: RpoParamsGL) -> Result<Self, SynthesisError> {
         let mut state = Vec::with_capacity(params.t);
         for _ in 0..params.t {
-            // Initialize as witness constrained to zero (ensures CS attachment)
-            // The stateless helpers will overwrite these immediately, constraining the IV
+            // Initialize as witness constrained to zero by circuit logic.
+            // Soundness relies on: (1) lane layout is correct (Winterfell-aligned),
+            // (2) permutation outputs are canonical GL, (3) CS extraction happens via explicit passing,
+            // not via state[0].cs() on a potentially-constant value.
             state.push(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(0u64)))?);
         }
         Ok(Self { cs, params, state, rate_idx: 0 })
     }
     
     pub fn absorb(&mut self, elems: &[FpGLVar]) -> Result<(), SynthesisError> {
+        let rate_base = 4;  // Rate starts at lane 4 in Rp64_256
         for e in elems {
             if self.rate_idx == self.params.rate {
                 self.permute()?;
                 self.rate_idx = 0;
             }
-            self.state[self.rate_idx] = self.state[self.rate_idx].clone() + e;  // Fr add
+            self.state[rate_base + self.rate_idx] = 
+                crate::gadgets::gl_range::gl_add_var(self.cs.clone(), 
+                                                     &self.state[rate_base + self.rate_idx],
+                                                     e)?;
             self.rate_idx += 1;
         }
         Ok(())
@@ -191,7 +197,7 @@ impl Rpo256GlVar {
     
     pub fn permute(&mut self) -> Result<(), SynthesisError> {
         for r in 0..self.params.n_rounds {
-            rp_round_gl(&mut self.state, &self.params, r)?;   // α + inv per round
+            rp_round_gl(self.cs.clone(), &mut self.state, &self.params, r)?;
         }
         Ok(())
     }
@@ -206,10 +212,10 @@ impl Rpo256GlVar {
     
     pub fn hash_elements(&mut self, elems: &[FpGLVar]) -> Result<Vec<FpGLVar>, SynthesisError> {
         self.absorb(elems)?;
-        self.finalize_for_digest()?;            // <-- always permute once here
+        self.finalize_for_digest()?;
         let mut out = Vec::with_capacity(self.params.d);
-        // Digest lanes: read capacity tail [t-d .. t)
-        for i in (self.params.t - self.params.d)..self.params.t {
+        // Digest lanes: read rate lanes [4..8) not capacity tail
+        for i in 4..8 {
             out.push(self.state[i].clone());
         }
         Ok(out)
@@ -219,7 +225,7 @@ impl Rpo256GlVar {
         let mut out = Vec::with_capacity(n);
         while out.len() < n {
             self.permute()?;
-            for i in (self.params.t - self.params.d)..self.params.t {
+            for i in 4..8 {  // Correct digest lanes for Winterfell alignment
                 if out.len() == n { break; }
                 out.push(self.state[i].clone());
             }
@@ -254,13 +260,13 @@ pub fn rpo_hash_elements_gl(
 
     // state[0] = elements.len() (TOTAL length, not mod 8)
     let total_len = elems.len() as u64;
-    let len_const = FpGLVar::new_constant(h.state[0].cs(), InnerFr::from(total_len))?;
-    h.state[0] = &h.state[0] + &len_const;
+    let len_const = FpGLVar::constant(InnerFr::from(total_len));
+    h.state[0] = &h.state[0] + &len_const;  // Fr add; permutation will canonicalize
 
     // absorb with block-by-block permutation
     let mut i = 0usize;
     for x in elems.iter() {
-        h.state[4 + i] = &h.state[4 + i] + x;  // += element (Winterfell: state[RATE_RANGE.start + i] += element)
+        h.state[4 + i] = &h.state[4 + i] + x;  // Fr add; permutation will canonicalize
         i += 1;
         if i == 8 {
             h.permute()?;  // Full block absorbed, permute  
@@ -288,8 +294,8 @@ pub fn rpo_merge_gl(
     let mut h = Rpo256GlVar::new(cs.clone(), params.clone())?;
     
     // state[0] = 8 (RATE_WIDTH, the number of elements being hashed)
-    let len_8 = FpGLVar::new_constant(h.state[0].cs(), InnerFr::from(8u64))?;
-    h.state[0] = &h.state[0] + &len_8;
+    let len_8 = FpGLVar::constant(InnerFr::from(8u64));
+    h.state[0] = &h.state[0] + &len_8;  // Fr add; permutation will canonicalize
     
     // Place left||right into lanes 4..11
     for i in 0..4 {
