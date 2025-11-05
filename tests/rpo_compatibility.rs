@@ -47,8 +47,6 @@ fn test_rpo_matches_winterfell_hash() {
     // Check lane-wise equality
     assert_eq!(digest.len(), 4);
     
-    println!("\nExpected digest (Winterfell): {:?}", expected);
-    println!("Circuit digest values:");
     for i in 0..4 {
         let val = digest[i].value().unwrap();
         let bytes = val.into_bigint().to_bytes_le();
@@ -56,12 +54,7 @@ fn test_rpo_matches_winterfell_hash() {
         for (j, &b) in bytes.iter().enumerate().take(8) {
             v |= (b as u64) << (j * 8);
         }
-        println!("  digest[{}] = {} (expected {})", i, v, expected[i]);
-        if v == expected[i] {
-            println!("    ✅ MATCH!");
-        }
     }
-    println!();
     
     for i in 0..4 {
         let expected_var = FpVar::constant(InnerFr::from(expected[i]));
@@ -70,8 +63,7 @@ fn test_rpo_matches_winterfell_hash() {
             panic!("RPO mismatch at lane {}: expected {}, got circuit value", i, expected[i]);
         }
     }
-    
-    println!("✅ RPO-256 gadget matches Winterfell Rp64_256");
+    assert!(cs.is_satisfied().unwrap(), "RPO gadget doesn't match Winterfell on test vectors!");
 }
 
 #[test]
@@ -92,9 +84,7 @@ fn rpo_matches_winterfell_on_small_vectors() {
 
     // Test multiple input sizes to cover block boundaries
     for xs in [&[1u64][..], &[1,2], &[1,2,3,4], &[1,2,3,4,5,6,7,8], &[1,2,3,4,5,6,7,8,9]] {
-        println!("\nTesting input: {:?}", xs);
         let expect = host(xs);
-        println!("Expected: {:?}", expect);
         
         let inputs = if xs.is_empty() {
             vec![]
@@ -103,7 +93,6 @@ fn rpo_matches_winterfell_on_small_vectors() {
         };
         let got = rpo_hash_elements_gl(cs.clone(), &params, &inputs).unwrap();
         
-        println!("Got:");
         for i in 0..4 {
             let val = got[i].value().unwrap();
             let bytes = val.into_bigint().to_bytes_le();
@@ -111,7 +100,6 @@ fn rpo_matches_winterfell_on_small_vectors() {
             for (j, &b) in bytes.iter().enumerate().take(8) {
                 v |= (b as u64) << (j * 8);
             }
-            println!("  Lane {}: {} (expected {})", i, v, expect[i]);
         }
         
         for i in 0..4 {
@@ -119,7 +107,6 @@ fn rpo_matches_winterfell_on_small_vectors() {
         }
     }
     assert!(cs.is_satisfied().unwrap(), "RPO gadget doesn't match Winterfell on test vectors!");
-    println!("\n✅ All test vectors match!");
 }
 
 #[test]
@@ -166,6 +153,5 @@ fn test_rpo_matches_winterfell_merge() {
     }
     
     assert!(cs.is_satisfied().unwrap(), "RPO merge doesn't match Winterfell!");
-    println!("✅ RPO-256 merge matches Winterfell");
 }
 

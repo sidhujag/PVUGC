@@ -112,20 +112,30 @@ pub fn gl_add_var(
         })
     })?;
     enforce_gl_eq(&sum_fr, &sum_gl)?;
-    Ok(sum_fr)  // ✅ Return Fr result, not witness!
+    Ok(sum_gl)  // Return canonical GL witness!
 }
 
 /// GL add with a GL constant.
 pub fn gl_add_const(
-    _cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
+    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
     a: &FpGLVar,
     c_u64: u64,
 ) -> Result<FpGLVar, SynthesisError> {
-    // pure Fr constant add; congruence is checked elsewhere where needed
-    // Use a's CS to create the constant for compatibility
+    // Add in Fr, then reduce to canonical GL
     let a_cs = a.cs();
     let c = FpGLVar::new_constant(a_cs, InnerFr::from(c_u64))?;
-    Ok(a + c)
+    let sum_fr = a + c;
+    
+    // Witness canonical GL sum
+    let (_u, sum_gl) = gl_alloc_u64(cs, {
+        let av = a.value().ok();
+        av.map(|av| {
+            use crate::gl_u64::{fr_to_gl_u64, gl_add};
+            gl_add(fr_to_gl_u64(av), c_u64)
+        })
+    })?;
+    enforce_gl_eq(&sum_fr, &sum_gl)?;
+    Ok(sum_gl)  // Return canonical GL!
 }
 
 /// GL multiply with congruence enforcement and canonical result.
@@ -144,7 +154,7 @@ pub fn gl_mul_var(
         })
     })?;
     enforce_gl_eq(&prod_fr, &prod_gl)?;
-    Ok(prod_fr)  // ✅ Return Fr result, not witness!
+    Ok(prod_gl)  // Return canonical GL witness!
 }
 
 /// GL multiply by a GL constant.
@@ -187,7 +197,7 @@ pub fn gl_lincomb(
         return Ok(FpGLVar::new_constant(cs, InnerFr::from(0u64))?);
     }
     
-    // Fr-side accumulator (start from first term to ensure CS attachment)
+    // Fr-side accumulator
     let first_cs = terms[0].cs();
     let mut acc_fr = FpGLVar::new_constant(first_cs.clone(), InnerFr::from(coeffs[0]))? * &terms[0];
     for (c, t) in coeffs.iter().zip(terms).skip(1) {
@@ -195,7 +205,7 @@ pub fn gl_lincomb(
         acc_fr += coeff_var * t;
     }
 
-    // GL witness (host arithmetic) used only to enforce congruence
+    // GL witness (canonical Goldilocks) - THIS is what we return!
     let sum_w = FpGLVar::new_witness(cs, || {
         use crate::gl_u64::{gl_add, gl_mul, fr_to_gl_u64};
         let mut acc = 0u64;
@@ -206,7 +216,7 @@ pub fn gl_lincomb(
     })?;
     enforce_gl_eq(&acc_fr, &sum_w)?;
 
-    Ok(acc_fr) // return Fr result so the sponge state stays *deterministic*
+    Ok(sum_w) // Return canonical GL witness, not Fr result!
 }
 
 #[cfg(test)]

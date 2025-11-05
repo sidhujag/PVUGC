@@ -43,11 +43,9 @@ pub fn verify_fri_layers_gl(
     remainder_coeffs_opt: Option<&[u64]>, // for Poly terminal: coeffs (low->high)
 ) -> Result<(), SynthesisError> {
     use crate::inner_stark_full::enforce_gl_eq;
-    use crate::gadgets::rpo_gl::Rpo256GlVar;
     
     let t = cfg.folding_factor;
     if t == 0 { return Err(SynthesisError::Unsatisfiable); }
-    let shift = (t as f64).log2() as usize;
     
     // Folded positions per layer
     let mut positions: Vec<usize> = main_positions.to_vec();
@@ -95,8 +93,9 @@ pub fn verify_fri_layers_gl(
             
             // 4) Consistency: current[q_idx] must equal selected {v_lo,v_hi}
             // Selection is based on LSB of *this* layer's position
-            let bit_lsb = (positions[q_idx] & 1) == 1;
-            let lsb = Boolean::constant(bit_lsb);  // ✅ Known off-circuit, use constant
+            let pos = positions.get(q_idx).copied().unwrap_or(0);
+            let bit_lsb = (pos & 1) == 1;
+            let lsb = Boolean::constant(bit_lsb);  // Known off-circuit, use constant
             let selected = FpGLVar::conditionally_select(&lsb, &v_hi, &v_lo)?;
             enforce_gl_eq(&current[q_idx], &selected)?;
             
@@ -109,7 +108,7 @@ pub fn verify_fri_layers_gl(
         
         // Fold positions for next layer (use division for general folding factor)
         for pos in positions.iter_mut() {
-            *pos /= t;  // ✅ Works for any folding factor, not just powers of 2
+            *pos /= t;  // Works for any folding factor, not just powers of 2
         }
     }
     
@@ -149,7 +148,7 @@ pub fn verify_fri_layers_gl(
                 let x = {
                     let mut acc = FpGLVar::constant(InnerFr::from(1u64));
                     let mut base = g_final.clone();
-                    let mut e = positions[q_idx];
+                    let mut e = positions.get(q_idx).copied().unwrap_or(0);  // Handle deduplicated positions
                     while e > 0 {
                         if e & 1 == 1 { acc = &acc * &base; }
                         base = &base * &base;
@@ -205,7 +204,6 @@ mod tests {
             None
         );
         assert!(res.is_ok());
-        // Note: May not satisfy with placeholder constants, but should generate constraints
     }
 }
 

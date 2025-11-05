@@ -1,7 +1,7 @@
 //! Parse Winterfell STARK Proof into Circuit-Ready Format
 //!
 //! This module extracts data from a standard Winterfell Proof struct
-//! WITHOUT requiring any hooks or modifications to Winterfell.
+//! without requiring any hooks or modifications to Winterfell.
 //!
 //! The Proof struct already contains everything we need:
 //! - Commitments (trace, composition, FRI)
@@ -440,14 +440,14 @@ fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
     sponge.squeeze_field_elements::<InnerFr>(1)[0]
 }
 
-/// Compute statement hash binding all public data (including positions!)
+/// Compute statement hash binding all public data (including positions)
 fn compute_statement_hash(
     trace_root: &[u8; 32],
     comp_root: &[u8; 32],
     fri_roots: &[[u8; 32]],
     ood_commit: &[u8; 32],
     pub_inputs: &[u64],
-    query_positions: &[usize],  // CRITICAL: Binds positions!
+    query_positions: &[usize],
 ) -> InnerFr {
     use ark_crypto_primitives::sponge::{CryptographicSponge};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
@@ -485,7 +485,7 @@ fn compute_statement_hash(
         hasher.absorb(&InnerFr::from(*pub_in));
     }
     
-    // CRITICAL: Use the *same* positions commitment as the circuit
+    // Use the *same* positions commitment as the circuit
     let pos_commit = poseidon_commit_positions_offchain(query_positions);
     hasher.absorb(&pos_commit);
     

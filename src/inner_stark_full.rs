@@ -1,7 +1,6 @@
 //! Full STARK Verifier Circuit (Clean Architecture)
 //!
 //! This module implements a complete Winterfell STARK verifier as an arkworks R1CS circuit.
-//! Unlike the hybrid approach, this directly verifies the STARK proof without witness extraction.
 //!
 //! ## Design Principles:
 //! 
@@ -25,18 +24,6 @@
 //!   ↓
 //! 5. FS: Derive challenges in-circuit, verify consistency
 //! ```
-//!
-//! ## Constraint Budget Estimate:
-//!
-//! - RPO-256 permutations: ~30K constraints (2 Merkle trees × depth 10 × 2 queries)
-//! - GL field operations: ~80K constraints (DEEP + FRI in non-native field)
-//! - FRI Merkle verification: ~40K constraints (4 layers × depth 8 × 2 queries)
-//! - FS transcript: ~20K constraints (RPO sponge operations)
-//! - Query binding: ~10K constraints
-//! **Total: ~180-220K constraints**
-//!
-//! This is 4× the hybrid approach but **eliminates all witness extraction complexity**.
-//! The outer BW6-761 compression reduces this to ~40 PVUGC columns regardless.
 
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError, ConstraintSynthesizer};
@@ -44,8 +31,7 @@ use ark_r1cs_std::fields::fp::FpVar;
 use crate::outer_compressed::InnerFr;
 use crate::gadgets::rpo_gl::{Rpo256GlVar, RpoParamsGL};
 use crate::gadgets::utils::digest32_to_gl4;
-use crate::gadgets::gl_range::{gl_enforce_nonzero_and_inv, gl_mul_var};
-use crate::gadgets::gl_range::gl_alloc_u64_vec;
+use crate::gadgets::gl_range::{gl_enforce_nonzero_and_inv, gl_mul_var, gl_alloc_u64_vec};
 use crate::gadgets::combiner::{CombinerKind, combiner_weights};
 
 // Use GL type alias for non-native Goldilocks operations in Fr377
@@ -88,7 +74,7 @@ pub struct FullStarkVerifierCircuit {
     pub trace_commitment_le32: [u8; 32],
     pub comp_commitment_le32: [u8; 32],
     pub fri_commitments_le32: Vec<[u8; 32]>,  // One per FRI layer
-    pub ood_commitment_le32: [u8; 32],  // CRITICAL: Binds OOD frame to prevent free witnesses
+    pub ood_commitment_le32: [u8; 32],  // Binds OOD frame to prevent free witnesses
     
     // Query openings (witness)
     pub query_positions: Vec<usize>,           // LDE domain positions
@@ -180,7 +166,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 hasher.absorb(&fe)?;
             }
         }
-        // Absorb OOD commitment (CRITICAL: binds OOD frame, prevents free witnesses)
+        // Absorb OOD commitment (binds OOD frame, prevents free witnesses)
         let ood_commit_bytes: Vec<UInt8<InnerFr>> = self.ood_commitment_le32.iter()
             .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
             .collect::<Result<_, _>>()?;
@@ -194,7 +180,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             hasher.absorb(&FpVar::constant(InnerFr::from(*pub_in)))?;
         }
         
-        // CRITICAL: Commit to query positions and absorb (prevents adversarial positions!)
+        // Commit to query positions and absorb (prevents adversarial positions!)
         let pos_commit = commit_positions_poseidon(cs.clone(), &self.query_positions)?;
         hasher.absorb(&pos_commit)?;
         
@@ -234,7 +220,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             self.air_params.comp_width
         };
         
-        // STEP 4: Derive FS challenges in-circuit (corrected transcript order)
+        // STEP 4: Derive FS challenges in-circuit
         let trace_root_vecs: Vec<Vec<UInt8<InnerFr>>> = vec![trace_root_bytes.clone()];
         let (z, deep_coeffs, fri_betas, rho) = derive_fs_challenges_in_circuit(
             cs.clone(),
@@ -352,7 +338,7 @@ fn commit_positions_poseidon(
 
 /// Enforce GL field equality: lhs == rhs (mod p_GL)
 ///
-/// CRITICAL: Operates in GL field, not Fr377!
+/// Operates in GL field, not Fr377!
 /// Enforces: lhs - rhs = (q_plus - q_minus) · p_GL
 pub fn enforce_gl_eq(lhs: &FpGLVar, rhs: &FpGLVar) -> Result<(), SynthesisError> {
     enforce_gl_eq_with_bound(lhs, rhs, None)
@@ -433,9 +419,6 @@ pub fn enforce_gl_eq_with_bound(lhs: &FpGLVar, rhs: &FpGLVar, bound_q: Option<u6
     (lhs - rhs).enforce_equal(&(q_signed * p_gl_const))?;
     Ok(())
 }
-
-/// Convert 32 bytes to 4 GL field elements (8 bytes each, LE)
-// digest32_to_gl4 moved to gadgets::utils
 
 /// Verify single trace query Merkle opening
 fn verify_trace_query(
@@ -544,7 +527,6 @@ fn verify_comp_query(
 
 /// Derive Fiat-Shamir challenges in-circuit
 ///
-/// CORRECTED to match Winterfell 0.13.x exactly:
 /// 0. Seed with context elements
 /// 1. Reseed with trace commitment(s) → draw constraint composition coeffs
 /// 2. Reseed with comp commitment → draw z
@@ -624,8 +606,7 @@ fn derive_fs_challenges_in_circuit(
 
 /// Verify DEEP composition polynomial
 ///
-/// CRITICAL FIX (per expert): Compare computed DEEP to Merkle-opened composition value,
-/// not to a free witness claim!
+/// Compares computed DEEP to Merkle-opened composition value.
 fn verify_deep_composition(
     cs: ConstraintSystemRef<InnerFr>,
     trace_queries: &[TraceQuery],
@@ -702,13 +683,12 @@ fn verify_deep_composition(
             let (_u, t_x) = crate::gadgets::gl_range::gl_alloc_u64(cs.clone(), Some(t_x_u64))?;
             
             // Term at z (mult=1): enforce invertibility and compute term = diff * inv(den)
-            use crate::gadgets::gl_range::{gl_enforce_nonzero_and_inv, gl_mul_var};
             let diff_z = &t_x - &ood_current[col_idx];
             let den_z = &x - z;
             let inv_z = gl_enforce_nonzero_and_inv(cs.clone(), &den_z)?;
             let term_z = gl_mul_var(cs.clone(), &diff_z, &inv_z)?;
             let gamma_z = &deep_coeffs[col_idx * 2];
-            // CRITICAL: Accumulate gamma * term (not just term!)
+            // Accumulate gamma * term (not just term!)
             deep_sum = deep_sum + &(gamma_z * &term_z);
             
             // Term at z·g (mult=g): same pattern
@@ -718,7 +698,7 @@ fn verify_deep_composition(
             let inv_zg = gl_enforce_nonzero_and_inv(cs.clone(), &den_zg)?;
             let term_zg = gl_mul_var(cs.clone(), &diff_zg, &inv_zg)?;
             let gamma_zg = &deep_coeffs[col_idx * 2 + 1];
-            // CRITICAL: Accumulate gamma * term (not just term!)
+            // Accumulate gamma * term (not just term!)
             deep_sum = deep_sum + &(gamma_zg * &term_zg);
         }
         
@@ -741,12 +721,12 @@ fn verify_deep_composition(
                 let inv = gl_enforce_nonzero_and_inv(cs.clone(), &den)?;
                 let term = gl_mul_var(cs.clone(), &diff, &inv)?;
                 let gamma = &deep_coeffs[gamma_idx];
-                // CRITICAL: Accumulate gamma * term (not just term!)
+                // Accumulate gamma * term (not just term!)
                 deep_sum = deep_sum + &(gamma * &term);
             }
         }
         
-        // CRITICAL: Weighted combiner H(x) = Σ w_i(x) * C_i(x)
+        // Weighted combiner H(x) = Σ w_i(x) * C_i(x)
         let weights = combiner_weights(
             air_params.combiner_kind,
             comp_q.values.len(),
@@ -770,6 +750,3 @@ fn verify_deep_composition(
     
     Ok(comp_sums)
 }
-
-// OLD verify_fri_folding function deleted - replaced by expert's verify_fri_layers_gl gadget
-

@@ -82,9 +82,7 @@ impl Default for RpoParamsGL {
     }
 }
 
-// (old helpers removed; GL ops now enforced via gadgets::gl_range)
-
-/// One **full** RPO round: Ark1 → α → MDS → Ark2 → α⁻¹ → MDS
+/// Winterfell RPO round: α → MDS → ARK1 → α⁻¹ → MDS → ARK2
 fn rp_round_gl(
     state: &mut [FpGLVar],
     params: &RpoParamsGL,
@@ -93,43 +91,39 @@ fn rp_round_gl(
     let cs = state[0].cs();
     let t = params.t;
 
-    // Ark1 (Fr add)
+    // S-box α (x^7) with canonical GL at each step ---
+    for i in 0..t {
+        use crate::gadgets::gl_range::gl_mul_var;
+        let x  = state[i].clone();
+        let x2 = gl_mul_var(cs.clone(), &x, &x)?;       // canonical GL
+        let x4 = gl_mul_var(cs.clone(), &x2, &x2)?;     // canonical GL
+        let x6 = gl_mul_var(cs.clone(), &x4, &x2)?;     // canonical GL
+        state[i] = gl_mul_var(cs.clone(), &x6, &x)?;    // canonical GL x^7
+    }
+
+    // MDS ---
+    let mut mixed = Vec::with_capacity(t);
+    for i in 0..t {
+        let coeffs: Vec<u64> = (0..t).map(|j| params.mds[i][j]).collect();
+        mixed.push(crate::gadgets::gl_range::gl_lincomb(cs.clone(), &coeffs, state)?);
+    }
+    for (i, val) in mixed.into_iter().enumerate() { state[i] = val; }
+
+    // ARK1 ---
     for i in 0..t {
         state[i] = crate::gadgets::gl_range::gl_add_const(cs.clone(), &state[i], params.ark1[round_idx][i])?;
     }
 
-    // S-box α (α=7) entirely in Fr
+    // S-box α⁻¹ with GL check ---
     for i in 0..t {
-        // x^7 = ((x^2)^2 * x^2) * x
-        let x  = state[i].clone();
-        let x2 = x.clone() * x.clone();
-        let x4 = x2.clone() * x2.clone();
-        let x6 = x4 * x2;
-        state[i] = x6 * x;                            // x^7
-    }
-
-    // MDS (Fr lincomb) — gl_lincomb returns Fr (fixed above)
-    let after_alpha = state.to_vec();
-    for i in 0..t {
-        let coeffs: Vec<u64> = (0..t).map(|j| params.mds[i][j]).collect();
-        state[i] = crate::gadgets::gl_range::gl_lincomb(cs.clone(), &coeffs, &after_alpha)?;
-    }
-
-    // Ark2 (Fr add)
-    for i in 0..t {
-        state[i] = crate::gadgets::gl_range::gl_add_const(cs.clone(), &state[i], params.ark2[round_idx][i])?;
-    }
-
-    // S-box α⁻¹: witness y = x^(α⁻¹) in GL, enforce y^α == x (Fr power), replace lane with y
-    for i in 0..t {
+        use crate::gadgets::gl_range::gl_mul_var;
         let x = state[i].clone();
         let y = FpGLVar::new_witness(cs.clone(), || {
             use crate::gl_u64::{fr_to_gl_u64, gl_mul};
             let x_gl = fr_to_gl_u64(x.value()?);
-            // Compute x^(α⁻¹) in GL using square-and-multiply
             let mut acc = 1u64;
             let mut base = x_gl;
-            let mut e = 10540996611094048183u64; // α⁻¹ mod (p_GL - 1)
+            let mut e = 10540996611094048183u64;
             while e > 0 {
                 if e & 1 == 1 { acc = gl_mul(acc, base); }
                 base = gl_mul(base, base);
@@ -137,32 +131,27 @@ fn rp_round_gl(
             }
             Ok(InnerFr::from(acc))
         })?;
-        // compute y^7 in Fr
-        let y2 = y.clone() * y.clone();
-        let y4 = y2.clone() * y2.clone();
-        let y6 = y4.clone() * y2.clone();
-        let y7 = y6 * y.clone();
-        // enforce y^7 == x (GL congruence is subsumed by Fr equality here)
+        // Compute y^7 in GL (using gl_mul_var for canonical at each step)
+        let y2 = gl_mul_var(cs.clone(), &y, &y)?;
+        let y4 = gl_mul_var(cs.clone(), &y2, &y2)?;
+        let y6 = gl_mul_var(cs.clone(), &y4, &y2)?;
+        let y7 = gl_mul_var(cs.clone(), &y6, &y)?;
+        // Enforce gl_pow7(y) == x (GL check, not Fr!)
         y7.enforce_equal(&x)?;
-        state[i] = y;
+        state[i] = y;  // y is already canonical GL
     }
 
-    // MDS again
-    let after_inv = state.to_vec();
+    // MDS ---
+    let mut mixed2 = Vec::with_capacity(t);
     for i in 0..t {
         let coeffs: Vec<u64> = (0..t).map(|j| params.mds[i][j]).collect();
-        state[i] = crate::gadgets::gl_range::gl_lincomb(cs.clone(), &coeffs, &after_inv)?;
+        mixed2.push(crate::gadgets::gl_range::gl_lincomb(cs.clone(), &coeffs, state)?);
     }
+    for (i, val) in mixed2.into_iter().enumerate() { state[i] = val; }
 
-    // Per-round congruence check at round boundary (prevents "one giant quotient" loophole)
-    for lane in state.iter() {
-        // reduce the current Fr lane to GL and bind with a tight |q| ≤ 1 congruence
-        let lane_gl = FpGLVar::new_witness(lane.cs(), || {
-            use crate::gl_u64::fr_to_gl_u64;
-            Ok(InnerFr::from(fr_to_gl_u64(lane.value()?)))
-        })?;
-        use crate::inner_stark_full::enforce_gl_eq_with_bound;
-        enforce_gl_eq_with_bound(lane, &lane_gl, Some(1))?;
+    // ARK2 ---
+    for i in 0..t {
+        state[i] = crate::gadgets::gl_range::gl_add_const(cs.clone(), &state[i], params.ark2[round_idx][i])?;
     }
 
     Ok(())
@@ -250,9 +239,9 @@ impl Rpo256GlVar {
 }
 
 // ============================================================================
-// Stateless RPO Helpers (CRITICAL for Merkle verification)
+// Stateless RPO Helpers
 // ============================================================================
-// Each hash/merge MUST start from fresh zero state to match Winterfell!
+// Each hash/merge starts from fresh zero state to match Winterfell semantics.
 
 /// Stateless RPO hash (fresh instance per call)
 /// Winterfell-aligned: capacity [0..3], rate [4..11], digest [4..7]
@@ -263,26 +252,30 @@ pub fn rpo_hash_elements_gl(
 ) -> Result<Vec<FpGLVar>, SynthesisError> {
     let mut h = Rpo256GlVar::new(cs.clone(), params.clone())?;
 
-    // 1) Set length marker in capacity (lane 0) - ADD to witness zero (preserves CS)
-    let len_const = FpGLVar::new_constant(h.state[0].cs(), InnerFr::from(elems.len() as u64))?;
-    h.state[0] = &h.state[0] + &len_const;  // 0 + len = len, but preserves CS from state[0]
+    // state[0] = elements.len() (TOTAL length, not mod 8)
+    let total_len = elems.len() as u64;
+    let len_const = FpGLVar::new_constant(h.state[0].cs(), InnerFr::from(total_len))?;
+    h.state[0] = &h.state[0] + &len_const;
 
-    // 2) Write inputs into rate lanes 4..11; pad zeros if < 8
-    let rate_off = 4;
-    for (k, e) in elems.iter().enumerate() {
-        if rate_off + k < h.state.len() {
-            h.state[rate_off + k] = e.clone();  // State is zero, so adding e is just e
+    // absorb with block-by-block permutation
+    let mut i = 0usize;
+    for x in elems.iter() {
+        h.state[4 + i] = &h.state[4 + i] + x;  // += element (Winterfell: state[RATE_RANGE.start + i] += element)
+        i += 1;
+        if i == 8 {
+            h.permute()?;  // Full block absorbed, permute  
+            i = 0;  // Reset index, state carries forward
         }
     }
 
-    // 3) Single permutation, unconditionally
-    h.permute()?;
+    // if we absorbed some elements but didn't apply a permutation (partial block), permute now
+    // No explicit padding needed - zeros already there from initialization
+    if i > 0 {
+        h.permute()?;
+    }
 
-    // 4) Return digest lanes 4..7 (first four of rate)
-    Ok(vec![
-        h.state[4].clone(), h.state[5].clone(),
-        h.state[6].clone(), h.state[7].clone(),
-    ])
+    // digest = [4..8)
+    Ok(vec![h.state[4].clone(), h.state[5].clone(), h.state[6].clone(), h.state[7].clone()])
 }
 
 /// Stateless RPO merge (fresh instance per call)
@@ -294,26 +287,23 @@ pub fn rpo_merge_gl(
 ) -> Result<Vec<FpGLVar>, SynthesisError> {
     let mut h = Rpo256GlVar::new(cs.clone(), params.clone())?;
     
-    // Set length=8 in capacity[0] - state is zero, so just assign
-    h.state[0] = FpGLVar::new_constant(cs.clone(), InnerFr::from(8u64))?;
+    // state[0] = 8 (RATE_WIDTH, the number of elements being hashed)
+    let len_8 = FpGLVar::new_constant(h.state[0].cs(), InnerFr::from(8u64))?;
+    h.state[0] = &h.state[0] + &len_8;
     
-    // Place left||right into lanes 4..11 - state is zero, so just assign
-    let rate_off = 4;
+    // Place left||right into lanes 4..11
     for i in 0..4 {
-        h.state[rate_off + i] = left[i].clone();
+        h.state[4 + i] = left[i].clone();
     }
     for i in 0..4 {
-        h.state[rate_off + 4 + i] = right[i].clone();
+        h.state[8 + i] = right[i].clone();
     }
     
-    // Permute once
+    // Full 8-element block, permute once
     h.permute()?;
     
     // Return digest lanes 4..7
-    Ok(vec![
-        h.state[4].clone(), h.state[5].clone(),
-        h.state[6].clone(), h.state[7].clone(),
-    ])
+    Ok(vec![h.state[4].clone(), h.state[5].clone(), h.state[6].clone(), h.state[7].clone()])
 }
 
 #[cfg(test)]
