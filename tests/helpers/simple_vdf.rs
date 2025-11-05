@@ -7,7 +7,7 @@ use winterfell::{
     crypto::{DefaultRandomCoin, ElementHasher, MerkleTree},
     math::{fields::f64::BaseElement, FieldElement},
     matrix::ColMatrix,
-    Air, AirContext, Assertion, AuxRandElements, ByteWriter, CompositionPoly,
+    Air, AirContext, Assertion, AuxRandElements, CompositionPoly,
     CompositionPolyTrace, ConstraintCompositionCoefficients, DefaultConstraintCommitment,
     DefaultConstraintEvaluator, DefaultTraceLde, EvaluationFrame, PartitionOptions, Proof,
     ProofOptions, Prover, StarkDomain, Trace, TraceInfo, TracePolyTable, TraceTable,
@@ -16,7 +16,6 @@ use winterfell::{
 
 const TRACE_WIDTH: usize = 2;
 const ALPHA: u64 = 3;
-const INV_ALPHA: u64 = 12297829382473034411; // Inverse of 3 in Goldilocks
 
 // ===========================================================================================
 // VDF AIR
@@ -164,31 +163,6 @@ pub fn build_vdf_trace(start: BaseElement, steps: usize) -> TraceTable<BaseEleme
 ///
 /// # Returns
 /// (proof, trace_table) where trace_table can be used to extract witness data
-pub fn generate_test_vdf_proof(
-    start: BaseElement,
-    steps: usize,
-) -> (Proof, TraceTable<BaseElement>) {
-    // Build trace
-    let trace = build_vdf_trace(start, steps);
-    
-    // Minimal proof options for fast testing
-    let options = ProofOptions::new(
-        28,  // num_queries
-        8,   // blowup_factor (2^3)
-        0,   // grinding_factor
-        winterfell::FieldExtension::None,
-        2,   // FRI folding factor (binary FRI to match circuit)
-        31,  // FRI max remainder degree
-        winterfell::BatchingMethod::Linear,
-        winterfell::BatchingMethod::Linear,
-    );
-
-    // Prove with Blake3 (default)
-    let prover = VdfProver::<winter_crypto::hashers::Blake3_256<BaseElement>>::new(options);
-    let proof = prover.prove(trace.clone()).expect("VDF proof generation failed");
-    
-    (proof, trace)
-}
 
 /// Generate VDF proof with RPO-256 hasher (for circuit compatibility!)
 pub fn generate_test_vdf_proof_rpo(
@@ -213,28 +187,5 @@ pub fn generate_test_vdf_proof_rpo(
     (proof, trace)
 }
 
-/// Extract query leaf data from trace at specific positions
-///
-/// # Arguments
-/// * `trace` - The execution trace
-/// * `query_positions` - Indices to extract (from proof.queries)
-///
-/// # Returns  
-/// Leaf data as [query_idx][limb_u64]
-pub fn extract_query_leaves(
-    trace: &TraceTable<BaseElement>,
-    query_positions: &[usize],
-) -> Vec<Vec<u64>> {
-    query_positions
-        .iter()
-        .map(|&pos| {
-            // Extract row at this position
-            // For VDF with width=2, we get 2 GL elements per row
-            let row: Vec<u64> = (0..trace.width())
-                .map(|col| trace.get(col, pos).as_int())
-                .collect();
-            row
-        })
-        .collect()
-}
+// (helper functions removed: use RPO generator directly for tests)
 

@@ -38,18 +38,13 @@ pub mod test_circuits; // Shared test circuits
 pub mod test_fixtures;  // Shared fixtures with disk caching
 
 // Inner STARK verifier modules
-pub mod inner_stark;         // Hybrid approach (current, 4/9 checks working)
-pub mod inner_stark_full;    // Full verifier approach (new, clean)
+pub mod inner_stark_full;    // Full verifier approach
 pub mod stark_proof_parser;  // Parser for full verifier (no hooks!)
 pub use inner_stark_full::{FullStarkVerifierCircuit, AirParams, TraceQuery, CompQuery};
 pub mod gl_u64;              // Goldilocks u64 arithmetic (for witness computation)
-pub mod host_api;
+pub mod gadgets;             // Expert-provided gadgets (RPO-GL, combiner, FRI, range checks)
 pub mod fs;
-pub mod witness;
-pub use fs::transcript::assemble_transcript_bytes;
-pub use fs::transcript::{TranscriptBuilder, TailBuilder, WinterfellTailMeta, build_winterfell_tail, build_tail_from_proof_bytes, derive_fri_layers, fr377_to_le48, flatten_roots, flatten_roots_32};
-#[cfg(feature = "serde")]
-pub use fs::transcript::build_tail_from_proof_serde;
+
 
 // Crypto helpers (Poseidon params + host Merkle helpers)
 pub mod crypto {
@@ -97,14 +92,3 @@ pub use outer_compressed::{
 // Test utilities re-exports
 pub use test_circuits::AddCircuit;
 pub use test_fixtures::{get_fixture, get_fixture_mnt, DefaultFixture, GlobalFixture, MntFixture};
-
-// Public exports for the inner STARK verifier circuit helpers
-pub use inner_stark::{
-    HybridQueryWitness,
-    InnerStarkVerifierCircuit,
-    setup_inner_stark,
-    prove_inner_stark,
-    verify_inner_stark,
-    compute_inner_public_inputs,
-};
-pub use host_api::prove_outer_with_inner;

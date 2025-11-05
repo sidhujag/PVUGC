@@ -12,12 +12,12 @@
 use winterfell::Proof;
 use winter_math::FieldElement;
 use winter_math::fields::f64::BaseElement as GL;  // Goldilocks field
-use winter_crypto::{ElementHasher, Digest};  // Digest trait for as_bytes()
-use ark_ff::PrimeField;
+use winter_crypto::{ElementHasher, Digest, RandomCoin};  // RandomCoin for DefaultRandomCoin::new
 use crate::inner_stark_full::{
     FullStarkVerifierCircuit, AirParams, TraceQuery, CompQuery,
     FriLayerQueries, FriQuery,
 };
+use crate::gadgets::fri::FriTerminalKind;
 use crate::outer_compressed::InnerFr;
 
 extern crate alloc;  // For BTreeMap and Vec
@@ -46,6 +46,14 @@ where
     let num_queries = proof.num_unique_queries as usize;
     
     eprintln!("Parsing commitments: num_trace_segments={}, num_fri_layers={}", num_trace_segments, num_fri_layers);
+    
+    // Extract FS context seed for transcript alignment (Winterfell 0.13.x)
+    use winter_math::ToElements;
+    let fs_context_seed_gl: Vec<u64> = proof.context
+        .to_elements()
+        .into_iter()
+        .map(|e: GL| e.as_int())
+        .collect();
     
     let (trace_commitments, comp_commitment, fri_commitments) = proof.commitments
         .clone()
@@ -145,18 +153,32 @@ where
         &query_positions,  // Pass main query positions
     );
     
-    // Compute statement hash
+    // Parse FRI remainder coefficients depending on terminal kind
+    let fri_remainder_coeffs: Vec<u64> = match air_params.fri_terminal {
+        FriTerminalKind::Poly { .. } => {
+            // Parse remainder from FriProof (coefficients in GL), low->high order
+            let coeffs_gl: Vec<E> = proof.fri_proof.clone()
+                .parse_remainder::<E>()
+                .unwrap_or_else(|_| Vec::new());
+            coeffs_gl.iter().map(|e| e.as_int()).collect()
+        }
+        FriTerminalKind::Constant => Vec::new(),
+    };
+    
+    // Compute statement hash (including position commitment!)
     let statement_hash = compute_statement_hash(
         &trace_commitment_le32,
         &comp_commitment_le32,
         &fri_commitments_le32,
         &ood_commitment_le32,
         &pub_inputs_u64,
+        &query_positions,  // Bind positions to prevent adversarial selection!
     );
     
     FullStarkVerifierCircuit {
         statement_hash,
         stark_pub_inputs: pub_inputs_u64,
+        fs_context_seed_gl,
         trace_commitment_le32,
         comp_commitment_le32,
         fri_commitments_le32,
@@ -168,6 +190,7 @@ where
         ood_trace_next,
         ood_comp,
         fri_layers,
+        fri_remainder_coeffs,
         air_params,
     }
 }
@@ -317,7 +340,7 @@ where
     let fold_shift = (folding_factor as f64).log2() as usize;  // For binary FRI, this is 1
     let mut layer_positions = main_query_positions.to_vec();
     
-    for (layer_idx, (query_vals, batch_proof)) in layer_queries.iter().zip(&layer_proofs).enumerate() {
+    for (_layer_idx, (query_vals, batch_proof)) in layer_queries.iter().zip(&layer_proofs).enumerate() {
         // Fold positions for this layer
         layer_positions = layer_positions.iter().map(|&p| p >> fold_shift).collect();
         let mut folded_positions = layer_positions.clone();
@@ -400,15 +423,33 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
     digest.as_bytes()
 }
 
-/// Compute statement hash binding all public data
+/// Poseidon commit to positions (off-chain, matches in-circuit)
+fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
+    use ark_crypto_primitives::sponge::{CryptographicSponge, poseidon::PoseidonSponge};
+    use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    
+    let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
+    for &pos in positions {
+        let b = (pos as u64).to_le_bytes();
+        let mut val = 0u64;
+        for (i, &byte) in b.iter().enumerate() {
+            val |= (byte as u64) << (8 * i);
+        }
+        sponge.absorb(&InnerFr::from(val));
+    }
+    sponge.squeeze_field_elements::<InnerFr>(1)[0]
+}
+
+/// Compute statement hash binding all public data (including positions!)
 fn compute_statement_hash(
     trace_root: &[u8; 32],
     comp_root: &[u8; 32],
     fri_roots: &[[u8; 32]],
     ood_commit: &[u8; 32],
     pub_inputs: &[u64],
+    query_positions: &[usize],  // CRITICAL: Binds positions!
 ) -> InnerFr {
-    use ark_crypto_primitives::sponge::{Absorb, CryptographicSponge};
+    use ark_crypto_primitives::sponge::{CryptographicSponge};
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     
@@ -444,6 +485,10 @@ fn compute_statement_hash(
         hasher.absorb(&InnerFr::from(*pub_in));
     }
     
+    // CRITICAL: Use the *same* positions commitment as the circuit
+    let pos_commit = poseidon_commit_positions_offchain(query_positions);
+    hasher.absorb(&pos_commit);
+    
     let hash = hasher.squeeze_field_elements::<InnerFr>(1);
     hash[0]
 }
@@ -456,7 +501,7 @@ fn derive_query_positions<H: ElementHasher<BaseField = GL>>(
     fri_commitments: &[H::Digest],
     lde_domain_size: usize,
 ) -> Vec<usize> {
-    use winter_crypto::{Hasher, RandomCoin, DefaultRandomCoin};
+    use winter_crypto::{DefaultRandomCoin};
     use winter_math::ToElements;
     
     // 1. Initialize coin with context elements
@@ -506,7 +551,6 @@ fn extract_paths_from_batch<H: ElementHasher<BaseField = GL>>(
     indexes: &[usize],
 ) -> Vec<(H::Digest, Vec<H::Digest>)> {
     use alloc::collections::BTreeMap;
-    use winter_crypto::Hasher;
     
     let depth = proof.depth as usize;
     let num_leaves = 1usize << depth;

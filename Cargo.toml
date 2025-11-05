@@ -36,13 +36,13 @@ ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
 ark-crypto-primitives = "0.5"
-winterfell = { version = "0.13.1", features = ["pvugc-hooks"] } # Patched below
-# Direct access to Winterfell internals for witness extraction and full verifier
-winter-crypto = { version = "0.13.1", path = "winterfell-pvugc/crypto" }
-winter-math = { version = "0.13.1", path = "winterfell-pvugc/math" }
-winter-air = { version = "0.13.1", path = "winterfell-pvugc/air" }
-winter-fri = { version = "0.13.1", path = "winterfell-pvugc/fri" }
-winter-verifier = { version = "0.13.1", path = "winterfell-pvugc/verifier", features = ["pvugc-hooks"] }
+# Use released Winterfell without modifications
+winterfell = "0.13.1"
+winter-crypto = "0.13.1"
+winter-math = "0.13.1"
+winter-air = "0.13.1"
+winter-fri = "0.13.1"
+winter-verifier = "0.13.1"
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
 
@@ -69,14 +69,3 @@ opt-level = 3
 [dev-dependencies]
 tracing = "0.1"
 tracing-subscriber = "=0.2.25"
-
-[patch.crates-io]
-# Use our modified Winterfell with PVUGC witness extraction hooks
-winterfell = { path = "winterfell-pvugc/winterfell", features = ["pvugc-hooks"] }
-winter-crypto = { path = "winterfell-pvugc/crypto" }
-winter-math = { path = "winterfell-pvugc/math" }
-winter-utils = { path = "winterfell-pvugc/utils/core" }
-winter-air = { path = "winterfell-pvugc/air" }
-winter-prover = { path = "winterfell-pvugc/prover" }
-winter-verifier = { path = "winterfell-pvugc/verifier", features = ["pvugc-hooks"] }
-winter-fri = { path = "winterfell-pvugc/fri", features = ["pvugc-hooks"] }

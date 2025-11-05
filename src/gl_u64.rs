@@ -34,7 +34,8 @@ pub fn gl_mul(a: u64, b: u64) -> u64 {
 
 #[inline]
 pub fn gl_inv(a: u64) -> u64 {
-    // a^{-1} mod p via extended Euclid (a!=0 in our usage)
+    // a^{-1} mod p via extended Euclid. If a==0 return 0 (constraints will fail elsewhere).
+    if a == 0 { return 0; }
     let mut t: i128 = 0;
     let mut new_t: i128 = 1;
     let mut r: i128 = P_GL as i128;
@@ -48,16 +49,39 @@ pub fn gl_inv(a: u64) -> u64 {
     t as u64
 }
 
-/// Compute the signed quotient q in Z such that lhs - rhs = q * p_GL.
-/// Returns (q_plus, q_minus) with q = q_plus - q_minus, each u64.
+/// Convert InnerFr to u128 (low 128 bits). Safe for our use because
+/// all GL-native products and sums we feed here are < 2^128.
 #[inline]
-pub fn gl_congruence_quotient(lhs_u128: u128, rhs_u128: u128) -> (u64, u64) {
-    let delta = lhs_u128 as i128 - rhs_u128 as i128;
-    if delta >= 0 {
-        (((delta as u128) / P_GL) as u64, 0u64)
-    } else {
-        (0u64, (((-delta) as u128) / P_GL) as u64)
+pub fn fr_to_u128(fr: InnerFr) -> u128 {
+    let bytes = fr.into_bigint().to_bytes_le();
+    let mut val: u128 = 0;
+    for (i, &b) in bytes.iter().enumerate().take(16) {
+        val |= (b as u128) << (8 * i);
     }
+    val
+}
+
+/// Compute the *true* Euclidean quotient q in Z such that:
+///   lhs - rhs = q * P_GL
+/// Return (q_plus, q_minus) with q = q_plus - q_minus, q_plus,q_minus ∈ [0, 2^64-1].
+/// If congruence doesn't actually hold, constraints will fail; we just produce
+/// the Euclidean quotient from the integer difference.
+#[inline]
+pub fn quotient_from_fr_difference(lhs: InnerFr, rhs: InnerFr) -> (u64, u64) {
+    let l = fr_to_u128(lhs);
+    let r = fr_to_u128(rhs);
+    
+    // Avoid i128 cast overflow: do subtraction in u128 with explicit sign handling
+    let (diff, neg) = if l >= r {
+        (l - r, false)
+    } else {
+        (r - l, true)
+    };
+    
+    let q_abs = diff / P_GL;                      // floor division; fits in 64 bits
+    debug_assert!(q_abs <= u64::MAX as u128, "quotient too large: {}", q_abs);
+    let q_abs_u64 = q_abs as u64;
+    if neg { (0, q_abs_u64) } else { (q_abs_u64, 0) }
 }
 
 /// Convert InnerFr to u64 mod p_GL (canonical reduction)
@@ -94,12 +118,34 @@ mod tests {
     }
     
     #[test]
+    fn test_fr_to_gl_u64() {
+        // Test conversion of small values
+        let fr = InnerFr::from(12345u64);
+        let gl = fr_to_gl_u64(fr);
+        assert_eq!(gl, 12345u64);
+        
+        // Test that values mod p_GL
+        let fr_large = InnerFr::from((P_GL + 100) as u64);
+        let gl_large = fr_to_gl_u64(fr_large);
+        assert_eq!(gl_large, 100u64);  // Should reduce mod p_GL
+    }
+    
+    #[test]
     fn test_quotient() {
-        let lhs = 100u128;
-        let rhs = 50u128;
-        let (q_p, q_m) = gl_congruence_quotient(lhs, rhs);
+        let lhs_fr = InnerFr::from(100u64);
+        let rhs_fr = InnerFr::from(50u64);
+        let (q_p, q_m) = quotient_from_fr_difference(lhs_fr, rhs_fr);
         assert_eq!(q_p, 0);  // delta = 50, q = 50 / p_GL = 0
         assert_eq!(q_m, 0);
+        
+        // Test with larger difference requiring quotient
+        let lhs_big = InnerFr::from(P_GL as u64);
+        let rhs_small = InnerFr::from(1u64);
+        let (q_p2, q_m2) = quotient_from_fr_difference(lhs_big, rhs_small);
+        // (P_GL - 1) / P_GL = 0 with remainder
+        assert_eq!(q_p2, 0);
+        assert_eq!(q_m2, 0);
     }
 }
+
 

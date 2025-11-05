@@ -38,16 +38,18 @@
 //! This is 4× the hybrid approach but **eliminates all witness extraction complexity**.
 //! The outer BW6-761 compression reduces this to ~40 PVUGC columns regardless.
 
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_r1cs_std::prelude::*;
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError, ConstraintSynthesizer};
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_ff::Field;  // For .inverse() method
 use crate::outer_compressed::InnerFr;
-use crate::fs::rpo_gl_gadget::{RpoGlSpongeVar, Rpo256Var};
-use winter_math::fields::f64::BaseElement as GL;  // Goldilocks field for domain computations
+use crate::gadgets::rpo_gl::{Rpo256GlVar, RpoParamsGL};
+use crate::gadgets::utils::digest32_to_gl4;
+use crate::gadgets::gl_range::{gl_enforce_nonzero_and_inv, gl_mul_var};
+use crate::gadgets::gl_range::gl_alloc_u64_vec;
+use crate::gadgets::combiner::{CombinerKind, combiner_weights};
 
 // Use GL type alias for non-native Goldilocks operations in Fr377
-type FpGLVar = FpVar<InnerFr>;
+pub type FpGLVar = FpVar<InnerFr>;
 
 /// AIR parameters needed for verification (constants, not witnesses)
 #[derive(Clone, Debug)]
@@ -59,6 +61,12 @@ pub struct AirParams {
     pub num_queries: usize,
     pub fri_folding_factor: usize,
     pub fri_num_layers: usize,
+    pub lde_generator: u64,      // GL element (usually 7 for Goldilocks)
+    pub domain_offset: u64,      // GL element (usually 1)
+    pub g_lde: u64,              // LDE domain generator (computed)
+    pub combiner_kind: CombinerKind,
+    pub fri_terminal: crate::gadgets::fri::FriTerminalKind,  // Constant or Poly{deg}
+    pub num_constraint_coeffs: usize,  // Number of constraint composition coefficients
 }
 
 /// Full STARK verifier circuit
@@ -72,6 +80,9 @@ pub struct FullStarkVerifierCircuit {
     
     // STARK public inputs (to bind into statement hash)
     pub stark_pub_inputs: Vec<u64>,     // STARK's public inputs
+    
+    // Fiat-Shamir context seed (for transcript alignment)
+    pub fs_context_seed_gl: Vec<u64>,   // proof.context.to_elements().as_int()
     
     // Commitments (witness, but bound to public hash)
     pub trace_commitment_le32: [u8; 32],
@@ -91,6 +102,9 @@ pub struct FullStarkVerifierCircuit {
     
     // FRI proof (witness)
     pub fri_layers: Vec<FriLayerQueries>,  // Per-layer fold data
+    
+    // FRI remainder coefficients (empty when terminal = Constant)
+    pub fri_remainder_coeffs: Vec<u64>,
     
     // AIR parameters (constants)
     pub air_params: AirParams,
@@ -180,31 +194,31 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             hasher.absorb(&FpVar::constant(InnerFr::from(*pub_in)))?;
         }
         
+        // CRITICAL: Commit to query positions and absorb (prevents adversarial positions!)
+        let pos_commit = commit_positions_poseidon(cs.clone(), &self.query_positions)?;
+        hasher.absorb(&pos_commit)?;
+        
         let computed_hash = hasher.squeeze_field_elements(1)?;
         computed_hash[0].enforce_equal(&statement_hash_var)?;
         
-        // STEP 1.5: Verify OOD frame commitment
-        // Hash OOD frame and verify it matches ood_commitment
-        let mut ood_hasher = Rpo256Var::new(cs.clone())?;
-        let mut ood_elements = Vec::new();
-        for v in &self.ood_trace_current {
-            ood_elements.push(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v)))?);
-        }
-        for v in &self.ood_trace_next {
-            ood_elements.push(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v)))?);
-        }
-        for v in &self.ood_comp {
-            ood_elements.push(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v)))?);
-        }
+        // STEP 1.5: Verify OOD frame commitment using stateless GL-native RPO
+        use crate::gadgets::rpo_gl::rpo_hash_elements_gl;
+        let rpo_params = RpoParamsGL::default();
         
-        let ood_digest = ood_hasher.hash_elements(&ood_elements)?;
+        // Allocate all OOD values with range checks
+        let mut ood_elements = Vec::new();
+        ood_elements.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_trace_current)?);
+        ood_elements.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_trace_next)?);
+        ood_elements.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_comp)?);
+        
+        let ood_digest = rpo_hash_elements_gl(cs.clone(), &rpo_params, &ood_elements)?;
         let ood_commit_gl = digest32_to_gl4(&ood_commit_bytes)?;
         for i in 0..4 {
-            ood_digest[i].enforce_equal(&ood_commit_gl[i])?;
+            enforce_gl_eq(&ood_digest[i], &ood_commit_gl[i])?;
         }
         
         // STEP 2: Verify trace Merkle paths
-        for (q_idx, trace_q) in self.trace_queries.iter().enumerate() {
+        for (_q_idx, trace_q) in self.trace_queries.iter().enumerate() {
             verify_trace_query(cs.clone(), trace_q, &trace_root_bytes)?;
         }
         
@@ -220,13 +234,18 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             self.air_params.comp_width
         };
         
-        // STEP 4: Derive FS challenges in-circuit
-        let (z, deep_coeffs, fri_betas) = derive_fs_challenges_in_circuit(
+        // STEP 4: Derive FS challenges in-circuit (corrected transcript order)
+        let trace_root_vecs: Vec<Vec<UInt8<InnerFr>>> = vec![trace_root_bytes.clone()];
+        let (z, deep_coeffs, fri_betas, rho) = derive_fs_challenges_in_circuit(
             cs.clone(),
-            &trace_root_bytes,
+            &trace_root_vecs,
             &comp_root_bytes,
             &fri_roots_bytes,
-            &ood_commit_bytes,
+            &self.fs_context_seed_gl,
+            &self.ood_trace_current,
+            &self.ood_trace_next,
+            &self.ood_comp,
+            self.air_params.num_constraint_coeffs,
             &self.air_params,
             comp_width,
         )?;
@@ -244,15 +263,48 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &deep_coeffs,
             &self.air_params,
             comp_width,
+            &rho,  // For combiner weights
         )?;
         
-        // STEP 6: Verify FRI multi-layer folding (uses comp_sums as layer 0)
-        verify_fri_folding(
+        // STEP 6: Verify FRI multi-layer folding using expert's gadget
+        // DYNAMIC: handles both L=0 and L>0
+        use crate::gadgets::fri::{verify_fri_layers_gl, FriLayerQueryGL, FriConfigGL};
+        
+        // Build FRI config from AirParams (as expert specified!)
+        let fri_cfg = FriConfigGL {
+            folding_factor: self.air_params.fri_folding_factor,
+            // Rp64_256 constants from Winterfell (threaded via Default)
+            params_rpo: RpoParamsGL::default(),
+            terminal: self.air_params.fri_terminal,
+            domain_offset: self.air_params.domain_offset,
+            g_lde: self.air_params.g_lde,
+        };
+        
+        // Convert FriLayerQueries to FriLayerQueryGL (with references)
+        let mut fri_layers_gl: Vec<FriLayerQueryGL> = Vec::new();
+        for (layer_idx, layer) in self.fri_layers.iter().enumerate() {
+            if layer_idx < fri_roots_bytes.len() && layer_idx < fri_betas.len() {
+                fri_layers_gl.push(FriLayerQueryGL {
+                    queries: &layer.queries,
+                    root_bytes: &fri_roots_bytes[layer_idx],
+                    beta: &fri_betas[layer_idx],
+                });
+            }
+        }
+        
+        // Pass remainder coefficients only when terminal is Poly
+        let remainder_coeffs: Option<&[u64]> = match self.air_params.fri_terminal {
+            crate::gadgets::fri::FriTerminalKind::Poly { .. } => Some(self.fri_remainder_coeffs.as_slice()),
+            _ => None,
+        };
+        
+        verify_fri_layers_gl(
             cs.clone(),
-            &self.fri_layers,
-            &fri_roots_bytes,
-            &fri_betas,
-            comp_sums,  // Feed DEEP result to FRI
+            &fri_cfg,
+            &self.query_positions,
+            comp_sums,
+            &fri_layers_gl,
+            remainder_coeffs,
         )?;
         
         Ok(())
@@ -261,8 +313,12 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
 
 /// Helper: Convert LE bytes to field element
 fn bytes_to_field_le(bytes: &[UInt8<InnerFr>]) -> Result<FpVar<InnerFr>, SynthesisError> {
-    let mut acc = FpVar::<InnerFr>::zero();
-    let mut pow = FpVar::<InnerFr>::one();
+    if bytes.is_empty() {
+        return Ok(FpVar::<InnerFr>::constant(InnerFr::from(0u64)));
+    }
+    let cs = bytes[0].cs();
+    let mut acc = FpVar::<InnerFr>::new_constant(cs.clone(), InnerFr::from(0u64))?;
+    let mut pow = FpVar::<InnerFr>::new_constant(cs.clone(), InnerFr::from(1u64))?;
     let base = FpVar::<InnerFr>::constant(InnerFr::from(256u64));
     for b in bytes {
         acc = &acc + &(&b.to_fp()? * &pow);
@@ -271,83 +327,115 @@ fn bytes_to_field_le(bytes: &[UInt8<InnerFr>]) -> Result<FpVar<InnerFr>, Synthes
     Ok(acc)
 }
 
+/// Commit query positions using Poseidon (binds them to statement)
+fn commit_positions_poseidon(
+    cs: ConstraintSystemRef<InnerFr>,
+    positions: &[usize],
+) -> Result<FpVar<InnerFr>, SynthesisError> {
+    use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
+    use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
+    use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    
+    let mut sponge = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
+    for &pos in positions {
+        let b = (pos as u64).to_le_bytes();
+        let bytes: Vec<UInt8<InnerFr>> = b.iter()
+            .map(|bb| UInt8::new_witness(cs.clone(), || Ok(*bb)))
+            .collect::<Result<_, _>>()?;
+        // Convert to field & absorb
+        let fe = bytes_to_field_le(&bytes)?;
+        sponge.absorb(&fe)?;
+    }
+    let out = sponge.squeeze_field_elements(1)?;
+    Ok(out[0].clone())
+}
+
 /// Enforce GL field equality: lhs == rhs (mod p_GL)
 ///
 /// CRITICAL: Operates in GL field, not Fr377!
 /// Enforces: lhs - rhs = (q_plus - q_minus) · p_GL
-fn enforce_gl_eq(
-    lhs: &FpGLVar,
-    rhs: &FpGLVar,
-    p_gl_const: &FpGLVar,
-) -> Result<(), SynthesisError> {
+pub fn enforce_gl_eq(lhs: &FpGLVar, rhs: &FpGLVar) -> Result<(), SynthesisError> {
+    enforce_gl_eq_with_bound(lhs, rhs, None)
+}
+
+/// Enforce GL field equality with optional quotient bound
+///
+/// If bound_q is Some(n), enforces |q| ≤ n (useful for round operations where q should be ≤1)
+pub fn enforce_gl_eq_with_bound(lhs: &FpGLVar, rhs: &FpGLVar, bound_q: Option<u64>) -> Result<(), SynthesisError> {
     use ark_r1cs_std::alloc::AllocVar;
     use ark_r1cs_std::uint64::UInt64;
-    use crate::gl_u64::{fr_to_gl_u64, gl_congruence_quotient};
+    use crate::gl_u64::{quotient_from_fr_difference, P_GL};
+    let cs = lhs.cs();
     
-    // Compute the true quotient from concrete witnesses
+    // Witness the true Euclidean quotient from concrete values (fits in 64 bits)
     let (q_plus_w, q_minus_w) = (|| -> Result<(u64, u64), SynthesisError> {
-        let lhs_v = lhs.value().unwrap_or_default();
-        let rhs_v = rhs.value().unwrap_or_default();
-        
-        // Convert to u64 mod p_GL
-        let lhs_gl = fr_to_gl_u64(lhs_v) as u128;
-        let rhs_gl = fr_to_gl_u64(rhs_v) as u128;
-        
-        Ok(gl_congruence_quotient(lhs_gl, rhs_gl))
+        let l = lhs.value().unwrap_or_default();
+        let r = rhs.value().unwrap_or_default();
+        Ok(quotient_from_fr_difference(l, r))
     })()?;
     
-    let q_plus = UInt64::new_witness(lhs.cs(), || Ok(q_plus_w))?;
-    let q_minus = UInt64::new_witness(lhs.cs(), || Ok(q_minus_w))?;
+    let q_plus = UInt64::new_witness(cs.clone(), || Ok(q_plus_w))?;
+    let q_minus = UInt64::new_witness(cs.clone(), || Ok(q_minus_w))?;
     
-    // Convert UInt64 to FpVar by accumulating bits
-    let bits_plus = q_plus.to_bits_le()?;
-    let mut q_plus_fp = FpGLVar::zero();
-    for (i, bit) in bits_plus.iter().enumerate().take(64) {
-        // Convert Boolean to FpVar: if bit then 1 else 0
-        let bit_fp = FpGLVar::conditionally_select(bit, 
-            &FpGLVar::constant(InnerFr::from(1u64)),
-            &FpGLVar::constant(InnerFr::from(0u64)))?;
-        let pow2 = FpGLVar::constant(InnerFr::from(1u64 << i));
-        q_plus_fp = &q_plus_fp + &(&bit_fp * &pow2);
+    // If bound specified, enforce it
+    if let Some(bound) = bound_q {
+        let zero = UInt64::constant(0);
+        
+        // (q_plus == 0 || q_minus == 0)
+        let qp_is_zero = q_plus.is_eq(&zero)?;
+        let qm_is_zero = q_minus.is_eq(&zero)?;
+        let one_is_zero = &qp_is_zero | &qm_is_zero;  // Use bitwise OR operator
+        one_is_zero.enforce_equal(&Boolean::constant(true))?;
+        
+        // q_plus ≤ bound && q_minus ≤ bound (enforced via bit check)
+        // For bound=1, ensure bits 1..64 are all zero
+        let qp_bits = q_plus.to_bits_le()?;
+        let qm_bits = q_minus.to_bits_le()?;
+        let bound_bits = if bound == 0 { 0 } else { (bound + 1).next_power_of_two().trailing_zeros() as usize };
+        for bit in qp_bits.iter().skip(bound_bits.max(1)) {
+            bit.enforce_equal(&Boolean::constant(false))?;
+        }
+        for bit in qm_bits.iter().skip(bound_bits.max(1)) {
+            bit.enforce_equal(&Boolean::constant(false))?;
+        }
     }
     
-    let bits_minus = q_minus.to_bits_le()?;
-    let mut q_minus_fp = FpGLVar::zero();
-    for (i, bit) in bits_minus.iter().enumerate().take(64) {
-        let bit_fp = FpGLVar::conditionally_select(bit,
-            &FpGLVar::constant(InnerFr::from(1u64)),
-            &FpGLVar::constant(InnerFr::from(0u64)))?;
-        let pow2 = FpGLVar::constant(InnerFr::from(1u64 << i));
-        q_minus_fp = &q_minus_fp + &(&bit_fp * &pow2);
+    // Convert (q_plus - q_minus) to a field element
+    let q_plus_bits = q_plus.to_bits_le()?;
+    let q_minus_bits = q_minus.to_bits_le()?;
+    let one = FpGLVar::constant(InnerFr::from(1u64));
+    let zero = FpGLVar::constant(InnerFr::from(0u64));
+    
+    // Build q_plus_fp from first bit to get proper CS attachment
+    let mut q_plus_fp = if q_plus_bits.is_empty() {
+        FpGLVar::constant(InnerFr::from(0u64))
+    } else {
+        FpGLVar::conditionally_select(&q_plus_bits[0], &one, &zero)?
+    };
+    for (i, bit) in q_plus_bits.iter().enumerate().skip(1) {
+        let bit_fp = FpGLVar::conditionally_select(bit, &one, &zero)?;
+        q_plus_fp += bit_fp * FpGLVar::constant(InnerFr::from(1u64 << i));
     }
     
+    // Build q_minus_fp similarly
+    let mut q_minus_fp = if q_minus_bits.is_empty() {
+        FpGLVar::constant(InnerFr::from(0u64))
+    } else {
+        FpGLVar::conditionally_select(&q_minus_bits[0], &one, &zero)?
+    };
+    for (i, bit) in q_minus_bits.iter().enumerate().skip(1) {
+        let bit_fp = FpGLVar::conditionally_select(bit, &one, &zero)?;
+        q_minus_fp += bit_fp * FpGLVar::constant(InnerFr::from(1u64 << i));
+    }
     let q_signed = q_plus_fp - q_minus_fp;
     
-    (lhs - rhs).enforce_equal(&(&q_signed * p_gl_const))?;
+    let p_gl_const = FpGLVar::constant(InnerFr::from(P_GL as u64));
+    (lhs - rhs).enforce_equal(&(q_signed * p_gl_const))?;
     Ok(())
 }
 
 /// Convert 32 bytes to 4 GL field elements (8 bytes each, LE)
-fn digest32_to_gl4(bytes32: &[UInt8<InnerFr>]) -> Result<[FpGLVar;4], SynthesisError> {
-    assert!(bytes32.len() == 32);
-    let a0 = bytes_to_gl(&bytes32[0..8])?;
-    let a1 = bytes_to_gl(&bytes32[8..16])?;
-    let a2 = bytes_to_gl(&bytes32[16..24])?;
-    let a3 = bytes_to_gl(&bytes32[24..32])?;
-    Ok([a0, a1, a2, a3])
-}
-
-/// Convert 8 LE bytes to GL field element
-fn bytes_to_gl(bytes: &[UInt8<InnerFr>]) -> Result<FpGLVar, SynthesisError> {
-    let mut acc = FpGLVar::zero();
-    let mut pow = FpGLVar::one();
-    let base = FpGLVar::constant(InnerFr::from(256u64));
-    for b in bytes {
-        acc = &acc + &(&b.to_fp()? * &pow);
-        pow = &pow * &base;
-    }
-    Ok(acc)
-}
+// digest32_to_gl4 moved to gadgets::utils
 
 /// Verify single trace query Merkle opening
 fn verify_trace_query(
@@ -355,17 +443,19 @@ fn verify_trace_query(
     query: &TraceQuery,
     root_bytes: &[UInt8<InnerFr>],
 ) -> Result<(), SynthesisError> {
+    use crate::gadgets::rpo_gl::{rpo_hash_elements_gl, rpo_merge_gl};
     
-    // Hash query values using RPO-256
-    let values_gl: Vec<FpGLVar> = query.values.iter()
-        .map(|v| FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v))))
-        .collect::<Result<_, _>>()?;
+    // Hash query values using stateless GL-native RPO-256
+    let values_gl = gl_alloc_u64_vec(cs.clone(), &query.values)?;
     
-    let mut rpo = Rpo256Var::new(cs.clone())?;
-    let leaf_digest = rpo.hash_elements(&values_gl)?;
+    let rpo_params = RpoParamsGL::default();
+    let leaf_digest = rpo_hash_elements_gl(cs.clone(), &rpo_params, &values_gl)?;
+    if leaf_digest.len() != 4 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
     
-    // Verify Merkle path
-    let mut current = leaf_digest;
+    // Verify Merkle path using stateless GL-native merge (fresh RPO per merge!)
+    let mut current_vec = leaf_digest;
     for (sib_bytes, is_right) in query.merkle_path.iter().zip(&query.path_positions) {
         let sib_bytes_vars: Vec<UInt8<InnerFr>> = sib_bytes.iter()
             .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
@@ -376,25 +466,25 @@ fn verify_trace_query(
         
         // Compute parent: if current is right → parent(sib, current), else parent(current, sib)
         let left = [
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[0], &current[0])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[1], &current[1])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[2], &current[2])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[3], &current[3])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[0], &current_vec[0])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[1], &current_vec[1])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[2], &current_vec[2])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[3], &current_vec[3])?,
         ];
         let right = [
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[0], &sib[0])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[1], &sib[1])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[2], &sib[2])?,
-            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[3], &sib[3])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current_vec[0], &sib[0])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current_vec[1], &sib[1])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current_vec[2], &sib[2])?,
+            FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current_vec[3], &sib[3])?,
         ];
         
-        current = rpo.merge(&left, &right)?;
+        current_vec = rpo_merge_gl(cs.clone(), &rpo_params, &left, &right)?;
     }
     
-    // Verify root matches
+    // Verify root matches (GL semantics)
     let root_gl = digest32_to_gl4(root_bytes)?;
     for i in 0..4 {
-        current[i].enforce_equal(&root_gl[i])?;
+        enforce_gl_eq(&current_vec[i], &root_gl[i])?;
     }
     
     Ok(())
@@ -406,15 +496,18 @@ fn verify_comp_query(
     query: &CompQuery,
     root_bytes: &[UInt8<InnerFr>],
 ) -> Result<(), SynthesisError> {
-    // Hash query values using RPO-256
-    let values_gl: Vec<FpGLVar> = query.values.iter()
-        .map(|v| FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v))))
-        .collect::<Result<_, _>>()?;
+    use crate::gadgets::rpo_gl::{rpo_hash_elements_gl, rpo_merge_gl};
     
-    let mut rpo = Rpo256Var::new(cs.clone())?;
-    let leaf_digest = rpo.hash_elements(&values_gl)?;
+    // Hash query values using stateless GL-native RPO-256
+    let values_gl = gl_alloc_u64_vec(cs.clone(), &query.values)?;
     
-    // Verify Merkle path
+    let rpo_params = RpoParamsGL::default();
+    let leaf_digest = rpo_hash_elements_gl(cs.clone(), &rpo_params, &values_gl)?;
+    if leaf_digest.len() != 4 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    
+    // Verify Merkle path using stateless GL-native merge (fresh RPO per merge!)
     let mut current = leaf_digest;
     for (sib_bytes, is_right) in query.merkle_path.iter().zip(&query.path_positions) {
         let sib_bytes_vars: Vec<UInt8<InnerFr>> = sib_bytes.iter()
@@ -424,26 +517,26 @@ fn verify_comp_query(
         
         let is_right_bool = Boolean::new_witness(cs.clone(), || Ok(*is_right))?;
         
-        let left = [
+        let left_arr = [
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[0], &current[0])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[1], &current[1])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[2], &current[2])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[3], &current[3])?,
         ];
-        let right = [
+        let right_arr = [
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[0], &sib[0])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[1], &sib[1])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[2], &sib[2])?,
             FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[3], &sib[3])?,
         ];
         
-        current = rpo.merge(&left, &right)?;
+        current = rpo_merge_gl(cs.clone(), &rpo_params, &left_arr, &right_arr)?;
     }
     
-    // Verify root matches
+    // Verify root matches (GL semantics)
     let root_gl = digest32_to_gl4(root_bytes)?;
     for i in 0..4 {
-        current[i].enforce_equal(&root_gl[i])?;
+        enforce_gl_eq(&current[i], &root_gl[i])?;
     }
     
     Ok(())
@@ -451,81 +544,83 @@ fn verify_comp_query(
 
 /// Derive Fiat-Shamir challenges in-circuit
 ///
-/// Follows Winterfell's exact FS transcript order:
-/// 1. Absorb trace commitment → derive trace randomness (for aux segments)
-/// 2. Absorb comp commitment → derive DEEP coefficients
-/// 3. Absorb OOD commitment → derive z (OOD point)
-/// 4. Absorb FRI commitments → derive beta for each layer
-/// 5. Derive query seed (with PoW grinding)
+/// CORRECTED to match Winterfell 0.13.x exactly:
+/// 0. Seed with context elements
+/// 1. Reseed with trace commitment(s) → draw constraint composition coeffs
+/// 2. Reseed with comp commitment → draw z
+/// 3. Reseed with OOD frames → draw DEEP coeffs + rho
+/// 4. Reseed with FRI commitments → draw beta for each layer
+/// 5. Query positions derived off-circuit (bound via Poseidon commitment)
 fn derive_fs_challenges_in_circuit(
     cs: ConstraintSystemRef<InnerFr>,
-    trace_root: &[UInt8<InnerFr>],
+    trace_roots: &[Vec<UInt8<InnerFr>>],  // Support multiple trace segments
     comp_root: &[UInt8<InnerFr>],
     fri_roots: &[Vec<UInt8<InnerFr>>],
-    ood_commit: &[UInt8<InnerFr>],
+    fs_context_seed_gl: &[u64],           // proof.context.to_elements().as_int()
+    ood_trace_current: &[u64],
+    ood_trace_next: &[u64],
+    ood_comp: &[u64],
+    num_constraint_coeffs: usize,         // proof.context.num_constraints()
     air_params: &AirParams,
     comp_width: usize,
-) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>), SynthesisError> {
-    // Use RPO-GL sponge matching Winterfell's RandomCoin
-    let mut fs = RpoGlSpongeVar::new(cs.clone())?;
+) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>, FpGLVar), SynthesisError> {
+    use crate::gadgets::gl_range::gl_alloc_u64_vec;
+    use crate::gadgets::utils::digest32_to_gl4;
     
-    // Absorb trace commitment
-    fs.absorb_bytes(trace_root)?;
+    // GL-native RPO coin with Winterfell Rp64_256 params
+    let mut fs = Rpo256GlVar::new(cs.clone(), RpoParamsGL::default())?;
+
+    // 0) Seed with context elements
+    let ctx = gl_alloc_u64_vec(cs.clone(), fs_context_seed_gl)?;
+    fs.absorb(&ctx)?;
     fs.permute()?;
-    
-    // Absorb composition commitment  
-    fs.absorb_bytes(comp_root)?;
-    fs.permute()?;
-    
-    // Squeeze DEEP coefficients
-    // For typical first-order AIR:
-    // - Trace uses shifts {0, 1} (current, next) → trace_width × 2
-    // - Composition uses shift {0} only → comp_width × 1
-    let trace_deep_terms = air_params.trace_width * 2;  // Shifts {0, 1}
-    let comp_deep_terms = comp_width * 1;    // Shift {0}, use actual comp_width
-    let num_deep_coeffs = trace_deep_terms + comp_deep_terms;
-    
-    let mut deep_coeffs = Vec::with_capacity(num_deep_coeffs);
-    for _ in 0..num_deep_coeffs {
-        deep_coeffs.push(fs.squeeze()?);
+
+    // 1) Reseed with each trace commitment, then draw constraint-comp coefficients
+    for tr in trace_roots {
+        let tr_elems = digest32_to_gl4(tr)?;
+        fs.absorb(&tr_elems)?;
+        fs.permute()?;
     }
-    
-    // Absorb OOD commitment (binds OOD frame)
-    fs.absorb_bytes(ood_commit)?;
+    // Draw the exact number of constraint composition coefficients (ignored by the circuit,
+    // but must be consumed to keep the transcript aligned).
+    for _ in 0..num_constraint_coeffs {
+        let _ = fs.squeeze(1)?; // burn
+    }
+
+    // 2) Reseed with composition commitment → draw z
+    let comp_elems = digest32_to_gl4(comp_root)?;
+    fs.absorb(&comp_elems)?;
     fs.permute()?;
-    
-    // Squeeze z (OOD evaluation point)
-    let z = fs.squeeze()?;
-    
-    // Absorb FRI layer commitments and derive betas
+    let z = fs.squeeze(1)?.remove(0);
+
+    // 3) Reseed with OOD frames (trace current/next and OOD constraint evals), then draw DEEP coeffs + rho
+    let mut ood_elems = Vec::new();
+    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_trace_current)?);
+    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_trace_next)?);
+    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_comp)?);
+    fs.absorb(&ood_elems)?;
+    fs.permute()?;
+
+    // DEEP coeffs: trace_width * {0,1} + comp_width * {0}
+    let num_deep = air_params.trace_width * 2 + comp_width;
+    let mut deep_coeffs = Vec::with_capacity(num_deep);
+    for _ in 0..num_deep {
+        deep_coeffs.push(fs.squeeze(1)?.remove(0));
+    }
+    // RandomRho (combiner)
+    let rho = fs.squeeze(1)?.remove(0);
+
+    // 4) Reseed with FRI commitments → draw one beta per layer
     let mut fri_betas = Vec::with_capacity(fri_roots.len());
     for fri_root in fri_roots {
-        fs.absorb_bytes(fri_root)?;
+        let fr = digest32_to_gl4(fri_root)?;
+        fs.absorb(&fr)?;
         fs.permute()?;
-        fri_betas.push(fs.squeeze()?);
+        fri_betas.push(fs.squeeze(1)?.remove(0));
     }
-    
-    // CRITICAL: Derive query seed for position derivation
-    // This binds query positions to the FS transcript (prevents adversarial positions!)
-    
-    // The query seed is the FS state AFTER all FRI betas
-    // Positions are derived via: hash(seed || pow_nonce || counter) & mask
-    // We can't do full in-circuit derivation (would need RPO hashing in-circuit per query)
-    // But we CAN verify positions are bound by making them part of public input or
-    // deriving a commitment to them from FS
-    
-    // For now: Return the FS state as a "query seed" that can be used to verify positions
-    let query_seed = fs.squeeze()?;
-    
-    Ok((z, deep_coeffs, fri_betas))
-}
 
-// TODO: Add query position verification gadget
-// Either: (1) derive positions in-circuit (expensive), or
-//         (2) commit to positions and bind to FS, or  
-//         (3) make positions public inputs (but this breaks constant PVUGC size!)
-// 
-// SECURITY: Currently positions are free witnesses - MUST be fixed before production!
+    Ok((z, deep_coeffs, fri_betas, rho))
+}
 
 /// Verify DEEP composition polynomial
 ///
@@ -542,29 +637,19 @@ fn verify_deep_composition(
     z: &FpGLVar,
     deep_coeffs: &[FpGLVar],
     air_params: &AirParams,
-    comp_width: usize,
+    _comp_width: usize,
+    rho: &FpGLVar,  // For combiner weights
 ) -> Result<Vec<FpGLVar>, SynthesisError> {  // Return comp_sum per query for FRI!
-    let g_trace = FpGLVar::constant(InnerFr::from(7u64));  // Goldilocks generator
-    let p_gl_const = FpGLVar::constant(InnerFr::from(18446744069414584321u64));  // GL modulus
+    let _p_gl_const = FpGLVar::constant(InnerFr::from(18446744069414584321u64));  // GL modulus
     
     let mut comp_sums = Vec::with_capacity(trace_queries.len());
     
-    // LDE domain parameters
-    // For Goldilocks with trace_len=16, blowup=8 → LDE domain size = 128 = 2^7
+    // LDE domain parameters from AirParams (as expert specified!)
     let lde_domain_size = air_params.trace_len * air_params.lde_blowup;
     let m = (lde_domain_size as f64).log2() as usize;  // m = log2(N)
-    let domain_offset = FpGLVar::constant(InnerFr::from(1u64));  // Standard offset
-    
-    // Precompute g_lde powers: g_lde^(2^k) for k=0..m-1
-    // g_lde = g_trace^trace_len (subgroup generator for LDE)
-    // For trace_len=16, g_lde = 7^16 mod p
-    let g_lde_u64 = {
-        use winter_math::FieldElement;
-        let g = GL::new(7);
-        let g_lde = g.exp((air_params.trace_len as u64).into());
-        g_lde.as_int()
-    };
-    let g_lde = FpGLVar::constant(InnerFr::from(g_lde_u64));
+    let domain_offset = FpGLVar::constant(InnerFr::from(air_params.domain_offset));
+    let g_lde = FpGLVar::constant(InnerFr::from(air_params.g_lde));
+    let g_trace = FpGLVar::constant(InnerFr::from(air_params.lde_generator));
     
     // Compute powers {g_lde^(2^k)} for bit decomposition
     let mut g_powers = vec![g_lde.clone()];  // g^1
@@ -572,6 +657,10 @@ fn verify_deep_composition(
         let prev = g_powers.last().unwrap();
         g_powers.push(prev * prev);  // g^(2^k) = (g^(2^(k-1)))^2
     }
+    
+    // Allocate OOD values ONCE (reuse across queries)
+    let ood_current = gl_alloc_u64_vec(cs.clone(), ood_trace_current)?;
+    let ood_next = gl_alloc_u64_vec(cs.clone(), ood_trace_next)?;
     
     // For each query:
     for (q_idx, (trace_q, comp_q)) in trace_queries.iter().zip(comp_queries.iter()).enumerate() {
@@ -587,24 +676,17 @@ fn verify_deep_composition(
         
         // Compute g_lde^position via conditional multiplies
         let mut result = domain_offset.clone();
+        let one = FpGLVar::constant(InnerFr::from(1u64));
         for (k, bit) in position_bits.iter().enumerate() {
             if k < g_powers.len() {
                 // If bit is 1: result *= g^(2^k), else: result *= 1
-                let multiplier = FpGLVar::conditionally_select(bit, &g_powers[k], &FpGLVar::one())?;
+                let multiplier = FpGLVar::conditionally_select(bit, &g_powers[k], &one)?;
                 result = result * &multiplier;
             }
         }
         
         // x = offset · g_lde^position
         let x = result;
-        
-        // Allocate OOD values
-        let ood_current: Vec<FpGLVar> = ood_trace_current.iter()
-            .map(|v| FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v))))
-            .collect::<Result<_, _>>()?;
-        let ood_next: Vec<FpGLVar> = ood_trace_next.iter()
-            .map(|v| FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*v))))
-            .collect::<Result<_, _>>()?;
         
         // DEEP must NOT be conditional - verify array sizes and fail if mismatched
         assert_eq!(ood_current.len(), trace_q.values.len(), 
@@ -613,50 +695,31 @@ fn verify_deep_composition(
             "OOD next size must match trace query size");
         
         // Compute DEEP: Σ γᵢ · (T(x) - T(z)) / (x - z·multᵢ)
-        let mut deep_sum = FpGLVar::zero();
+        let mut deep_sum = FpGLVar::new_constant(cs.clone(), InnerFr::from(0u64))?;
         
         for (col_idx, &t_x_u64) in trace_q.values.iter().enumerate() {
-            let t_x = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(t_x_u64)))?;
+            // Allocate trace value with GL range check
+            let (_u, t_x) = crate::gadgets::gl_range::gl_alloc_u64(cs.clone(), Some(t_x_u64))?;
             
-            // Term at z (mult=1): Enforce γ·(T(x)-T(z)) - term·(x-z) = q·p_GL (mod p_GL)
+            // Term at z (mult=1): enforce invertibility and compute term = diff * inv(den)
+            use crate::gadgets::gl_range::{gl_enforce_nonzero_and_inv, gl_mul_var};
             let diff_z = &t_x - &ood_current[col_idx];
             let den_z = &x - z;
-            
-            let term_z = FpGLVar::new_witness(cs.clone(), || {
-                use crate::gl_u64::{fr_to_gl_u64, gl_sub, gl_mul, gl_inv};
-                // Compute term = diff / den in GL field (proper u64 arithmetic!)
-                let diff_gl = fr_to_gl_u64(diff_z.value()?);
-                let den_gl = fr_to_gl_u64(den_z.value()?);
-                let term_gl = gl_mul(diff_gl, gl_inv(den_gl));
-                Ok(InnerFr::from(term_gl))
-            })?;
-            
+            let inv_z = gl_enforce_nonzero_and_inv(cs.clone(), &den_z)?;
+            let term_z = gl_mul_var(cs.clone(), &diff_z, &inv_z)?;
             let gamma_z = &deep_coeffs[col_idx * 2];
-            let lhs = gamma_z * &diff_z;
-            let rhs = &term_z * den_z;
-            enforce_gl_eq(&lhs, &rhs, &p_gl_const)?;
-            
-            deep_sum = deep_sum + &term_z;
+            // CRITICAL: Accumulate gamma * term (not just term!)
+            deep_sum = deep_sum + &(gamma_z * &term_z);
             
             // Term at z·g (mult=g): same pattern
             let diff_zg = &t_x - &ood_next[col_idx];
             let zg = z * &g_trace;
             let den_zg = &x - &zg;
-            
-            let term_zg = FpGLVar::new_witness(cs.clone(), || {
-                use crate::gl_u64::{fr_to_gl_u64, gl_mul, gl_inv};
-                let diff_gl = fr_to_gl_u64(diff_zg.value()?);
-                let den_gl = fr_to_gl_u64(den_zg.value()?);
-                let term_gl = gl_mul(diff_gl, gl_inv(den_gl));
-                Ok(InnerFr::from(term_gl))
-            })?;
-            
+            let inv_zg = gl_enforce_nonzero_and_inv(cs.clone(), &den_zg)?;
+            let term_zg = gl_mul_var(cs.clone(), &diff_zg, &inv_zg)?;
             let gamma_zg = &deep_coeffs[col_idx * 2 + 1];
-            let lhs_zg = gamma_zg * &diff_zg;
-            let rhs_zg = &term_zg * den_zg;
-            enforce_gl_eq(&lhs_zg, &rhs_zg, &p_gl_const)?;
-            
-            deep_sum = deep_sum + &term_zg;
+            // CRITICAL: Accumulate gamma * term (not just term!)
+            deep_sum = deep_sum + &(gamma_zg * &term_zg);
         }
         
         // Now add composition DEEP terms (shift {0} only)
@@ -667,40 +730,39 @@ fn verify_deep_composition(
                 panic!("Not enough DEEP coefficients: need {}, have {}", gamma_idx + 1, deep_coeffs.len());
             }
             
-            let c_x = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c_x_u64)))?;
+            // Allocate composition value with GL range check
+            let (_u, c_x) = crate::gadgets::gl_range::gl_alloc_u64(cs.clone(), Some(c_x_u64))?;
             
             // Composition uses shift {0} only
             if comp_idx < ood_comp.len() {
-                let c_z = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(ood_comp[comp_idx])))?;
+                let (_u, c_z) = crate::gadgets::gl_range::gl_alloc_u64(cs.clone(), Some(ood_comp[comp_idx]))?;
                 let diff = &c_x - &c_z;
                 let den = &x - z;
-                
-                let term = FpGLVar::new_witness(cs.clone(), || {
-                    use crate::gl_u64::{fr_to_gl_u64, gl_mul, gl_inv};
-                    let diff_gl = fr_to_gl_u64(diff.value()?);
-                    let den_gl = fr_to_gl_u64(den.value()?);
-                    let term_gl = gl_mul(diff_gl, gl_inv(den_gl));
-                    Ok(InnerFr::from(term_gl))
-                })?;
-                
+                let inv = gl_enforce_nonzero_and_inv(cs.clone(), &den)?;
+                let term = gl_mul_var(cs.clone(), &diff, &inv)?;
                 let gamma = &deep_coeffs[gamma_idx];
-                let lhs = gamma * &diff;
-                let rhs = &term * den;
-                enforce_gl_eq(&lhs, &rhs, &p_gl_const)?;
-                
-                deep_sum = deep_sum + &term;
+                // CRITICAL: Accumulate gamma * term (not just term!)
+                deep_sum = deep_sum + &(gamma * &term);
             }
         }
         
-        // CRITICAL: Compare DEEP sum to sum of Merkle-opened composition values (mod p_GL!)
-        let mut comp_sum = FpGLVar::zero();
-        for &c_val in &comp_q.values {
-            let c = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c_val)))?;
-            comp_sum = comp_sum + &c;
+        // CRITICAL: Weighted combiner H(x) = Σ w_i(x) * C_i(x)
+        let weights = combiner_weights(
+            air_params.combiner_kind,
+            comp_q.values.len(),
+            Some(&x),                     // for DegreeChunks; ignored for RandomRho
+            Some(rho),                    // for RandomRho; ignored for DegreeChunks
+        )?;
+        
+        // Weighted sum of composition columns (with GL range checks)
+        let mut comp_sum = FpGLVar::new_constant(cs.clone(), InnerFr::from(0u64))?;
+        for (c_val, w_i) in comp_q.values.iter().zip(weights.iter()) {
+            let (_u, c) = crate::gadgets::gl_range::gl_alloc_u64(cs.clone(), Some(*c_val))?;
+            comp_sum = comp_sum + &(w_i * c);
         }
         
         // Enforce equality mod p_GL (not Fr377!)
-        enforce_gl_eq(&deep_sum, &comp_sum, &p_gl_const)?;
+        enforce_gl_eq(&deep_sum, &comp_sum)?;
         
         // Save comp_sum for FRI
         comp_sums.push(comp_sum);
@@ -709,121 +771,5 @@ fn verify_deep_composition(
     Ok(comp_sums)
 }
 
-/// Verify FRI multi-layer folding
-///
-/// Verifies Winterfell's exact FRI protocol:
-/// - Layer-by-layer folding: v_lo + β·v_hi = v_next
-/// - Merkle commitment to each layer
-/// - Final layer is constant (or small enough to include directly)
-fn verify_fri_folding(
-    cs: ConstraintSystemRef<InnerFr>,
-    fri_layers: &[FriLayerQueries],
-    fri_roots: &[Vec<UInt8<InnerFr>>],
-    fri_betas: &[FpGLVar],
-    mut current: Vec<FpGLVar>,  // Initial values from DEEP
-) -> Result<(), SynthesisError> {
-    let p_gl_const = FpGLVar::constant(InnerFr::from(18446744069414584321u64));
-    // Verify each layer's folding equation and Merkle commitment
-    for (layer_idx, layer) in fri_layers.iter().enumerate() {
-        // Skip if no beta for this layer (shouldn't happen but be safe)
-        if layer_idx >= fri_betas.len() {
-            continue;
-        }
-        let beta = &fri_betas[layer_idx];
-        
-        // For each query in this layer:
-        for fri_q in &layer.queries {
-            let v_lo = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(fri_q.v_lo)))?;
-            let v_hi = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(fri_q.v_hi)))?;
-            
-            // Hash [v_lo, v_hi] using RPO-256 to get leaf digest
-            let mut rpo = Rpo256Var::new(cs.clone())?;
-            let leaf_digest = rpo.hash_elements(&vec![v_lo.clone(), v_hi.clone()])?;
-            
-            // Verify Merkle path to FRI layer root
-            let mut current = leaf_digest;
-            for (sib_bytes, is_right) in fri_q.merkle_path.iter().zip(&fri_q.path_positions) {
-                let sib_bytes_vars: Vec<UInt8<InnerFr>> = sib_bytes.iter()
-                    .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
-                    .collect::<Result<_, _>>()?;
-                let sib = digest32_to_gl4(&sib_bytes_vars)?;
-                
-                let is_right_bool = Boolean::new_witness(cs.clone(), || Ok(*is_right))?;
-                
-                let left = [
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[0], &current[0])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[1], &current[1])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[2], &current[2])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &sib[3], &current[3])?,
-                ];
-                let right = [
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[0], &sib[0])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[1], &sib[1])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[2], &sib[2])?,
-                    FpVar::<InnerFr>::conditionally_select(&is_right_bool, &current[3], &sib[3])?,
-                ];
-                
-                current = rpo.merge(&left, &right)?;
-            }
-            
-            // Verify root matches this layer's commitment
-            if layer_idx < fri_roots.len() {
-                let root_gl = digest32_to_gl4(&fri_roots[layer_idx])?;
-                for i in 0..4 {
-                    current[i].enforce_equal(&root_gl[i])?;
-                }
-            }
-            
-        }
-        
-        // Now perform consistency + fold for ALL queries in this layer
-        let mut next = Vec::with_capacity(layer.queries.len());
-        
-        for (q_idx, fri_q) in layer.queries.iter().enumerate() {
-            let v_lo = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(fri_q.v_lo)))?;
-            let v_hi = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(fri_q.v_hi)))?;
-            
-            // Consistency: current[q] should match v_lo or v_hi based on position parity
-            // The LSB of position tells us: even → v_lo, odd → v_hi
-            // This is encoded in path_positions[0] (the first bit when walking up the tree)
-            if q_idx < current.len() && !fri_q.path_positions.is_empty() {
-                let lsb = Boolean::new_witness(cs.clone(), || Ok(fri_q.path_positions[0]))?;
-                let selected = FpGLVar::conditionally_select(&lsb, &v_hi, &v_lo)?;
-                enforce_gl_eq(&current[q_idx], &selected, &p_gl_const)?;
-            }
-            
-            // Fold: next[q] = v_lo + β·v_hi (mod p_GL)
-            let folded = &v_lo + &(beta * &v_hi);
-            let v_next = FpGLVar::new_witness(cs.clone(), || {
-                use crate::gl_u64::{fr_to_gl_u64, gl_add, gl_mul};
-                let v_lo_gl = fr_to_gl_u64(v_lo.value()?);
-                let v_hi_gl = fr_to_gl_u64(v_hi.value()?);
-                let beta_gl = fr_to_gl_u64(beta.value()?);
-                let next_gl = gl_add(v_lo_gl, gl_mul(beta_gl, v_hi_gl));
-                Ok(InnerFr::from(next_gl))
-            })?;
-            
-            enforce_gl_eq(&folded, &v_next, &p_gl_const)?;
-            next.push(v_next);
-        }
-        
-        current = next;  // Advance to next layer
-    }
-    
-    // Terminal check: For fri_layers=0 case, current == comp_sums (already verified in DEEP)
-    // For fri_layers > 0, final current should match remainder polynomial
-    // Since our proof has fri_layers=0, this is satisfied
-    
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_full_stark_verifier_structure() {
-        // TODO: Basic smoke test with parsed proof
-    }
-}
+// OLD verify_fri_folding function deleted - replaced by expert's verify_fri_layers_gl gadget
 
