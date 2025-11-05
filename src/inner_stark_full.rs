@@ -187,6 +187,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         let computed_hash = hasher.squeeze_field_elements(1)?;
         computed_hash[0].enforce_equal(&statement_hash_var)?;
         
+        // DEBUG: Check constraint satisfaction after statement hash verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after statement hash verification");
+            }
+        }
+        
         // STEP 1.5: Verify OOD frame commitment using stateless GL-native RPO
         use crate::gadgets::rpo_gl::rpo_hash_elements_gl;
         let rpo_params = RpoParamsGL::default();
@@ -203,14 +211,38 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             enforce_gl_eq(&ood_digest[i], &ood_commit_gl[i])?;
         }
         
+        // DEBUG: Check constraint satisfaction after OOD frame commitment verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after OOD commitment verification");
+            }
+        }
+        
         // STEP 2: Verify trace Merkle paths
         for (_q_idx, trace_q) in self.trace_queries.iter().enumerate() {
             verify_trace_query(cs.clone(), trace_q, &trace_root_bytes)?;
         }
         
+        // DEBUG: Check constraint satisfaction after trace Merkle paths verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after trace Merkle paths verification");
+            }
+        }
+        
         // STEP 3: Verify composition Merkle paths
         for comp_q in &self.comp_queries {
             verify_comp_query(cs.clone(), comp_q, &comp_root_bytes)?;
+        }
+        
+        // DEBUG: Check constraint satisfaction after composition Merkle paths verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after composition Merkle paths verification");
+            }
         }
         
         // Infer comp_width from actual data
@@ -236,6 +268,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             comp_width,
         )?;
         
+        // DEBUG: Check constraint satisfaction after FS challenges derivation
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after FS challenges derivation");
+            }
+        }
+        
         // STEP 5: Verify DEEP composition (returns comp_sum per query)
         let comp_sums = verify_deep_composition(
             cs.clone(),
@@ -251,6 +291,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             comp_width,
             &rho,  // For combiner weights
         )?;
+        
+        // DEBUG: Check constraint satisfaction after DEEP composition verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after DEEP composition verification");
+            }
+        }
         
         // STEP 6: Verify FRI multi-layer folding using expert's gadget
         // DYNAMIC: handles both L=0 and L>0
@@ -292,6 +340,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &fri_layers_gl,
             remainder_coeffs,
         )?;
+        
+        // DEBUG: Check constraint satisfaction after FRI layers verification
+        #[cfg(debug_assertions)]
+        {
+            if !cs.is_satisfied().unwrap_or(false) {
+                panic!("CS failed after FRI layers verification");
+            }
+        }
         
         Ok(())
     }
