@@ -157,6 +157,15 @@ fn rp_round_gl(
     Ok(())
 }
 
+/// Helper to create a witness zero constrained to equal constant zero.
+/// This ensures CS availability while preventing FS malleability.
+fn iv_zero(cs: ConstraintSystemRef<InnerFr>) -> Result<FpGLVar, SynthesisError> {
+    let w = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(0u64)))?;
+    let c = FpGLVar::new_constant(cs, InnerFr::from(0u64))?;
+    w.enforce_equal(&c)?;
+    Ok(w)
+}
+
 /// A GL-native RPO sponge gadget (parametric)
 pub struct Rpo256GlVar {
     #[allow(dead_code)]
@@ -170,11 +179,7 @@ impl Rpo256GlVar {
     pub fn new(cs: ConstraintSystemRef<InnerFr>, params: RpoParamsGL) -> Result<Self, SynthesisError> {
         let mut state = Vec::with_capacity(params.t);
         for _ in 0..params.t {
-            // Initialize as witness constrained to zero by circuit logic.
-            // Soundness relies on: (1) lane layout is correct (Winterfell-aligned),
-            // (2) permutation outputs are canonical GL, (3) CS extraction happens via explicit passing,
-            // not via state[0].cs() on a potentially-constant value.
-            state.push(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(0u64)))?);
+            state.push(iv_zero(cs.clone())?);
         }
         Ok(Self { cs, params, state, rate_idx: 0 })
     }
@@ -260,13 +265,13 @@ pub fn rpo_hash_elements_gl(
 
     // state[0] = elements.len() (TOTAL length, not mod 8)
     let total_len = elems.len() as u64;
-    let len_const = FpGLVar::constant(InnerFr::from(total_len));
-    h.state[0] = &h.state[0] + &len_const;  // Fr add; permutation will canonicalize
+    let len_const = FpGLVar::new_constant(cs.clone(), InnerFr::from(total_len))?;
+    h.state[0] = crate::gadgets::gl_range::gl_add_var(cs.clone(), &h.state[0], &len_const)?;  // Ensure canonical GL
 
     // absorb with block-by-block permutation
     let mut i = 0usize;
     for x in elems.iter() {
-        h.state[4 + i] = &h.state[4 + i] + x;  // Fr add; permutation will canonicalize
+        h.state[4 + i] = crate::gadgets::gl_range::gl_add_var(cs.clone(), &h.state[4 + i], x)?;  // Ensure canonical GL
         i += 1;
         if i == 8 {
             h.permute()?;  // Full block absorbed, permute  
@@ -294,8 +299,8 @@ pub fn rpo_merge_gl(
     let mut h = Rpo256GlVar::new(cs.clone(), params.clone())?;
     
     // state[0] = 8 (RATE_WIDTH, the number of elements being hashed)
-    let len_8 = FpGLVar::constant(InnerFr::from(8u64));
-    h.state[0] = &h.state[0] + &len_8;  // Fr add; permutation will canonicalize
+    let len_8 = FpGLVar::new_constant(cs.clone(), InnerFr::from(8u64))?;
+    h.state[0] = crate::gadgets::gl_range::gl_add_var(cs.clone(), &h.state[0], &len_8)?;  // Ensure canonical GL
     
     // Place left||right into lanes 4..11
     for i in 0..4 {

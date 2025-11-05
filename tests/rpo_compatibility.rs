@@ -9,7 +9,7 @@ use arkworks_groth16::outer_compressed::InnerFr;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::R1CSVar;
-use ark_relations::r1cs::ConstraintSystem;
+use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef};
 use ark_ff::{BigInteger, PrimeField};
 use winter_crypto::hashers::Rp64_256;
 use winter_crypto::{Hasher, Digest, ElementHasher};
@@ -71,6 +71,7 @@ fn rpo_matches_winterfell_on_small_vectors() {
     use winter_crypto::hashers::Rp64_256;
     use winter_math::fields::f64::BaseElement as GL;
     use winter_crypto::Hasher;
+    use ark_relations::r1cs::ConstraintSynthesizer;
 
     let host = |xs: &[u64]| {
         let els: Vec<GL> = xs.iter().map(|&x| GL::try_from(x).unwrap()).collect();
@@ -82,30 +83,35 @@ fn rpo_matches_winterfell_on_small_vectors() {
     let cs = ConstraintSystem::<InnerFr>::new_ref();
     let params = RpoParamsGL::default();
 
-    // Test multiple input sizes to cover block boundaries
-    for xs in [&[1u64][..], &[1,2], &[1,2,3,4], &[1,2,3,4,5,6,7,8], &[1,2,3,4,5,6,7,8,9]] {
-        let expect = host(xs);
-        
-        let inputs = if xs.is_empty() {
-            vec![]
-        } else {
-            gl_alloc_u64_vec(cs.clone(), xs).unwrap()
-        };
-        let got = rpo_hash_elements_gl(cs.clone(), &params, &inputs).unwrap();
-        
-        for i in 0..4 {
-            let val = got[i].value().unwrap();
-            let bytes = val.into_bigint().to_bytes_le();
-            let mut v = 0u64;
-            for (j, &b) in bytes.iter().enumerate().take(8) {
-                v |= (b as u64) << (j * 8);
+    // Simple wrapper to enter synthesis mode
+    struct TestCircuit;
+    impl ConstraintSynthesizer<InnerFr> for TestCircuit {
+        fn generate_constraints(self, cs: ConstraintSystemRef<InnerFr>) -> Result<(), ark_relations::r1cs::SynthesisError> {
+            // Test multiple input sizes to cover block boundaries
+            for xs in [&[1u64][..], &[1,2], &[1,2,3,4], &[1,2,3,4,5,6,7,8], &[1,2,3,4,5,6,7,8,9]] {
+                let expect = (|| {
+                    let els: Vec<GL> = xs.iter().map(|&x| GL::try_from(x).unwrap()).collect();
+                    let d = Rp64_256::hash_elements(&els);
+                    let bytes = d.as_bytes();
+                    bytes.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect::<Vec<_>>()
+                })();
+                
+                let inputs = if xs.is_empty() {
+                    vec![]
+                } else {
+                    gl_alloc_u64_vec(cs.clone(), xs)?
+                };
+                let got = rpo_hash_elements_gl(cs.clone(), &RpoParamsGL::default(), &inputs)?;
+                
+                for i in 0..4 {
+                    enforce_gl_eq(&got[i], &FpVar::constant(InnerFr::from(expect[i])))?;
+                }
             }
-        }
-        
-        for i in 0..4 {
-            enforce_gl_eq(&got[i], &FpVar::constant(InnerFr::from(expect[i]))).unwrap();
+            Ok(())
         }
     }
+
+    TestCircuit.generate_constraints(cs.clone()).expect("RPO verification failed");
     assert!(cs.is_satisfied().unwrap(), "RPO gadget doesn't match Winterfell on test vectors!");
 }
 

@@ -196,6 +196,9 @@ pub fn gl_lincomb(
     if terms.is_empty() {
         return Ok(FpGLVar::new_constant(cs, InnerFr::from(0u64))?);
     }
+    if coeffs.len() != terms.len() {
+        return Err(SynthesisError::Unsatisfiable);
+    }
     
     // Fr-side accumulator
     let first_cs = terms[0].cs();
