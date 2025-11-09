@@ -233,15 +233,38 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
 
         // Allocate OOD values - MATCH Winterfell's merge_ood_evaluations order
         // Per Winterfell source: [trace_current, constraint_current, trace_next, constraint_next]
-        let mut ood_elements_fp = Vec::new();
-        ood_elements_fp.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_trace_current)?);
-        ood_elements_fp.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_comp)?);
-        ood_elements_fp.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_trace_next)?);
-        ood_elements_fp.extend(gl_alloc_u64_vec(cs.clone(), &self.ood_comp_next)?);
+        let ood_trace_current_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_trace_current)?;
+        let ood_comp_current_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_comp)?;
+        let ood_trace_next_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_trace_next)?;
+        let ood_comp_next_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_comp_next)?;
 
-        // Convert to GlVar for light RPO
-        let ood_elements_gl: Vec<GlVar> =
-            ood_elements_fp.iter().map(|fp| GlVar(fp.clone())).collect();
+        let ood_trace_current_gl: Vec<GlVar> = ood_trace_current_fp
+            .iter()
+            .map(|fp| GlVar(fp.clone()))
+            .collect();
+        let ood_comp_current_gl: Vec<GlVar> = ood_comp_current_fp
+            .iter()
+            .map(|fp| GlVar(fp.clone()))
+            .collect();
+        let ood_trace_next_gl: Vec<GlVar> = ood_trace_next_fp
+            .iter()
+            .map(|fp| GlVar(fp.clone()))
+            .collect();
+        let ood_comp_next_gl: Vec<GlVar> = ood_comp_next_fp
+            .iter()
+            .map(|fp| GlVar(fp.clone()))
+            .collect();
+
+        let mut ood_elements_gl = Vec::with_capacity(
+            ood_trace_current_gl.len()
+                + ood_comp_current_gl.len()
+                + ood_trace_next_gl.len()
+                + ood_comp_next_gl.len(),
+        );
+        ood_elements_gl.extend(ood_trace_current_gl.iter().cloned());
+        ood_elements_gl.extend(ood_comp_current_gl.iter().cloned());
+        ood_elements_gl.extend(ood_trace_next_gl.iter().cloned());
+        ood_elements_gl.extend(ood_comp_next_gl.iter().cloned());
 
         // Hash using light RPO (congruence-only, no internal canonicalization)
         let ood_digest_gl = rpo_hash_elements_light(cs.clone(), &ood_elements_gl, &rpo_params)?;
@@ -253,6 +276,33 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         for (computed, expected) in ood_digest_bytes.iter().zip(ood_commit_bytes.iter()) {
             let eq = computed.is_eq(expected)?;
             eq.enforce_equal(&Boolean::constant(true))?;
+        }
+
+        // Prepare holders for query values reused across Merkle + DEEP
+        let mut trace_row_vars: Vec<Vec<GlVar>> = self
+            .trace_queries
+            .iter()
+            .map(|q| Vec::with_capacity(q.values.len()))
+            .collect();
+        let mut comp_row_vars: Vec<Vec<GlVar>> = self
+            .comp_queries
+            .iter()
+            .map(|q| Vec::with_capacity(q.values.len()))
+            .collect();
+
+        // Ensure data shapes are consistent with commitments
+        if let Some(first_segment) = self.trace_segments.first() {
+            if !self.trace_queries.is_empty()
+                && first_segment.queries.len() != self.trace_queries.len()
+            {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+        }
+        if !self.comp_queries.is_empty()
+            && self.comp_queries.len() != self.trace_queries.len()
+            && !self.trace_queries.is_empty()
+        {
+            return Err(SynthesisError::Unsatisfiable);
         }
 
         // STEP 2: Verify trace commitment (batch-only)
@@ -268,11 +318,25 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(segment.queries.len());
-            for q in &segment.queries {
+            if !self.trace_queries.is_empty() && segment.queries.len() != self.trace_queries.len() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            for (row_idx, q) in segment.queries.iter().enumerate() {
                 let mut row_gl: Vec<GlVar> = Vec::with_capacity(q.values.len());
                 for &v in &q.values {
-                    let fp = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
-                    row_gl.push(GlVar(fp));
+                    let gl = GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?);
+                    row_gl.push(gl.clone());
+                    if let Some(row) = trace_row_vars.get_mut(row_idx) {
+                        row.push(gl.clone());
+                    } else if self.trace_queries.is_empty() {
+                        // Lazily grow if trace_queries was empty (should match query count)
+                        while trace_row_vars.len() <= row_idx {
+                            trace_row_vars.push(Vec::new());
+                        }
+                        trace_row_vars[row_idx].push(gl.clone());
+                    } else {
+                        return Err(SynthesisError::Unsatisfiable);
+                    }
                 }
                 let digest = rpo_hash_elements_light(cs.clone(), &row_gl, &params)?;
                 leaves.push([
@@ -293,17 +357,49 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             )?;
         }
 
+        // Ensure aggregated trace rows match expected widths / OOD frame
+        let expected_trace_width = self.ood_trace_current.len();
+        if expected_trace_width == 0 && !trace_row_vars.is_empty() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        for row in &trace_row_vars {
+            if row.len() != expected_trace_width {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+        }
+        if !self.trace_queries.is_empty() {
+            for (expected, actual) in self.trace_queries.iter().zip(trace_row_vars.iter()) {
+                if expected.values.len() != actual.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                for (col_idx, expected_val) in expected.values.iter().enumerate() {
+                    let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
+                    actual[col_idx].0.enforce_equal(&expected_fe)?;
+                }
+            }
+        }
+
         // STEP 3: Verify composition commitment (batch-only)
         if !self.comp_batch_nodes.is_empty() {
             use super::gadgets::merkle_batch::verify_batch_merkle_root_gl;
             use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(self.comp_queries.len());
-            for q in &self.comp_queries {
+            for (row_idx, q) in self.comp_queries.iter().enumerate() {
                 let mut row_gl: Vec<GlVar> = Vec::with_capacity(q.values.len());
                 for &v in &q.values {
-                    let fp = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
-                    row_gl.push(GlVar(fp));
+                    let gl = GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?);
+                    row_gl.push(gl.clone());
+                    if let Some(row) = comp_row_vars.get_mut(row_idx) {
+                        row.push(gl.clone());
+                    } else if self.comp_queries.is_empty() {
+                        while comp_row_vars.len() <= row_idx {
+                            comp_row_vars.push(Vec::new());
+                        }
+                        comp_row_vars[row_idx].push(gl.clone());
+                    } else {
+                        return Err(SynthesisError::Unsatisfiable);
+                    }
                 }
                 let digest = rpo_hash_elements_light(cs.clone(), &row_gl, &params)?;
                 leaves.push([
@@ -335,6 +431,30 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         if !self.comp_queries.is_empty() && self.comp_queries[0].values.len() != comp_width {
             return Err(SynthesisError::Unsatisfiable);
         }
+        let expected_comp_width = self.ood_comp.len();
+        if expected_comp_width == 0 && !comp_row_vars.is_empty() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        for row in &comp_row_vars {
+            if row.len() != expected_comp_width {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+        }
+        if !self.comp_queries.is_empty() {
+            for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
+                if expected.values.len() != actual.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                for (col_idx, expected_val) in expected.values.iter().enumerate() {
+                    let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
+                    actual[col_idx].0.enforce_equal(&expected_fe)?;
+                }
+            }
+        }
+
+        if trace_row_vars.len() != comp_row_vars.len() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
 
         // STEP 4: Derive FS challenges in-circuit
         let (z, deep_coeffs, fri_betas) = derive_fs_challenges_in_circuit(
@@ -355,17 +475,16 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         // STEP 5: Compute DEEP composition polynomial (returns DEEP evaluations for FRI)
         let deep_evaluations = verify_deep_composition(
             cs.clone(),
-            &self.trace_queries,
-            &self.comp_queries,
-            &self.ood_trace_current,
-            &self.ood_trace_next,
-            &self.ood_comp,
-            &self.ood_comp_next,
+            &trace_row_vars,
+            &comp_row_vars,
+            &ood_trace_current_gl,
+            &ood_trace_next_gl,
+            &ood_comp_current_gl,
+            &ood_comp_next_gl,
             &self.query_positions,
             &z,
             &deep_coeffs,
             &self.air_params,
-            comp_width,
         )?;
 
         // STEP 6: Use the heavy FRI verifier for correct semantics
@@ -665,17 +784,16 @@ fn derive_fs_challenges_in_circuit(
 /// The DEEP polynomial is then passed to FRI for low-degree verification.
 pub fn verify_deep_composition(
     cs: ConstraintSystemRef<InnerFr>,
-    trace_queries: &[TraceQuery],
-    comp_queries: &[CompQuery],
-    ood_trace_current: &[u64],
-    ood_trace_next: &[u64],
-    ood_comp: &[u64],
-    ood_comp_next: &[u64],
+    trace_queries: &[Vec<GlVar>],
+    comp_queries: &[Vec<GlVar>],
+    ood_trace_current: &[GlVar],
+    ood_trace_next: &[GlVar],
+    ood_comp: &[GlVar],
+    ood_comp_next: &[GlVar],
     query_positions: &[usize],
     z: &FpGLVar,
     deep_coeffs: &[FpGLVar],
     air_params: &AirParams,
-    _comp_width: usize,
 ) -> Result<Vec<FpGLVar>, SynthesisError> {
     // Returns DEEP evaluations per query for FRI!
     let mut deep_evaluations = Vec::with_capacity(trace_queries.len());
@@ -710,26 +828,11 @@ pub fn verify_deep_composition(
         }
     }
 
-    // Allocate OOD values as GlVar constants (zero overhead!)
-    let ood_current: Vec<GlVar> = ood_trace_current
-        .iter()
-        .map(|&v| GlVar(FpGLVar::constant(InnerFr::from(v as u128))))
-        .collect();
-    let ood_next: Vec<GlVar> = ood_trace_next
-        .iter()
-        .map(|&v| GlVar(FpGLVar::constant(InnerFr::from(v as u128))))
-        .collect();
-    let ood_comp_current: Vec<GlVar> = ood_comp
-        .iter()
-        .map(|&v| GlVar(FpGLVar::constant(InnerFr::from(v as u128))))
-        .collect();
-    let ood_comp_next_vals: Vec<GlVar> = ood_comp_next
-        .iter()
-        .map(|&v| GlVar(FpGLVar::constant(InnerFr::from(v as u128))))
-        .collect();
-
     // For each query:
-    for (q_idx, (trace_q, comp_q)) in trace_queries.iter().zip(comp_queries.iter()).enumerate() {
+    for (q_idx, trace_row) in trace_queries.iter().enumerate() {
+        let comp_row = comp_queries
+            .get(q_idx)
+            .ok_or(SynthesisError::Unsatisfiable)?;
         let position = query_positions.get(q_idx).copied().unwrap_or(0);
 
         // Bit-decompose position (constant bits, no constraints!)
@@ -776,8 +879,15 @@ pub fn verify_deep_composition(
         // Formula: result = (t1_num * t2_den + t2_num * t1_den) / (t1_den * t2_den)
         // Where: t1_num = Σ(T(x)-T(z))*gamma, t2_num = Σ(T(x)-T(z*g))*gamma
 
-        let trace_w = trace_q.values.len();
-        let comp_w = comp_q.values.len();
+        let trace_w = trace_row.len();
+        let comp_w = comp_row.len();
+        if trace_w != ood_trace_current.len()
+            || trace_w != ood_trace_next.len()
+            || comp_w != ood_comp.len()
+            || comp_w != ood_comp_next.len()
+        {
+            return Err(SynthesisError::Unsatisfiable);
+        }
         let mut coeff_idx = 0;
 
         // Accumulate numerators for z and z*g terms
@@ -786,17 +896,26 @@ pub fn verify_deep_composition(
 
         // Process trace columns
         for col in 0..trace_w {
-            let t_x = GlVar(FpGLVar::constant(InnerFr::from(
-                trace_q.values[col] as u128,
-            )));
+            let t_x = trace_row
+                .get(col)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
             let gamma = gammas_gl[coeff_idx].clone();
             coeff_idx += 1;
 
-            let diff_z = gl_sub_light(cs.clone(), &t_x, &ood_current[col])?;
+            let ood_cur = ood_trace_current
+                .get(col)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
+            let diff_z = gl_sub_light(cs.clone(), &t_x, &ood_cur)?;
             let weighted_z = gl_mul_light(cs.clone(), &diff_z, &gamma)?;
             t1_num = gl_add_light(cs.clone(), &t1_num, &weighted_z)?;
 
-            let diff_zg = gl_sub_light(cs.clone(), &t_x, &ood_next[col])?;
+            let ood_next_val = ood_trace_next
+                .get(col)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
+            let diff_zg = gl_sub_light(cs.clone(), &t_x, &ood_next_val)?;
             let weighted_zg = gl_mul_light(cs.clone(), &diff_zg, &gamma)?;
             t2_num = gl_add_light(cs.clone(), &t2_num, &weighted_zg)?;
         }
@@ -808,9 +927,18 @@ pub fn verify_deep_composition(
             let gamma_c = gammas_gl[coeff_idx].clone();
             coeff_idx += 1;
 
-            let c_x = GlVar(FpGLVar::constant(InnerFr::from(comp_q.values[k] as u128)));
-            let c_z = ood_comp_current[k].clone();
-            let c_zg = ood_comp_next_vals[k].clone();
+            let c_x = comp_row
+                .get(k)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
+            let c_z = ood_comp
+                .get(k)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
+            let c_zg = ood_comp_next
+                .get(k)
+                .cloned()
+                .ok_or(SynthesisError::Unsatisfiable)?;
 
             let diff_z = gl_sub_light(cs.clone(), &c_x, &c_z)?;
             let weighted_z = gl_mul_light(cs.clone(), &diff_z, &gamma_c)?;
