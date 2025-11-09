@@ -81,7 +81,6 @@ pub struct FullStarkVerifierCircuit {
 
     // Query openings (witness)
     pub query_positions: Vec<usize>,    // LDE domain positions
-    pub trace_queries: Vec<TraceQuery>, // Per-query trace openings (all segments concatenated)
     pub trace_segments: Vec<TraceSegmentWitness>, // Per-segment openings + Merkle metadata
     pub comp_queries: Vec<CompQuery>,   // Per-query composition openings
 
@@ -279,25 +278,21 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         }
 
         // Prepare holders for query values reused across Merkle + DEEP
-        let mut trace_row_vars: Vec<Vec<GlVar>> = self
-            .trace_queries
-            .iter()
-            .map(|q| Vec::with_capacity(q.values.len()))
-            .collect();
-        let mut comp_row_vars: Vec<Vec<GlVar>> = self
-            .comp_queries
-            .iter()
-            .map(|q| Vec::with_capacity(q.values.len()))
-            .collect();
+        // Initialize by expected query count; rows will be filled from Merkle-verified leaves.
+        // Types are explicit to avoid inference issues when pushing GlVar elements.
+        // expected_queries is computed below from self.query_positions.
+        // We'll initialize now with zero; will resize after expected_queries is known.
+        let mut trace_row_vars: Vec<Vec<GlVar>> = Vec::new();
+        let mut comp_row_vars: Vec<Vec<GlVar>> = Vec::new();
 
         // Enforce non-empty queries and alignment with positions
         if self.query_positions.is_empty() {
             return Err(SynthesisError::Unsatisfiable);
         }
         let expected_queries = self.query_positions.len();
-        if self.trace_queries.len() != expected_queries {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+        // Resize holders to match expected query count
+        trace_row_vars = vec![Vec::<GlVar>::new(); expected_queries];
+        comp_row_vars = vec![Vec::<GlVar>::new(); expected_queries];
         if self.comp_queries.len() != expected_queries {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -419,6 +414,16 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         for row in &comp_row_vars {
             if row.len() != expected_comp_width {
                 return Err(SynthesisError::Unsatisfiable);
+            }
+        }
+        // Bind echoed composition witnesses to Merkle-verified rows to catch tampering
+        for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
+            if expected.values.len() != actual.len() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            for (col_idx, expected_val) in expected.values.iter().enumerate() {
+                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
+                actual[col_idx].0.enforce_equal(&expected_fe)?;
             }
         }
 

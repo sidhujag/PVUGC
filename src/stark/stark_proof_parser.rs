@@ -110,7 +110,7 @@ where
         .map(|idx| if idx == 0 { main_w } else { aux_w })
         .collect();
 
-    let (trace_queries, trace_segments) = parse_trace_queries::<H, V>(
+    let trace_segments = parse_trace_queries::<H, V>(
         &proof.trace_queries,
         lde_domain_size,
         actual_num_queries,
@@ -219,7 +219,6 @@ where
         fri_commitments_le32,
         ood_commitment_le32,
         query_positions,
-        trace_queries,
         trace_segments,
         comp_queries,
         comp_batch_nodes,
@@ -242,17 +241,16 @@ fn parse_trace_queries<H, V>(
     num_queries: usize,
     segment_widths: &[usize],
     positions: &[usize],
-) -> (Vec<TraceQuery>, Vec<TraceSegmentWitness>)
+) -> Vec<TraceSegmentWitness>
 where
     H: ElementHasher<BaseField = GL>,
     V: winter_crypto::VectorCommitment<H, MultiProof = winter_crypto::BatchMerkleProof<H>>,
 {
     type E = GL;
     if queries.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
-    let mut aggregated_rows: Vec<Vec<u64>> = Vec::new();
     let mut segment_witnesses: Vec<TraceSegmentWitness> = Vec::with_capacity(queries.len());
 
     for (segment_idx, query_set) in queries.iter().enumerate() {
@@ -268,21 +266,18 @@ where
     
         let rows_vec: Vec<Vec<E>> = table.rows().map(|row| row.to_vec()).collect();
 
-        if aggregated_rows.is_empty() {
-            aggregated_rows = vec![Vec::new(); rows_vec.len()];
-        }
-        if aggregated_rows.len() != rows_vec.len() {
-        panic!(
+        // Sanity: segment row counts consistent across segments
+        if !segment_witnesses.is_empty() && segment_witnesses[0].queries.len() != rows_vec.len() {
+            panic!(
                 "Trace segment row count mismatch: expected {}, got {}",
-                aggregated_rows.len(),
+                segment_witnesses[0].queries.len(),
                 rows_vec.len(),
             );
         }
 
         let mut segment_queries = Vec::with_capacity(rows_vec.len());
-        for (row_idx, row) in rows_vec.iter().enumerate() {
+        for (_row_idx, row) in rows_vec.iter().enumerate() {
             let values: Vec<u64> = row.iter().map(|e| e.as_int()).collect();
-            aggregated_rows[row_idx].extend(values.iter().copied());
             segment_queries.push(TraceQuery {
                 values,
                 merkle_path: Vec::new(),
@@ -314,16 +309,7 @@ where
         });
     }
 
-    let trace_queries: Vec<TraceQuery> = aggregated_rows
-        .into_iter()
-        .map(|values| TraceQuery {
-            values,
-            merkle_path: Vec::new(),
-            path_positions: Vec::new(),
-        })
-        .collect();
-
-    (trace_queries, segment_witnesses)
+    segment_witnesses
 }
 
 /// Parse composition queries
