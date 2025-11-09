@@ -95,9 +95,9 @@ where
                 .parse::<E, H, V>(lde_domain_size, proof.num_unique_queries as usize, w);
             if try_parse.is_ok() {
                 found = Some(w);
-            break;
+                break;
+            }
         }
-    }
         found.unwrap_or_else(|| {
             // Fallback to 1 if parsing failed (will err later in circuit if incorrect)
             1
