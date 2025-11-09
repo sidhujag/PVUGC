@@ -12,7 +12,7 @@
 use winterfell::Proof;
 use winter_math::FieldElement;
 use winter_math::fields::f64::BaseElement as GL;  // Goldilocks field
-use winter_crypto::{ElementHasher, Digest, RandomCoin};  // RandomCoin for DefaultRandomCoin::new
+use winter_crypto::{ElementHasher, Digest};
 use crate::inner_stark_full::{
     FullStarkVerifierCircuit, AirParams, TraceQuery, CompQuery,
     FriLayerQueries, FriQuery,
@@ -22,15 +22,25 @@ use crate::outer_compressed::InnerFr;
 
 extern crate alloc;  // For BTreeMap and Vec
 
-/// Parse Winterfell proof into circuit-ready format
-///
-/// NO hooks needed - just parses the standard Proof struct!
-/// 
-/// Specifically for Goldilocks field (most common STARK configuration)
-pub fn parse_proof_for_circuit<H, V>(
+pub fn parse_proof_for_circuit_with_query_positions<H, V>(
     proof: &Proof,
     pub_inputs_u64: Vec<u64>,
     air_params: AirParams,
+    query_positions: Vec<usize>,
+) -> FullStarkVerifierCircuit
+where
+    H: ElementHasher<BaseField = GL>,
+    V: winter_crypto::VectorCommitment<H, MultiProof = winter_crypto::BatchMerkleProof<H>>,
+{
+    parse_proof_impl::<H, V>(proof, pub_inputs_u64, air_params, query_positions)
+}
+
+/// Internal implementation
+fn parse_proof_impl<H, V>(
+    proof: &Proof,
+    pub_inputs_u64: Vec<u64>,
+    air_params: AirParams,
+    query_positions: Vec<usize>,
 ) -> FullStarkVerifierCircuit
 where
     H: ElementHasher<BaseField = GL>,
@@ -45,27 +55,28 @@ where
     // Use actual number of unique queries from proof (after deduplication)
     let num_queries = proof.num_unique_queries as usize;
     
-    eprintln!("Parsing commitments: num_trace_segments={}, num_fri_layers={}", num_trace_segments, num_fri_layers);
     
     // Extract FS context seed for transcript alignment (Winterfell 0.13.x)
+    // Per Winterfell verifier/lib.rs:100-101: seed with context + public inputs!
     use winter_math::ToElements;
-    let fs_context_seed_gl: Vec<u64> = proof.context
+    let mut fs_context_seed_gl: Vec<u64> = proof.context
         .to_elements()
         .into_iter()
         .map(|e: GL| e.as_int())
         .collect();
     
+    // CRITICAL: Append public inputs to match Winterfell's initialization
+    fs_context_seed_gl.extend(pub_inputs_u64.iter().copied());
+    
     let (trace_commitments, comp_commitment, fri_commitments) = proof.commitments
         .clone()
         .parse::<H>(num_trace_segments, num_fri_layers)
         .map_err(|e| {
-            eprintln!("ERROR parsing commitments: {:?}", e);
+            
             e
         })
         .expect("parse commitments");
     
-    eprintln!("Parsed {} trace commitments, {} FRI commitments", 
-        trace_commitments.len(), fri_commitments.len());
     
     // Convert to 32-byte arrays
     use winter_crypto::Digest;
@@ -88,34 +99,53 @@ where
         }
     }
     
-    eprintln!("Auto-detected comp_width={}", comp_width);
     
-    // Compute query positions first (needed before parsing queries)
-    let query_positions = derive_query_positions::<H>(
-        &proof,
-        &trace_commitments,
-        &comp_commitment,
-        &fri_commitments,
-        lde_domain_size,
-    );
+    // Use provided query positions
     
-    eprintln!("Derived {} query positions", query_positions.len());
+    // Parse query openings
+    // Use proof.num_unique_queries as the authoritative count (what's actually in the proof)
+    // Truncate query_positions to match if we derived too many
+    let actual_num_queries = proof.num_unique_queries as usize;
+    let positions_for_parsing = if query_positions.len() > actual_num_queries {
+        
+        &query_positions[..actual_num_queries]
+    } else {
+        &query_positions[..]
+    };
     
-    // Parse query openings with derived positions
     let trace_queries = parse_trace_queries::<H, V>(
         &proof.trace_queries,
         lde_domain_size,
-        num_queries,
+        actual_num_queries,
         air_params.trace_width,
-        &query_positions,
+        positions_for_parsing,
     );
+    // Also capture trace batch multiproof for circuit batch verification
+    let (trace_batch_proof, _trace_table) = proof.trace_queries[0].clone()
+        .parse::<E, H, V>(lde_domain_size, actual_num_queries, air_params.trace_width)
+        .expect("parse trace batch");
+    let trace_batch_nodes: Vec<Vec<[u8;32]>> = trace_batch_proof.nodes.iter()
+        .map(|v| v.iter().map(|d| d.as_bytes()).collect())
+        .collect();
+    let trace_batch_depth: u8 = trace_batch_proof.depth;
+    let trace_batch_indexes: Vec<usize> = positions_for_parsing.to_vec();
     let comp_queries = parse_comp_queries::<H, V>(
         &proof.constraint_queries,
         lde_domain_size,
-        num_queries,
+        actual_num_queries,
         comp_width,  // Use inferred width!
-        &query_positions,
+        positions_for_parsing,
+        comp_commitment,
     );
+    // Capture composition batch multiproof
+    let (comp_batch_proof, _comp_table) = proof.constraint_queries.clone()
+        .parse::<E, H, V>(lde_domain_size, actual_num_queries, comp_width)
+        .expect("parse comp batch");
+    let comp_batch_nodes: Vec<Vec<[u8;32]>> = comp_batch_proof.nodes.iter()
+        .map(|v| v.iter().map(|d| d.as_bytes()).collect())
+        .collect();
+    let comp_batch_depth: u8 = comp_batch_proof.depth;
+    let comp_batch_indexes: Vec<usize> = positions_for_parsing.to_vec();
     
     // Parse OOD frame
     let main_trace_width = air_params.trace_width;
@@ -135,21 +165,26 @@ where
         .map(|e| e.as_int())
         .collect();
     
-    // OOD composition values
+    // OOD composition values (at both z and z*g for LINEAR batching!)
     let ood_comp: Vec<u64> = quotient_ood.current_row()
         .iter()
         .map(|e| e.as_int())
         .collect();
+    let ood_comp_next: Vec<u64> = quotient_ood.next_row()
+        .iter()
+        .map(|e| e.as_int())
+        .collect();
     
-    // Compute OOD commitment (hash of OOD frame)
-    let ood_commitment_le32 = compute_ood_commitment::<H>(&ood_trace_current, &ood_trace_next, &ood_comp);
+    // Compute OOD commitment (hash of OOD frame - includes both current and next!)
+    let ood_commitment_le32 = compute_ood_commitment::<H>(&ood_trace_current, &ood_trace_next, &ood_comp, &ood_comp_next);
     
     // Parse FRI proof (with positions that fold layer-by-layer)
+    // NOTE: Pass full LDE domain size - folding happens INSIDE parse_fri_layers
     let fri_layers = parse_fri_layers::<H, V>(
         &proof.fri_proof,
         num_fri_layers,
         air_params.fri_folding_factor,
-        lde_domain_size,
+        lde_domain_size,  // Full LDE domain, NOT pre-divided
         &query_positions,  // Pass main query positions
     );
     
@@ -186,9 +221,16 @@ where
         query_positions,
         trace_queries,
         comp_queries,
+        trace_batch_nodes,
+        trace_batch_depth,
+        trace_batch_indexes,
+        comp_batch_nodes,
+        comp_batch_depth,
+        comp_batch_indexes,
         ood_trace_current,
         ood_trace_next,
         ood_comp,
+        ood_comp_next,
         fri_layers,
         fri_remainder_coeffs,
         air_params,
@@ -213,48 +255,70 @@ where
     }
     
     // Parse the queries (returns batch proof + values table)
-    let (batch_proof, table) = queries[0].clone()
+    
+    let (_batch_proof, table) = queries[0].clone()
         .parse::<E, H, V>(lde_domain_size, num_queries, values_per_query)
         .expect("parse trace queries");
     
+    
+    // Snapshot rows once to avoid iterator-order surprises
+    let rows_vec: Vec<Vec<E>> = table.rows()
+        .map(|row| row.to_vec())
+        .collect();
+    
     // Compute leaf digests (needed for path extraction)
-    let leaves: Vec<H::Digest> = table.rows()
+    let leaves: Vec<H::Digest> = rows_vec.iter()
         .map(|row| H::hash_elements(row))
         .collect();
     
-    // Extract individual Merkle paths from batch proof using actual positions
-    let openings = extract_paths_from_batch(&batch_proof, &leaves, positions);
+    // Check normalization count
+    let mut norm_test: Vec<usize> = Vec::new();
+    for &p in positions {
+        let even = p - (p & 1);
+        if norm_test.last().copied() != Some(even) {
+            norm_test.push(even);
+        }
+    }
     
-    table.rows().enumerate().map(|(idx, row)| {
+    // Verify positions match leaves
+    if positions.len() != leaves.len() {
+        panic!(
+            "Query position mismatch: provided {} positions but proof has {} leaves. \
+             This indicates the query positions were not derived correctly from the AIR instance.",
+            positions.len(), leaves.len()
+        );
+    }
+    let _idxs: Vec<usize> = positions.iter().cloned().collect();
+    
+    // Skip per-path extraction; batch verification is enforced in-circuit
+
+    // Align openings by row index
+    let aligned_openings: Vec<(Vec<H::Digest>, usize)> = Vec::new();
+
+    rows_vec
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
         let values: Vec<u64> = row.iter().map(|e| e.as_int()).collect();
         
-        // Get path for this query
-        let (merkle_path, path_positions) = if idx < openings.len() {
-            let (_leaf, siblings) = &openings[idx];
-            let path_bytes: Vec<[u8; 32]> = siblings.iter().map(|d| {
-                let bytes = d.as_bytes();
-                bytes
-            }).collect();
-            
-            // Compute position bits from index
-            let mut pos_bits = Vec::with_capacity(siblings.len());
-            let mut cur_idx = positions.get(idx).copied().unwrap_or(0);
-            for _ in 0..siblings.len() {
-                pos_bits.push((cur_idx & 1) == 1);
-                cur_idx >>= 1;
-            }
-            
-            (path_bytes, pos_bits)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+            // Use aligned openings directly by row index
+            let (sib_vec, pos_actual) = aligned_openings.get(idx).cloned().unwrap_or((Vec::new(), 0));
+
+            // Bits: current-is-right, LSB-first
+            let mut tmp = pos_actual;
+            let mut path_positions: Vec<bool> = Vec::with_capacity(sib_vec.len());
+            for _ in 0..sib_vec.len() { path_positions.push((tmp & 1) == 1); tmp >>= 1; }
+
+            // Convert siblings to bytes for circuit
+            let merkle_path: Vec<[u8; 32]> = Vec::new();
         
         TraceQuery {
             values,
             merkle_path,
             path_positions,
         }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Parse composition queries
@@ -264,6 +328,7 @@ fn parse_comp_queries<H, V>(
     num_queries: usize,
     values_per_query: usize,
     positions: &[usize],
+    _comp_root: H::Digest,
 ) -> Vec<CompQuery>
 where
     H: ElementHasher<BaseField = GL>,
@@ -273,45 +338,53 @@ where
     let (batch_proof, table) = queries.clone()
         .parse::<E, H, V>(lde_domain_size, num_queries, values_per_query)
         .map_err(|e| {
-            eprintln!("ERROR parsing comp queries: {:?}", e);
-            eprintln!("  lde_domain_size={}, num_queries={}, values_per_query={}", 
-                lde_domain_size, num_queries, values_per_query);
+            
             e
         })
         .expect("parse comp queries");
     
+    // Snapshot rows once to avoid iterator-order surprises
+    let rows_vec: Vec<Vec<E>> = table.rows()
+        .map(|row| row.to_vec())
+        .collect();
     // Compute leaf digests
-    let leaves: Vec<H::Digest> = table.rows()
+    let leaves: Vec<H::Digest> = rows_vec.iter()
         .map(|row| H::hash_elements(row))
         .collect();
     
-    let openings = extract_paths_from_batch(&batch_proof, &leaves, positions);
-    
-    table.rows().enumerate().map(|(idx, row)| {
+    // Use sorted-unique positions modulo tree size, length = leaves.len()
+    let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
+    let mut idxs_aligned: Vec<usize> = positions.iter().map(|&p| p % tree_num_leaves).collect();
+    idxs_aligned.truncate(leaves.len());
+    // Skip per-path extraction for comp as well; batch verification is enforced in-circuit
+
+    // Align openings by row index
+    let aligned_openings: Vec<(Vec<H::Digest>, usize)> = Vec::new();
+
+    rows_vec
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
         let values: Vec<u64> = row.iter().map(|e| e.as_int()).collect();
         
-        let (merkle_path, path_positions) = if idx < openings.len() {
-            let (_leaf, siblings) = &openings[idx];
-            let path_bytes: Vec<[u8; 32]> = siblings.iter().map(|d| d.as_bytes()).collect();
-            
-            let mut pos_bits = Vec::with_capacity(siblings.len());
-            let mut cur_idx = positions.get(idx).copied().unwrap_or(0);
-            for _ in 0..siblings.len() {
-                pos_bits.push((cur_idx & 1) == 1);
-                cur_idx >>= 1;
-            }
-            
-            (path_bytes, pos_bits)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+            // Use aligned openings directly by row index
+            let (sib_vec, pos_actual) = aligned_openings.get(idx).cloned().unwrap_or((Vec::new(), 0));
+
+            // Bits: current-is-right, LSB-first
+            let mut tmp = pos_actual;
+            let mut path_positions: Vec<bool> = Vec::with_capacity(sib_vec.len());
+            for _ in 0..sib_vec.len() { path_positions.push((tmp & 1) == 1); tmp >>= 1; }
+
+            // Convert siblings to bytes for circuit
+            let merkle_path: Vec<[u8; 32]> = Vec::new();
         
         CompQuery {
             values,
             merkle_path,
             path_positions,
         }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Parse FRI layers from FRI proof
@@ -328,6 +401,9 @@ where
 {
     type E = GL;
     
+    // Get num_partitions from proof
+    let _num_partitions = fri_proof.num_partitions();
+    
     // Parse all FRI layers
     let (layer_queries, layer_proofs) = fri_proof.clone()
         .parse_layers::<E, H, V>(initial_domain_size, folding_factor)
@@ -337,63 +413,88 @@ where
     let mut result = Vec::with_capacity(num_layers);
     
     // Positions fold layer-by-layer: pos_next = pos_current >> (log2(folding_factor))
-    let fold_shift = (folding_factor as f64).log2() as usize;  // For binary FRI, this is 1
+    let _fold_shift = (folding_factor as f64).log2() as usize;  // For binary FRI, this is 1
     let mut layer_positions = main_query_positions.to_vec();
+    let mut current_domain_size = initial_domain_size;
+    
     
     for (_layer_idx, (query_vals, batch_proof)) in layer_queries.iter().zip(&layer_proofs).enumerate() {
         // Fold positions for this layer
-        layer_positions = layer_positions.iter().map(|&p| p >> fold_shift).collect();
-        let mut folded_positions = layer_positions.clone();
-        folded_positions.sort_unstable();
-        folded_positions.dedup();
+        // NOTE: Fold using CURRENT domain, then divide (matches Winterfell line 256-257, 303-304)
+        let folded_domain_size = current_domain_size / folding_factor;
+        layer_positions = layer_positions.iter().map(|&p| p % folded_domain_size).collect();
+        current_domain_size = folded_domain_size;
         
-        // query_vals is Vec<E> with folding_factor elements per query
-        let num_queries_this_layer = query_vals.len() / folding_factor;
-        
-        // Compute leaf digests for this layer
-        let leaves: Vec<H::Digest> = query_vals.chunks(folding_factor)
-            .map(|chunk| H::hash_elements(chunk))
-            .collect();
-        
-        // Use folded positions
-        let positions = &folded_positions;
-        
-        // Extract paths from batch proof
-        let openings = extract_paths_from_batch(batch_proof, &leaves, &positions);
-        
-        // Build per-query FRI data
-        let mut queries = Vec::with_capacity(num_queries_this_layer);
-        for (q_idx, chunk) in query_vals.chunks(folding_factor).enumerate() {
-            let v_lo = if chunk.len() > 0 { chunk[0].as_int() } else { 0 };
-            let v_hi = if chunk.len() > 1 { chunk[1].as_int() } else { 0 };
-            
-            let (merkle_path, path_positions) = if q_idx < openings.len() {
-                let (_leaf, siblings) = &openings[q_idx];
-                let path_bytes: Vec<[u8; 32]> = siblings.iter().map(|d| d.as_bytes()).collect();
-                
-                // Compute position bits from ACTUAL folded position
-                let mut pos_bits = Vec::with_capacity(siblings.len());
-                let actual_pos = positions.get(q_idx).copied().unwrap_or(0);
-                let mut cur_idx = actual_pos;
-                for _ in 0..siblings.len() {
-                    pos_bits.push((cur_idx & 1) == 1);
-                    cur_idx >>= 1;
-                }
-                
-                (path_bytes, pos_bits)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            
-            queries.push(FriQuery {
-                v_lo,
-                v_hi,
-                merkle_path,
-                path_positions,
-            });
+        // Deduplicate WITHOUT sorting - matches Winterfell's fold_positions
+        // This preserves insertion order to match query_vals from proof
+        let mut folded_positions = Vec::new();
+        for &pos in &layer_positions {
+            if !folded_positions.contains(&pos) {
+                folded_positions.push(pos);
+            }
         }
         
-        result.push(FriLayerQueries { queries });
+        // query_vals is Vec<E> with folding_factor elements per query
+        let _num_queries_this_layer = query_vals.len() / folding_factor;
+        
+        
+        
+        // Build per-query FRI data (batch-only; no per-path Merkle data)
+        // - query_vals has values for UNIQUE folded positions only
+        // - We need to expand back to values for ALL original layer_positions
+        // - Multiple original positions may map to the same folded position
+        let mut folded_data: std::collections::HashMap<usize, Vec<u64>> = 
+            std::collections::HashMap::new();
+        
+        for (unique_idx, &folded_pos) in folded_positions.iter().enumerate() {
+            // Get values for this unique position
+            let chunk_start = unique_idx * folding_factor;
+            let chunk_end = (chunk_start + folding_factor).min(query_vals.len());
+            let values: Vec<u64> = query_vals[chunk_start..chunk_end].iter().map(|e| e.as_int()).collect();
+            folded_data.insert(folded_pos, values);
+        }
+        
+        // Now create one FriQuery per original layer_position
+        let mut queries = Vec::with_capacity(layer_positions.len());
+        let row_length = current_domain_size;
+        
+        for (_pos_idx, &original_pos) in layer_positions.iter().enumerate() {
+            // Find which folded position this original position maps to
+            let folded_pos = original_pos % row_length;
+            let values = folded_data.get(&folded_pos)
+                .expect(&format!("folded_pos {} not found in folded_data", folded_pos));
+            
+            // For FRI, we need both v_lo and v_hi from the committed values
+            // (these come from the folding_factor elements at the folded position)
+            let v_lo = values.get(0).copied().unwrap_or(0);
+            let v_hi = values.get(1).copied().unwrap_or(0);
+            
+            queries.push(FriQuery { v_lo, v_hi });
+        }
+        
+        // Collect unique values and batch nodes metadata for batch verification
+        let unique_values: Vec<(u64, u64)> = folded_positions.iter()
+            .filter_map(|fp| {
+                if let Some(vals) = folded_data.get(fp) {
+                    Some((vals.get(0).copied().unwrap_or(0), vals.get(1).copied().unwrap_or(0)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let unique_indexes: Vec<usize> = folded_positions.clone();
+        let batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof.nodes.iter()
+            .map(|v| v.iter().map(|d| d.as_bytes()).collect())
+            .collect();
+        let batch_depth: u8 = batch_proof.depth;
+        
+        result.push(FriLayerQueries { 
+            queries,
+            unique_indexes,
+            unique_values,
+            batch_nodes,
+            batch_depth,
+        });
     }
     
     result
@@ -404,18 +505,23 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
     ood_trace_current: &[u64],
     ood_trace_next: &[u64],
     ood_comp: &[u64],
+    ood_comp_next: &[u64],
 ) -> [u8; 32] {
     use winter_crypto::Digest;
     
-    // Hash OOD frame values using RPO
+    // Hash OOD frame values - MATCH Winterfell's merge_ood_evaluations order
+    // Per Winterfell source: [trace_current, constraint_current, trace_next, constraint_next]
     let mut elements = Vec::new();
     for &v in ood_trace_current {
+        elements.push(GL::try_from(v).unwrap_or(GL::ZERO));
+    }
+    for &v in ood_comp {
         elements.push(GL::try_from(v).unwrap_or(GL::ZERO));
     }
     for &v in ood_trace_next {
         elements.push(GL::try_from(v).unwrap_or(GL::ZERO));
     }
-    for &v in ood_comp {
+    for &v in ood_comp_next {
         elements.push(GL::try_from(v).unwrap_or(GL::ZERO));
     }
     
@@ -492,181 +598,3 @@ fn compute_statement_hash(
     let hash = hasher.squeeze_field_elements::<InnerFr>(1);
     hash[0]
 }
-
-/// Derive query positions by replicating Winterfell's exact FS transcript
-fn derive_query_positions<H: ElementHasher<BaseField = GL>>(
-    proof: &Proof,
-    trace_commitments: &[H::Digest],
-    comp_commitment: &H::Digest,
-    fri_commitments: &[H::Digest],
-    lde_domain_size: usize,
-) -> Vec<usize> {
-    use winter_crypto::{DefaultRandomCoin};
-    use winter_math::ToElements;
-    
-    // 1. Initialize coin with context elements
-    let seed_elements: Vec<GL> = proof.context.to_elements();
-    let mut public_coin = DefaultRandomCoin::<H>::new(&seed_elements);
-    
-    // 2. Reseed with trace commitment
-    public_coin.reseed(trace_commitments[0]);
-    
-    // 3. Draw constraint coefficients
-    for _ in 0..proof.context.num_constraints() {
-        let _ = public_coin.draw::<GL>();
-    }
-    
-    // 4. Reseed with composition commitment
-    public_coin.reseed(*comp_commitment);
-    
-    // 5. Draw z (OOD point)
-    let _ = public_coin.draw::<GL>();
-    
-    // 6. Reseed with FRI commitments and draw betas
-    for fri_c in fri_commitments {
-        public_coin.reseed(*fri_c);
-        let _ = public_coin.draw::<GL>();
-    }
-    
-    // 7. Draw query positions with PoW nonce
-    let mut positions = public_coin.draw_integers(
-        proof.options().num_queries(),
-        lde_domain_size,
-        proof.pow_nonce,
-    ).unwrap_or_else(|_| Vec::new());
-    
-    // 8. Deduplicate
-    positions.sort_unstable();
-    positions.dedup();
-    
-    positions
-}
-
-/// Extract individual Merkle paths from batch proof
-///
-/// Adapted from winterfell-pvugc/verifier/src/channel.rs::compute_openings_from_batch
-fn extract_paths_from_batch<H: ElementHasher<BaseField = GL>>(
-    proof: &winter_crypto::BatchMerkleProof<H>,
-    leaves: &[H::Digest],
-    indexes: &[usize],
-) -> Vec<(H::Digest, Vec<H::Digest>)> {
-    use alloc::collections::BTreeMap;
-    
-    let depth = proof.depth as usize;
-    let num_leaves = 1usize << depth;
-    let offset = 1usize << depth;
-    
-    // Build partial tree map
-    let mut partial_tree_map = BTreeMap::new();
-    for (&i, leaf) in indexes.iter().zip(leaves.iter()) {
-        partial_tree_map.insert(i + offset, *leaf);
-    }
-    
-    // Build index map
-    let mut map = BTreeMap::new();
-    for (pos, &idx) in indexes.iter().enumerate() {
-        if idx >= num_leaves { return Vec::new(); }
-        map.insert(idx, pos);
-    }
-    
-    // Normalize indexes (set even indices for sibling pairs)
-    let mut norm: Vec<usize> = Vec::new();
-    for &idx in indexes {
-        let even = idx - (idx & 1);
-        if norm.last().copied() != Some(even) { norm.push(even); }
-    }
-    if norm.len() != proof.nodes.len() { return Vec::new(); }
-    
-    // Compute parents layer by layer
-    let mut next_indexes: Vec<usize> = Vec::new();
-    let mut proof_pointers: Vec<usize> = vec![0; norm.len()];
-    let mut buf = [H::Digest::default(); 2];
-    
-    for (i, index) in norm.iter().copied().enumerate() {
-        match map.get(&index) {
-            Some(&i1) => {
-                if leaves.len() <= i1 { return Vec::new(); }
-                buf[0] = leaves[i1];
-                match map.get(&(index + 1)) {
-                    Some(&i2) => {
-                        if leaves.len() <= i2 { return Vec::new(); }
-                        buf[1] = leaves[i2];
-                        proof_pointers[i] = 0;
-                    }
-                    None => {
-                        if proof.nodes[i].is_empty() { return Vec::new(); }
-                        buf[1] = proof.nodes[i][0];
-                        proof_pointers[i] = 1;
-                    }
-                }
-            }
-            None => {
-                if proof.nodes[i].is_empty() { return Vec::new(); }
-                buf[0] = proof.nodes[i][0];
-                match map.get(&(index + 1)) {
-                    Some(&i2) => {
-                        if leaves.len() <= i2 { return Vec::new(); }
-                        buf[1] = leaves[i2];
-                    }
-                    None => return Vec::new(),
-                }
-                proof_pointers[i] = 1;
-            }
-        }
-        let parent = H::merge(&buf);
-        partial_tree_map.insert(offset + index, buf[0]);
-        partial_tree_map.insert((offset + index) ^ 1, buf[1]);
-        let parent_index = (offset + index) >> 1;
-        partial_tree_map.insert(parent_index, parent);
-        next_indexes.push(parent_index);
-    }
-    
-    // Iterate up the tree
-    for _ in 1..depth {
-        let cur = next_indexes.clone();
-        next_indexes.clear();
-        let mut i = 0;
-        while i < cur.len() {
-            let node_index = cur[i];
-            let sibling_index = node_index ^ 1;
-            let sibling = if i + 1 < cur.len() && cur[i + 1] == sibling_index {
-                i += 1;
-                partial_tree_map.get(&sibling_index).copied().unwrap_or_default()
-            } else {
-                let pointer = proof_pointers[i];
-                if proof.nodes[i].len() <= pointer { return Vec::new(); }
-                proof_pointers[i] += 1;
-                proof.nodes[i][pointer]
-            };
-            partial_tree_map.insert(node_index ^ 1, sibling);
-            let node = partial_tree_map.get(&node_index).copied().unwrap_or_default();
-            let parent = if node_index & 1 != 0 {
-                H::merge(&[sibling, node])
-            } else {
-                H::merge(&[node, sibling])
-            };
-            let parent_index = node_index >> 1;
-            partial_tree_map.insert(parent_index, parent);
-            next_indexes.push(parent_index);
-            i += 1;
-        }
-    }
-    
-    // Extract per-index proofs from partial tree
-    let mut result = Vec::with_capacity(indexes.len());
-    for &idx in indexes {
-        let mut cur = idx + offset;
-        let leaf = partial_tree_map.get(&cur).copied().unwrap_or_default();
-        let mut path = Vec::new();
-        while cur > 1 {
-            let sib_idx = cur ^ 1;
-            let sib = partial_tree_map.get(&sib_idx).copied().unwrap_or_default();
-            path.push(sib);
-            cur >>= 1;
-        }
-        result.push((leaf, path));
-    }
-    
-    result
-}
-

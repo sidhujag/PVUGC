@@ -3,11 +3,21 @@
 //! Provides host-side arithmetic for witness computation in circuits.
 //! These operations are used ONLY in witness closures, not in constraints.
 
-use ark_ff::{PrimeField, BigInteger};
+use ark_ff::{PrimeField, BigInteger, Zero};
 use crate::outer_compressed::InnerFr;
 
 /// Goldilocks modulus: p = 2^64 - 2^32 + 1
 pub const P_GL: u128 = 18446744069414584321u128;
+
+/// Assert that p_GL is non-zero in the outer field (required for soundness)
+/// This is a compile-time/runtime sanity check as recommended by cryptographic audits
+#[inline]
+pub fn assert_p_gl_nonzero_in_outer_field() {
+    debug_assert!(
+        InnerFr::from(P_GL) != InnerFr::zero(),
+        "CRITICAL: p_GL must be non-zero in the outer field Fr for congruence checks to be sound!"
+    );
+}
 
 #[inline]
 pub fn gl_add(a: u64, b: u64) -> u64 {
@@ -49,6 +59,31 @@ pub fn gl_inv(a: u64) -> u64 {
     t as u64
 }
 
+/// RPO inverse S-box: x^{10540996611094048183} mod P
+/// This is the modular inverse of x^7 in GL field
+pub fn gl_inv_sbox(y: u64) -> u64 {
+    // For RPO, the inverse S-box is y^{(P-1)/7} mod P
+    // Since 7 divides P-1, we can compute x = y^{(P-1)/7}
+    // Then x^7 = y mod P
+    
+    // (P-1)/7 = 10540996611094048183
+    const INV_EXP: u64 = 10540996611094048183;
+    
+    let mut result = 1u64;
+    let mut base = y;
+    let mut exp = INV_EXP;
+    
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = gl_mul(result, base);
+        }
+        base = gl_mul(base, base);
+        exp >>= 1;
+    }
+    
+    result
+}
+
 /// Convert InnerFr to u128 (low 128 bits). Safe for our use because
 /// all GL-native products and sums we feed here are < 2^128.
 #[inline]
@@ -64,21 +99,23 @@ pub fn fr_to_u128(fr: InnerFr) -> u128 {
 /// Compute the *true* Euclidean quotient q in Z such that:
 ///   lhs - rhs = q * P_GL
 /// Return (q_plus, q_minus) with q = q_plus - q_minus, q_plus,q_minus ∈ [0, 2^64-1].
-/// If congruence doesn't actually hold, constraints will fail; we just produce
-/// the Euclidean quotient from the integer difference.
+/// 
+/// CRITICAL: First reduces both sides modulo p_GL to handle cases where
+/// lhs or rhs were computed with Fr arithmetic (and might be large Fr values).
 #[inline]
 pub fn quotient_from_fr_difference(lhs: InnerFr, rhs: InnerFr) -> (u64, u64) {
-    let l = fr_to_u128(lhs);
-    let r = fr_to_u128(rhs);
+    // FIRST: Reduce both to canonical GL representatives
+    let l_gl = fr_to_gl_u64(lhs) as u128;
+    let r_gl = fr_to_gl_u64(rhs) as u128;
     
-    // Avoid i128 cast overflow: do subtraction in u128 with explicit sign handling
-    let (diff, neg) = if l >= r {
-        (l - r, false)
+    // Now compute quotient from GL representatives
+    let (diff, neg) = if l_gl >= r_gl {
+        (l_gl - r_gl, false)
     } else {
-        (r - l, true)
+        (r_gl - l_gl, true)
     };
     
-    let q_abs = diff / P_GL;                      // floor division; fits in 64 bits
+    let q_abs = diff / P_GL;  // Should be 0 or 1 for GL values
     debug_assert!(q_abs <= u64::MAX as u128, "quotient too large: {}", q_abs);
     let q_abs_u64 = q_abs as u64;
     if neg { (0, q_abs_u64) } else { (q_abs_u64, 0) }
@@ -98,6 +135,16 @@ pub fn fr_to_gl_u64(fr: InnerFr) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    #[test]
+    fn test_p_gl_nonzero_in_outer_field() {
+        // Verify critical soundness requirement
+        assert_p_gl_nonzero_in_outer_field();
+        
+        // Also verify the actual value
+        let p_gl_in_fr = InnerFr::from(P_GL);
+        assert_ne!(p_gl_in_fr, InnerFr::zero(), "p_GL must be non-zero in InnerFr for congruence checks to be sound");
+    }
     
     #[test]
     fn test_gl_arithmetic() {

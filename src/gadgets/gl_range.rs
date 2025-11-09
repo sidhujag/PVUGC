@@ -1,6 +1,23 @@
-//! GL value range checks
+//! GL Value Range Checks and Input Validation
 //!
-//! Enforce that u64 values are < p_GL using carry chain
+//! ## Purpose
+//!
+//! Provides canonical Goldilocks allocation with range enforcement:
+//! - `gl_alloc_u64()`: Allocates u64 with 0 <= x < p_GL check
+//! - `gl_alloc_u64_vec()`: Batch allocation for witness inputs
+//!
+//! ## Usage Pattern
+//!
+//! Use at input boundaries to validate witness data:
+//! ```text
+//! // Allocate witness data with range check
+//! let inputs = gl_alloc_u64_vec(cs, &witness_values)?;
+//! ```
+//!
+//! Then use light operations (from gl_fast) for internal computation.
+//!
+//! Also used by `canonicalize_to_bytes()` to enforce canonical representation
+//! when comparing computed digests to proof bytes.
 
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use ark_r1cs_std::prelude::*;
@@ -89,137 +106,6 @@ pub fn gl_alloc_u64_vec(
         out.push(fp);
     }
     Ok(out)
-}
-
-// === GL arithmetic with congruence enforcement ===
-
-use crate::inner_stark_full::enforce_gl_eq;
-
-/// GL add with congruence enforcement and canonical result.
-pub fn gl_add_var(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    a: &FpGLVar,
-    b: &FpGLVar,
-) -> Result<FpGLVar, SynthesisError> {
-    let sum_fr = a + b;  // Fr computation
-    // witness canonical GL sum from concrete values
-    let (_u, sum_gl) = gl_alloc_u64(cs.clone(), {
-        let av = a.value().ok();
-        let bv = b.value().ok();
-        av.zip(bv).map(|(av, bv)| {
-            use crate::gl_u64::{fr_to_gl_u64, gl_add};
-            gl_add(fr_to_gl_u64(av), fr_to_gl_u64(bv))
-        })
-    })?;
-    enforce_gl_eq(&sum_fr, &sum_gl)?;
-    Ok(sum_gl)  // Return canonical GL witness!
-}
-
-/// GL add with a GL constant.
-pub fn gl_add_const(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    a: &FpGLVar,
-    c_u64: u64,
-) -> Result<FpGLVar, SynthesisError> {
-    // Add in Fr, then reduce to canonical GL
-    let a_cs = a.cs();
-    let c = FpGLVar::new_constant(a_cs, InnerFr::from(c_u64))?;
-    let sum_fr = a + c;
-    
-    // Witness canonical GL sum
-    let (_u, sum_gl) = gl_alloc_u64(cs, {
-        let av = a.value().ok();
-        av.map(|av| {
-            use crate::gl_u64::{fr_to_gl_u64, gl_add};
-            gl_add(fr_to_gl_u64(av), c_u64)
-        })
-    })?;
-    enforce_gl_eq(&sum_fr, &sum_gl)?;
-    Ok(sum_gl)  // Return canonical GL!
-}
-
-/// GL multiply with congruence enforcement and canonical result.
-pub fn gl_mul_var(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    a: &FpGLVar,
-    b: &FpGLVar,
-) -> Result<FpGLVar, SynthesisError> {
-    let prod_fr = a * b;  // Fr computation
-    let (_u, prod_gl) = gl_alloc_u64(cs.clone(), {
-        let av = a.value().ok();
-        let bv = b.value().ok();
-        av.zip(bv).map(|(av, bv)| {
-            use crate::gl_u64::{fr_to_gl_u64, gl_mul};
-            gl_mul(fr_to_gl_u64(av), fr_to_gl_u64(bv))
-        })
-    })?;
-    enforce_gl_eq(&prod_fr, &prod_gl)?;
-    Ok(prod_gl)  // Return canonical GL witness!
-}
-
-/// GL multiply by a GL constant.
-pub fn gl_mul_const(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    a: &FpGLVar,
-    c_u64: u64,
-) -> Result<FpGLVar, SynthesisError> {
-    // Use constant instead of witness (the constant is public, not malleable)
-    let c = FpGLVar::new_constant(cs.clone(), InnerFr::from(c_u64))?;
-    gl_mul_var(cs, a, &c)
-}
-
-/// Proves v != 0 by exhibiting inv with v*inv = 1 (GL semantics)
-pub fn gl_enforce_nonzero_and_inv(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    v: &FpGLVar,
-) -> Result<FpGLVar, SynthesisError> {
-    use crate::gl_u64::{fr_to_gl_u64, gl_inv};
-    let inv = FpGLVar::new_witness(cs.clone(), || {
-        let vv = v.value()?;
-        let inv_u = gl_inv(fr_to_gl_u64(vv));
-        Ok(InnerFr::from(inv_u))
-    })?;
-    let one = FpGLVar::constant(InnerFr::from(1u64));
-    enforce_gl_eq(&(v * &inv), &one)?;
-    Ok(inv)
-}
-
-/// GL linear combination with congruence enforcement
-///
-/// Computes Σ coeffs[i] * terms[i] in GL semantics
-/// Witnesses the GL sum and enforces congruence with Fr computation
-pub fn gl_lincomb(
-    cs: ark_relations::r1cs::ConstraintSystemRef<InnerFr>,
-    coeffs: &[u64],
-    terms: &[FpGLVar],
-) -> Result<FpGLVar, SynthesisError> {
-    if terms.is_empty() {
-        return Ok(FpGLVar::new_constant(cs, InnerFr::from(0u64))?);
-    }
-    if coeffs.len() != terms.len() {
-        return Err(SynthesisError::Unsatisfiable);
-    }
-    
-    // Fr-side accumulator
-    let first_cs = terms[0].cs();
-    let mut acc_fr = FpGLVar::new_constant(first_cs.clone(), InnerFr::from(coeffs[0]))? * &terms[0];
-    for (c, t) in coeffs.iter().zip(terms).skip(1) {
-        let coeff_var = FpGLVar::new_constant(t.cs(), InnerFr::from(*c))?;
-        acc_fr += coeff_var * t;
-    }
-
-    // GL witness (canonical Goldilocks) - THIS is what we return!
-    let sum_w = FpGLVar::new_witness(cs, || {
-        use crate::gl_u64::{gl_add, gl_mul, fr_to_gl_u64};
-        let mut acc = 0u64;
-        for (c, t) in coeffs.iter().zip(terms.iter()) {
-            acc = gl_add(acc, gl_mul(*c, fr_to_gl_u64(t.value()?)));
-        }
-        Ok(InnerFr::from(acc))
-    })?;
-    enforce_gl_eq(&acc_fr, &sum_w)?;
-
-    Ok(sum_w) // Return canonical GL witness, not Fr result!
 }
 
 #[cfg(test)]

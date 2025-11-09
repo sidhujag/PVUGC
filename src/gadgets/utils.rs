@@ -4,7 +4,11 @@ use ark_r1cs_std::fields::fp::FpVar;
 use crate::outer_compressed::InnerFr;
 
 pub type FpGLVar = FpVar<InnerFr>;
-
+#[derive(Clone, Copy, Debug)]
+pub enum CombinerKind {
+    RandomRho,                          // weights = rho^i
+    DegreeChunks { chunk_deg: usize },  // weights = x^(chunk_deg * i)
+}
 /// Convert 32 bytes to 4 GL field elements (8 bytes each, LE)
 pub fn digest32_to_gl4(bytes32: &[UInt8<InnerFr>]) -> Result<[FpGLVar;4], SynthesisError> {
     assert!(bytes32.len() == 32);

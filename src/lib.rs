@@ -42,8 +42,7 @@ pub mod inner_stark_full;    // Full verifier approach
 pub mod stark_proof_parser;  // Parser for full verifier (no hooks!)
 pub use inner_stark_full::{FullStarkVerifierCircuit, AirParams, TraceQuery, CompQuery};
 pub mod gl_u64;              // Goldilocks u64 arithmetic (for witness computation)
-pub mod gadgets;             // Expert-provided gadgets (RPO-GL, combiner, FRI, range checks)
-pub mod fs;
+pub mod gadgets;             // Expert-provided gadgets (Light RPO, combiner, FRI, range checks)
 
 
 // Crypto helpers (Poseidon params + host Merkle helpers)

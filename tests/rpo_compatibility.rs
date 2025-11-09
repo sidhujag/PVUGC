@@ -1,8 +1,10 @@
-//! RPO-256 Compatibility Test
+//! RPO-256 Compatibility Test (Using Light RPO)
 //!
-//! Verifies that our GL-native RPO gadget produces identical output to Winterfell's Rp64_256
+//! Verifies that our light GL-native RPO gadget produces identical output to Winterfell's Rp64_256
+//! This validates that light RPO is a drop-in replacement for heavy RPO
 
-use arkworks_groth16::gadgets::rpo_gl::{RpoParamsGL, rpo_hash_elements_gl};
+use arkworks_groth16::gadgets::rpo_gl_light::{RpoParamsGLLight, rpo_hash_elements_light, rpo_merge_light};
+use arkworks_groth16::gadgets::gl_fast::GlVar;
 use arkworks_groth16::gadgets::gl_range::gl_alloc_u64_vec;
 use arkworks_groth16::inner_stark_full::enforce_gl_eq;
 use arkworks_groth16::outer_compressed::InnerFr;
@@ -10,7 +12,6 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::R1CSVar;
 use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef};
-use ark_ff::{BigInteger, PrimeField};
 use winter_crypto::hashers::Rp64_256;
 use winter_crypto::{Hasher, Digest, ElementHasher};
 use winter_math::fields::f64::BaseElement as GL;
@@ -39,41 +40,38 @@ fn test_rpo_matches_winterfell_hash() {
         ]);
     }
     
-    // Circuit-side
+    // Circuit-side with LIGHT RPO
     let cs = ConstraintSystem::<InnerFr>::new_ref();
-    let input_gl = gl_alloc_u64_vec(cs.clone(), &[1,2,3,4]).unwrap();
-    let digest = rpo_hash_elements_gl(cs.clone(), &RpoParamsGL::default(), &input_gl).unwrap();
+    let input_fp = gl_alloc_u64_vec(cs.clone(), &[1,2,3,4]).unwrap();
+    let input_gl: Vec<GlVar> = input_fp.iter().map(|fp| GlVar(fp.clone())).collect();
+    let digest = rpo_hash_elements_light(cs.clone(), &input_gl, &RpoParamsGLLight::default()).unwrap();
     
     // Check lane-wise equality
     assert_eq!(digest.len(), 4);
     
-    for i in 0..4 {
-        let val = digest[i].value().unwrap();
-        let bytes = val.into_bigint().to_bytes_le();
-        let mut v = 0u64;
-        for (j, &b) in bytes.iter().enumerate().take(8) {
-            v |= (b as u64) << (j * 8);
-        }
+    // Verify digest values are valid
+    for lane in &digest {
+        let _val = lane.0.value().unwrap();
     }
     
     for i in 0..4 {
         let expected_var = FpVar::constant(InnerFr::from(expected[i]));
-        let matches = enforce_gl_eq(&digest[i], &expected_var);
+        let matches = enforce_gl_eq(&digest[i].0, &expected_var);
         if matches.is_err() || !cs.is_satisfied().unwrap() {
-            panic!("RPO mismatch at lane {}: expected {}, got circuit value", i, expected[i]);
+            panic!("Light RPO mismatch at lane {}: expected {}, got circuit value", i, expected[i]);
         }
     }
-    assert!(cs.is_satisfied().unwrap(), "RPO gadget doesn't match Winterfell on test vectors!");
+    assert!(cs.is_satisfied().unwrap(), "Light RPO gadget doesn't match Winterfell on test vectors!");
 }
 
 #[test]
 fn rpo_matches_winterfell_on_small_vectors() {
     use winter_crypto::hashers::Rp64_256;
     use winter_math::fields::f64::BaseElement as GL;
-    use winter_crypto::Hasher;
+    use winter_crypto::ElementHasher;
     use ark_relations::r1cs::ConstraintSynthesizer;
 
-    let host = |xs: &[u64]| {
+    let _host = |xs: &[u64]| {
         let els: Vec<GL> = xs.iter().map(|&x| GL::try_from(x).unwrap()).collect();
         let d = Rp64_256::hash_elements(&els);
         let bytes = d.as_bytes(); // 32 bytes = 4 lanes
@@ -81,7 +79,7 @@ fn rpo_matches_winterfell_on_small_vectors() {
     };
 
     let cs = ConstraintSystem::<InnerFr>::new_ref();
-    let params = RpoParamsGL::default();
+    let _params = RpoParamsGLLight::default();
 
     // Simple wrapper to enter synthesis mode
     struct TestCircuit;
@@ -96,23 +94,24 @@ fn rpo_matches_winterfell_on_small_vectors() {
                     bytes.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect::<Vec<_>>()
                 })();
                 
-                let inputs = if xs.is_empty() {
+                let inputs_fp = if xs.is_empty() {
                     vec![]
                 } else {
                     gl_alloc_u64_vec(cs.clone(), xs)?
                 };
-                let got = rpo_hash_elements_gl(cs.clone(), &RpoParamsGL::default(), &inputs)?;
+                let inputs_gl: Vec<GlVar> = inputs_fp.iter().map(|fp| GlVar(fp.clone())).collect();
+                let got = rpo_hash_elements_light(cs.clone(), &inputs_gl, &RpoParamsGLLight::default())?;
                 
                 for i in 0..4 {
-                    enforce_gl_eq(&got[i], &FpVar::constant(InnerFr::from(expect[i])))?;
+                    enforce_gl_eq(&got[i].0, &FpVar::constant(InnerFr::from(expect[i])))?;
                 }
             }
             Ok(())
         }
     }
 
-    TestCircuit.generate_constraints(cs.clone()).expect("RPO verification failed");
-    assert!(cs.is_satisfied().unwrap(), "RPO gadget doesn't match Winterfell on test vectors!");
+    TestCircuit.generate_constraints(cs.clone()).expect("Light RPO verification failed");
+    assert!(cs.is_satisfied().unwrap(), "Light RPO gadget doesn't match Winterfell on test vectors!");
 }
 
 #[test]
@@ -138,26 +137,28 @@ fn test_rpo_matches_winterfell_merge() {
         ]);
     }
     
-    // Circuit-side
-    use arkworks_groth16::gadgets::rpo_gl::rpo_merge_gl;
+    // Circuit-side with LIGHT RPO
     let cs = ConstraintSystem::<InnerFr>::new_ref();
     
-    let left_gl = gl_alloc_u64_vec(cs.clone(), &[1,2,3,4]).unwrap();
-    let right_gl = gl_alloc_u64_vec(cs.clone(), &[5,6,7,8]).unwrap();
+    let left_fp = gl_alloc_u64_vec(cs.clone(), &[1,2,3,4]).unwrap();
+    let right_fp = gl_alloc_u64_vec(cs.clone(), &[5,6,7,8]).unwrap();
+    
+    let left_gl: Vec<GlVar> = left_fp.iter().map(|fp| GlVar(fp.clone())).collect();
+    let right_gl: Vec<GlVar> = right_fp.iter().map(|fp| GlVar(fp.clone())).collect();
     
     // First hash both sides
-    let left_digest = rpo_hash_elements_gl(cs.clone(), &RpoParamsGL::default(), &left_gl).unwrap();
-    let right_digest = rpo_hash_elements_gl(cs.clone(), &RpoParamsGL::default(), &right_gl).unwrap();
+    let left_digest = rpo_hash_elements_light(cs.clone(), &left_gl, &RpoParamsGLLight::default()).unwrap();
+    let right_digest = rpo_hash_elements_light(cs.clone(), &right_gl, &RpoParamsGLLight::default()).unwrap();
     
     // Then merge
-    let merged = rpo_merge_gl(cs.clone(), &RpoParamsGL::default(), &left_digest, &right_digest).unwrap();
+    let merged = rpo_merge_light(cs.clone(), &left_digest, &right_digest, &RpoParamsGLLight::default()).unwrap();
     
     // Verify
     for i in 0..4 {
         let expected_var = FpVar::constant(InnerFr::from(expected[i]));
-        enforce_gl_eq(&merged[i], &expected_var).unwrap();
+        enforce_gl_eq(&merged[i].0, &expected_var).unwrap();
     }
     
-    assert!(cs.is_satisfied().unwrap(), "RPO merge doesn't match Winterfell!");
+    assert!(cs.is_satisfied().unwrap(), "Light RPO merge doesn't match Winterfell!");
 }
 
