@@ -303,7 +303,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         }
         // Ensure data shapes are consistent with commitments
         if let Some(first_segment) = self.trace_segments.first() {
-            if first_segment.queries.len() != self.trace_queries.len() {
+            if first_segment.queries.len() != expected_queries {
                 return Err(SynthesisError::Unsatisfiable);
             }
         }
@@ -321,7 +321,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(segment.queries.len());
-            if segment.queries.len() != self.trace_queries.len() {
+            if segment.queries.len() != expected_queries {
                 return Err(SynthesisError::Unsatisfiable);
             }
             for (row_idx, q) in segment.queries.iter().enumerate() {
@@ -362,15 +362,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         for row in &trace_row_vars {
             if row.len() != expected_trace_width {
                 return Err(SynthesisError::Unsatisfiable);
-            }
-        }
-        for (expected, actual) in self.trace_queries.iter().zip(trace_row_vars.iter()) {
-            if expected.values.len() != actual.len() {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-            for (col_idx, expected_val) in expected.values.iter().enumerate() {
-                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
-                actual[col_idx].0.enforce_equal(&expected_fe)?;
             }
         }
 
@@ -428,15 +419,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         for row in &comp_row_vars {
             if row.len() != expected_comp_width {
                 return Err(SynthesisError::Unsatisfiable);
-            }
-        }
-        for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
-            if expected.values.len() != actual.len() {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-            for (col_idx, expected_val) in expected.values.iter().enumerate() {
-                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
-                actual[col_idx].0.enforce_equal(&expected_fe)?;
             }
         }
 

@@ -32,6 +32,18 @@ Layer 3: PVUGC (Grover–Sahai on BW6-761)
 
 Compatibility: parsing, ordering, and pointer arithmetic match Winterfell; adversarial tests tampering with nodes, positions, OOD, or FRI data are rejected.
 
+### Witness Linking Guarantees
+
+- **Single allocation for OOD traces** – the circuit allocates Out-Of-Domain (OOD) trace and composition evaluations once and
+  reuses the same `GlVar` handles when hashing the proof commitments and when constructing the DEEP composition. Any attempt to
+  alter the values between these phases would break constraint satisfaction.
+- **Shared query witnesses** – Merkle verification gadgets now pass the committed row values by reference into the DEEP
+  evaluation gadgets. This guarantees that each queried row that passes the Merkle check is the same row whose numerators and
+  denominators enter the DEEP combination.
+- **Shape enforcement** – explicit checks ensure the prover supplies the expected number of trace columns, composition
+  columns, and OOD elements before challenge derivation. Mismatched widths or missing values are caught deterministically by
+  the circuit.
+
 ## Constraint Growth (empirical)
 
 With batch verification:
