@@ -9,6 +9,7 @@ use ark_r1cs_std::boolean::Boolean;
 use crate::outer_compressed::InnerFr;
 use crate::gadgets::rpo_gl_light::RpoParamsGLLight;
 use crate::gadgets::gl_fast::GlVar;
+use crate::gadgets::gl_fast::{gl_add_light, gl_sub_light, gl_inv_light};
 
 pub type FpGLVar = FpVar<InnerFr>;
 
@@ -99,39 +100,86 @@ pub fn verify_fri_layers_gl(
         use crate::gadgets::rpo_gl_light::rpo_hash_elements_light;
         
         let row_length = domain_size / t;
-        
-        
-        
-        let mut query_values: Vec<(FpGLVar, FpGLVar)> = Vec::new();
+        // Verify batch and retain Merkle-checked pairs
         if !layer.unique_indexes.is_empty() && !layer.batch_nodes.is_empty() && !layer.unique_values.is_empty() && layer.unique_values.len() == layer.unique_indexes.len() {
-            // Build leaves from unique_values
-            let unique_leaves: Vec<[GlVar; 4]> = layer.unique_values.iter()
-                .map(|(lo, hi)| {
-                    let v_lo = GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*lo)))?);
-                    let v_hi = GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*hi)))?);
-                    let digest = rpo_hash_elements_light(cs.clone(), &[v_lo, v_hi], &cfg.params_rpo)?;
-                    Ok([digest[0].clone(), digest[1].clone(), digest[2].clone(), digest[3].clone()])
-                })
-                .collect::<Result<_, SynthesisError>>()?;
+            // Build digests and retain FP pairs
+            let mut leaf_digests: Vec<[GlVar; 4]> = Vec::with_capacity(layer.unique_values.len());
+            let mut leaf_pairs_fp: Vec<(FpGLVar, FpGLVar)> = Vec::with_capacity(layer.unique_values.len());
+            for (lo, hi) in layer.unique_values.iter() {
+                let v_lo_fp = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*lo)))?;
+                let v_hi_fp = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(*hi)))?;
+                let v_lo = GlVar(v_lo_fp.clone());
+                let v_hi = GlVar(v_hi_fp.clone());
+                let digest = rpo_hash_elements_light(cs.clone(), &[v_lo, v_hi], &cfg.params_rpo)?;
+                leaf_digests.push([digest[0].clone(), digest[1].clone(), digest[2].clone(), digest[3].clone()]);
+                leaf_pairs_fp.push((v_lo_fp, v_hi_fp));
+            }
             
             // Verify batch root equals expected
             use crate::gadgets::merkle_batch::verify_batch_merkle_root_gl;
             verify_batch_merkle_root_gl(
                 cs.clone(),
                 &cfg.params_rpo,
-                unique_leaves,
+                leaf_digests,
                 &layer.unique_indexes,
                 &layer.batch_nodes,
                 layer.batch_depth as usize,
                 layer.root_bytes,
             )?;
-            // Also prepare query_values for consistency/folding using this layer's values
-            for q in layer.queries {
-                query_values.push((
-                    FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(q.v_lo)))?,
-                    FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(q.v_hi)))?,
-                ));
+            // Consistency: use Merkle-checked pairs in the same unique order
+            for (unique_idx, &_u_pos) in folded_positions_unique.iter().enumerate() {
+                let pos_idx = unique_first_indices[unique_idx];
+                let (v_lo_fp, v_hi_fp) = &leaf_pairs_fp[unique_idx];
+                let is_hi = prev_positions_full[pos_idx] / row_length;
+                let is_lo_bool = Boolean::constant(is_hi == 0);
+                let expected_value_fp = FpVar::<InnerFr>::conditionally_select(&is_lo_bool, v_lo_fp, v_hi_fp)?;
+                enforce_gl_eq(&current[pos_idx], &expected_value_fp)?;
             }
+            
+            // Fold to next layer using Merkle-checked pairs
+            // After folding, current will have length = number of unique folded positions
+            let mut next_current: Vec<FpGLVar> = Vec::with_capacity(folded_positions_unique.len());
+            // Precompute pow2 table for current layer's generator: g_current^(2^k)
+            let m_layer = (folded_domain_size as f64).log2() as usize;
+            let mut pow2_g: Vec<GlVar> = Vec::with_capacity(m_layer);
+            if m_layer > 0 {
+                pow2_g.push(g_current.clone());
+                for _ in 1..m_layer {
+                    let last = pow2_g.last().unwrap().clone();
+                    pow2_g.push(gl_mul_light(cs.clone(), &last, &last)?);
+                }
+            }
+            for (u_idx, &folded_pos) in folded_positions_unique.iter().enumerate() {
+                // Use Merkle-checked pair aligned to the unique order
+                let (v_lo_fp, v_hi_fp) = &leaf_pairs_fp[u_idx];
+                let v_lo_gl = GlVar(v_lo_fp.clone());
+                let v_hi_gl = GlVar(v_hi_fp.clone());
+                let beta_gl = GlVar(layer.beta.clone());
+                // xe = offset * g_current^folded_pos using pow2 table
+                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+                let mut e = folded_pos;
+                let mut k = 0usize;
+                while e > 0 {
+                    if (e & 1) == 1 && k < pow2_g.len() {
+                        acc = gl_mul_light(cs.clone(), &acc, &pow2_g[k])?;
+                    }
+                    e >>= 1;
+                    k += 1;
+                }
+                let xe = gl_mul_light(cs.clone(), &offset, &acc)?;
+                // Interpolation
+                let beta_plus_xe = gl_add_light(cs.clone(), &beta_gl, &xe)?;
+                let beta_minus_xe = gl_sub_light(cs.clone(), &beta_gl, &xe)?;
+                let term1 = gl_mul_light(cs.clone(), &v_lo_gl, &beta_plus_xe)?;
+                let term2 = gl_mul_light(cs.clone(), &v_hi_gl, &beta_minus_xe)?;
+                let numerator = gl_sub_light(cs.clone(), &term1, &term2)?;
+                let two = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
+                let denominator = gl_mul_light(cs.clone(), &two, &xe)?;
+                let denom_inv = gl_inv_light(cs.clone(), &denominator)?;
+                let v_next_gl = gl_mul_light(cs.clone(), &numerator, &denom_inv)?;
+                next_current.push(v_next_gl.0);
+            }
+            current = next_current;
         } else {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -139,87 +187,19 @@ pub fn verify_fri_layers_gl(
         
         
         
-        // Check consistency for each UNIQUE folded position against current
-        for (unique_idx, _) in folded_positions_unique.iter().enumerate() {
-            let pos_idx = unique_first_indices[unique_idx];
-            let (v_lo, v_hi) = &query_values[pos_idx];
-            // Determine half using the pre-fold (non-unique) position for this layer
-            let is_hi = prev_positions_full[pos_idx] / row_length;  // 0 for first half, 1 for second half
-            let is_lo_bool = Boolean::constant(is_hi == 0);
-            let expected_value_fp = FpVar::<InnerFr>::conditionally_select(&is_lo_bool, v_lo, v_hi)?;
-            // Compare against the current value at the FIRST occurrence index for this unique
-            enforce_gl_eq(&current[pos_idx], &expected_value_fp)?;
-        }
+        // (Removed duplicate folding block; folding was performed with Merkle-checked pairs above)
         
-        
-        
-        // Now compute folded evaluations for each UNIQUE query
-        // After folding, current will have length = number of unique folded positions
-        let mut next_current = Vec::with_capacity(folded_positions_unique.len());
-        
-        for (u_idx, &folded_pos) in folded_positions_unique.iter().enumerate() {
-            // Use values from the FIRST occurrence index for this unique position
-            let first_idx = unique_first_indices[u_idx];
-            let (v_lo, v_hi) = &query_values[first_idx];
-            
-            use crate::gadgets::gl_fast::{GlVar, gl_sub_light};
-            let v_lo_gl = GlVar(v_lo.clone());
-            let v_hi_gl = GlVar(v_hi.clone());
-            let beta_gl = GlVar(layer.beta.clone());
-            
-            // Compute xe = g_current^folded_position * offset
-            // Use LIGHT operations for potentially large generator powers
-            use crate::gadgets::gl_fast::gl_mul_light;
-            let xe = {
-                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-                let mut base = g_current.clone();
-                let mut e = folded_pos;
-                
-                while e > 0 {
-                    if e & 1 == 1 { acc = gl_mul_light(cs.clone(), &acc, &base)?; }
-                    base = gl_mul_light(cs.clone(), &base, &base)?;
-                    e >>= 1;
-                }
-                
-                gl_mul_light(cs.clone(), &offset, &acc)?
-            };
-            
-            // Polynomial interpolation formula for line through (xe, v_lo) and (-xe, v_hi):
-            //   p(x) = v_lo * (x + xe)/(2*xe) + v_hi * (x - xe)/(-2*xe)
-            use crate::gadgets::gl_fast::{gl_add_light};
-            let beta_plus_xe = gl_add_light(cs.clone(), &beta_gl, &xe)?;
-            let beta_minus_xe = gl_sub_light(cs.clone(), &beta_gl, &xe)?;
-            
-            let term1 = gl_mul_light(cs.clone(), &v_lo_gl, &beta_plus_xe)?;  // v_lo * (beta + xe)
-            let term2 = gl_mul_light(cs.clone(), &v_hi_gl, &beta_minus_xe)?;  // v_hi * (beta - xe)
-            
-            let numerator = gl_sub_light(cs.clone(), &term1, &term2)?;  // term1 - term2
-            
-            // Compute denominator = 2*xe
-            let two = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
-            let denominator = gl_mul_light(cs.clone(), &two, &xe)?;
-            
-            // Compute v_next = numerator / denominator
-            use crate::gadgets::gl_fast::gl_inv_light;
-            let denom_inv = gl_inv_light(cs.clone(), &denominator)?;
-            let v_next_gl = gl_mul_light(cs.clone(), &numerator, &denom_inv)?;
-            
-            // Add folded value to next_current
-            next_current.push(v_next_gl.0);
-        }
-        
-        // Replace current with folded evaluations
-        current = next_current;
-        
-        // Update domain generator for next layer: g_current = g_current^folding_factor
-        // This is because the domain size halves (for t=2), so the generator spacing doubles
-        // Use LIGHT operations since these are intermediate values
+        // Update domain generator for next layer: g_current = g_current^t (general folding factor)
         use crate::gadgets::gl_fast::gl_mul_light;
-        let mut g_next = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-        for _ in 0..cfg.folding_factor {
-            g_next = gl_mul_light(cs.clone(), &g_next, &g_current)?;
+        let mut acc_g = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+        let mut exp = cfg.folding_factor;
+        let mut base = g_current.clone();
+        while exp > 0 {
+            if (exp & 1) == 1 { acc_g = gl_mul_light(cs.clone(), &acc_g, &base)?; }
+            exp >>= 1;
+            if exp > 0 { base = gl_mul_light(cs.clone(), &base, &base)?; }
         }
-        g_current = g_next;
+        g_current = acc_g;
         
         // Update domain size and positions for next layer (unique)
         domain_size = folded_domain_size;
@@ -255,37 +235,47 @@ pub fn verify_fri_layers_gl(
             let layers_cnt = layers.len();
             let offset_final = GlVar(FpGLVar::constant(InnerFr::from(cfg.domain_offset)));
             let mut g_final = GlVar(FpGLVar::constant(InnerFr::from(cfg.g_lde)));
-            
-            // Raise g_final to folding_factor-th power for each layer
-            // NOTE: offset stays CONSTANT! (Winterfell line 320 - doesn't change)
-            // Use LIGHT operations - congruence checks are sufficient, much faster
             use crate::gadgets::gl_fast::{gl_mul_light, gl_add_light};
+            // Raise by folding_factor each layer (general t)
             for _ in 0..layers_cnt {
-                // Compute g^folding_factor in GL using repeated multiplication
-                let mut g_pow = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-                for _ in 0..cfg.folding_factor {
-                    g_pow = gl_mul_light(cs.clone(), &g_pow, &g_final)?;
+                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+                let mut e = cfg.folding_factor;
+                let mut b = g_final.clone();
+                while e > 0 {
+                    if (e & 1) == 1 { acc = gl_mul_light(cs.clone(), &acc, &b)?; }
+                    e >>= 1;
+                    if e > 0 { b = gl_mul_light(cs.clone(), &b, &b)?; }
                 }
-                g_final = g_pow;
+                g_final = acc;
+            }
+            // Precompute pow2 for g_final up to log2(final domain size)
+            let final_domain = cfg.lde_domain_size / cfg.folding_factor.pow(layers_cnt as u32);
+            let m_final = (final_domain as f64).log2() as usize;
+            let mut pow2_final: Vec<GlVar> = Vec::with_capacity(m_final);
+            if m_final > 0 {
+                pow2_final.push(g_final.clone());
+                for _ in 1..m_final {
+                    let last = pow2_final.last().unwrap().clone();
+                    pow2_final.push(gl_mul_light(cs.clone(), &last, &last)?);
+                }
             }
 
             for (q_idx, v) in current.iter().enumerate() {
                 let pos = positions.get(q_idx).copied().unwrap_or(0);
                 
                 // x_final = offset_final * (g_final)^(positions[q_idx]) using GL arithmetic
-                let x = {
-                    let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-                    let mut base = g_final.clone();
-                    let mut e = pos;
-                    
-                    while e > 0 {
-                        if e & 1 == 1 { acc = gl_mul_light(cs.clone(), &acc, &base)?; }
-                        base = gl_mul_light(cs.clone(), &base, &base)?;
-                        e >>= 1;
+                // x_final = offset_final * g_final^pos using pow2_final
+                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+                let mut e = pos;
+                let mut k = 0usize;
+                while e > 0 {
+                    if (e & 1) == 1 && k < pow2_final.len() {
+                        acc = gl_mul_light(cs.clone(), &acc, &pow2_final[k])?;
                     }
-                    
-                    gl_mul_light(cs.clone(), &offset_final, &acc)?
-                };
+                    e >>= 1;
+                    k += 1;
+                }
+                let x = gl_mul_light(cs.clone(), &offset_final, &acc)?;
                 
                 // Evaluate P(x) using Horner's method with LIGHT operations
                 let mut px = coeff_gl[0].clone();

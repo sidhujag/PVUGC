@@ -656,6 +656,16 @@ pub fn verify_deep_composition(
         .map(|c| GlVar(c.clone()))  // Fr value used directly as GL-congruent element
         .collect();
     
+    // Precompute powers of g_lde: pow2[k] = g_lde^(2^k) once, reuse for all queries
+    let mut pow2_g_lde: Vec<GlVar> = Vec::with_capacity(m);
+    if m > 0 {
+        pow2_g_lde.push(g_lde_gl.clone());
+        for _ in 1..m {
+            let last = pow2_g_lde.last().unwrap().clone();
+            pow2_g_lde.push(gl_mul_light(cs.clone(), &last, &last)?);
+        }
+    }
+    
     // Allocate OOD values as GlVar constants (zero overhead!)
     let ood_current: Vec<GlVar> = ood_trace_current.iter()
         .map(|&v| GlVar(FpGLVar::constant(InnerFr::from(v as u128))))
@@ -682,17 +692,15 @@ pub fn verify_deep_composition(
             pos >>= 1;
         }
         
-        // Compute x = offset * g_lde^position using LIGHT operations
-        let mut base_gl = g_lde_gl.clone();
-        let mut x = offset_gl.clone();
-        
-        for bit in position_bits.iter() {
-            // Conditional multiply using light operations
-            let sel = GlVar(FpGLVar::conditionally_select(bit, &base_gl.0, &one_gl.0)?);
-            x = gl_mul_light(cs.clone(), &x, &sel)?;
-            // Square base: base = base^2
-            base_gl = gl_mul_light(cs.clone(), &base_gl, &base_gl)?;
+        // Compute x = offset * g_lde^position using precomputed pow2 table
+        let mut acc = one_gl.clone();
+        for (k, bit) in position_bits.iter().enumerate() {
+            if k < pow2_g_lde.len() {
+                let sel = GlVar(FpGLVar::conditionally_select(bit, &pow2_g_lde[k].0, &one_gl.0)?);
+                acc = gl_mul_light(cs.clone(), &acc, &sel)?;
+            }
         }
+        let x = gl_mul_light(cs.clone(), &offset_gl, &acc)?;
         
         // OPTIMIZED DEEP computation with shared denominators
         // Compute z*g ONCE per query

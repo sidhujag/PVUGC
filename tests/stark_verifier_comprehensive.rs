@@ -128,6 +128,7 @@ fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
     // Synthesize and check
     let cs = ConstraintSystem::new_ref();
     circuit.clone().generate_constraints(cs.clone()).expect("generate constraints");
+    eprintln!("Total constraints: {}", cs.num_constraints());
     
     let is_satisfied = cs.is_satisfied().unwrap_or(false);
     if !is_satisfied {
