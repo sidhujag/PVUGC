@@ -100,11 +100,9 @@ pub fn fr_to_u128(fr: InnerFr) -> u128 {
 ///   lhs - rhs = q * P_GL
 /// Return (q_plus, q_minus) with q = q_plus - q_minus, q_plus,q_minus ∈ [0, 2^64-1].
 /// 
-/// CRITICAL: First reduces both sides modulo p_GL to handle cases where
-/// lhs or rhs were computed with Fr arithmetic (and might be large Fr values).
 #[inline]
 pub fn quotient_from_fr_difference(lhs: InnerFr, rhs: InnerFr) -> (u64, u64) {
-    // FIRST: Reduce both to canonical GL representatives
+    // Reduce both to canonical GL representatives
     let l_gl = fr_to_gl_u64(lhs) as u128;
     let r_gl = fr_to_gl_u64(rhs) as u128;
     

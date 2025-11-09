@@ -1,6 +1,6 @@
 //! Full FRI (L>0) Layer Verification
 //!
-//! Implements consistency + fold + terminal check exactly as specified by expert
+//! Implements consistency + fold + terminal check
 
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use ark_r1cs_std::prelude::*;
