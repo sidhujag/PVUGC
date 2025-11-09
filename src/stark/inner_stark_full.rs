@@ -277,22 +277,15 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             eq.enforce_equal(&Boolean::constant(true))?;
         }
 
-        // Prepare holders for query values reused across Merkle + DEEP
-        // Initialize by expected query count; rows will be filled from Merkle-verified leaves.
-        // Types are explicit to avoid inference issues when pushing GlVar elements.
-        // expected_queries is computed below from self.query_positions.
-        // We'll initialize now with zero; will resize after expected_queries is known.
-        let mut trace_row_vars: Vec<Vec<GlVar>> = Vec::new();
-        let mut comp_row_vars: Vec<Vec<GlVar>> = Vec::new();
-
         // Enforce non-empty queries and alignment with positions
         if self.query_positions.is_empty() {
             return Err(SynthesisError::Unsatisfiable);
         }
         let expected_queries = self.query_positions.len();
-        // Resize holders to match expected query count
-        trace_row_vars = vec![Vec::<GlVar>::new(); expected_queries];
-        comp_row_vars = vec![Vec::<GlVar>::new(); expected_queries];
+        // Prepare holders for query values reused across Merkle + DEEP.
+        // Rows are filled from Merkle-verified leaves, so start with empty per-query vectors.
+        let mut trace_row_vars: Vec<Vec<GlVar>> = vec![Vec::new(); expected_queries];
+        let mut comp_row_vars: Vec<Vec<GlVar>> = vec![Vec::new(); expected_queries];
         if self.comp_queries.len() != expected_queries {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -416,10 +409,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             }
         }
 
-        if trace_row_vars.len() != comp_row_vars.len() {
-            return Err(SynthesisError::Unsatisfiable);
-        }
-        // lengths must match number of queries
         if trace_row_vars.len() != comp_row_vars.len() {
             return Err(SynthesisError::Unsatisfiable);
         }
