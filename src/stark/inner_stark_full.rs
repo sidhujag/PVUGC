@@ -290,19 +290,22 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             .map(|q| Vec::with_capacity(q.values.len()))
             .collect();
 
+        // Enforce non-empty queries and alignment with positions
+        if self.query_positions.is_empty() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        let expected_queries = self.query_positions.len();
+        if self.trace_queries.len() != expected_queries {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        if self.comp_queries.len() != expected_queries {
+            return Err(SynthesisError::Unsatisfiable);
+        }
         // Ensure data shapes are consistent with commitments
         if let Some(first_segment) = self.trace_segments.first() {
-            if !self.trace_queries.is_empty()
-                && first_segment.queries.len() != self.trace_queries.len()
-            {
+            if first_segment.queries.len() != self.trace_queries.len() {
                 return Err(SynthesisError::Unsatisfiable);
             }
-        }
-        if !self.comp_queries.is_empty()
-            && self.comp_queries.len() != self.trace_queries.len()
-            && !self.trace_queries.is_empty()
-        {
-            return Err(SynthesisError::Unsatisfiable);
         }
 
         // STEP 2: Verify trace commitment (batch-only)
@@ -318,7 +321,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(segment.queries.len());
-            if !self.trace_queries.is_empty() && segment.queries.len() != self.trace_queries.len() {
+            if segment.queries.len() != self.trace_queries.len() {
                 return Err(SynthesisError::Unsatisfiable);
             }
             for (row_idx, q) in segment.queries.iter().enumerate() {
@@ -328,12 +331,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                     row_gl.push(gl.clone());
                     if let Some(row) = trace_row_vars.get_mut(row_idx) {
                         row.push(gl.clone());
-                    } else if self.trace_queries.is_empty() {
-                        // Lazily grow if trace_queries was empty (should match query count)
-                        while trace_row_vars.len() <= row_idx {
-                            trace_row_vars.push(Vec::new());
-                        }
-                        trace_row_vars[row_idx].push(gl.clone());
                     } else {
                         return Err(SynthesisError::Unsatisfiable);
                     }
@@ -367,15 +364,13 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 return Err(SynthesisError::Unsatisfiable);
             }
         }
-        if !self.trace_queries.is_empty() {
-            for (expected, actual) in self.trace_queries.iter().zip(trace_row_vars.iter()) {
-                if expected.values.len() != actual.len() {
-                    return Err(SynthesisError::Unsatisfiable);
-                }
-                for (col_idx, expected_val) in expected.values.iter().enumerate() {
-                    let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
-                    actual[col_idx].0.enforce_equal(&expected_fe)?;
-                }
+        for (expected, actual) in self.trace_queries.iter().zip(trace_row_vars.iter()) {
+            if expected.values.len() != actual.len() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            for (col_idx, expected_val) in expected.values.iter().enumerate() {
+                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
+                actual[col_idx].0.enforce_equal(&expected_fe)?;
             }
         }
 
@@ -392,11 +387,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                     row_gl.push(gl.clone());
                     if let Some(row) = comp_row_vars.get_mut(row_idx) {
                         row.push(gl.clone());
-                    } else if self.comp_queries.is_empty() {
-                        while comp_row_vars.len() <= row_idx {
-                            comp_row_vars.push(Vec::new());
-                        }
-                        comp_row_vars[row_idx].push(gl.clone());
                     } else {
                         return Err(SynthesisError::Unsatisfiable);
                     }
@@ -428,7 +418,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         if comp_width == 0 {
             return Err(SynthesisError::Unsatisfiable);
         }
-        if !self.comp_queries.is_empty() && self.comp_queries[0].values.len() != comp_width {
+        if self.comp_queries[0].values.len() != comp_width {
             return Err(SynthesisError::Unsatisfiable);
         }
         let expected_comp_width = self.ood_comp.len();
@@ -440,15 +430,13 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 return Err(SynthesisError::Unsatisfiable);
             }
         }
-        if !self.comp_queries.is_empty() {
-            for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
-                if expected.values.len() != actual.len() {
-                    return Err(SynthesisError::Unsatisfiable);
-                }
-                for (col_idx, expected_val) in expected.values.iter().enumerate() {
-                    let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
-                    actual[col_idx].0.enforce_equal(&expected_fe)?;
-                }
+        for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
+            if expected.values.len() != actual.len() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            for (col_idx, expected_val) in expected.values.iter().enumerate() {
+                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
+                actual[col_idx].0.enforce_equal(&expected_fe)?;
             }
         }
 
