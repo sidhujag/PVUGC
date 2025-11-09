@@ -318,3 +318,32 @@ pub fn gl_inv_light(
     
     Ok(inv)
 }
+
+/// Light batch inversion for GL elements: returns inverses of all inputs
+pub fn gl_batch_inv_light(
+    cs: ConstraintSystemRef<InnerFr>,
+    values: &[GlVar],
+) -> Result<Vec<GlVar>, SynthesisError> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Prefix products
+    let mut prefix: Vec<GlVar> = Vec::with_capacity(values.len());
+    let mut acc = GlVar(FpVar::constant(InnerFr::from(1u64)));
+    for v in values {
+        acc = gl_mul_light(cs.clone(), &acc, v)?;
+        prefix.push(acc.clone());
+    }
+    // Invert total product once
+    let mut inv_total = gl_inv_light(cs.clone(), prefix.last().unwrap())?;
+    // Backwards pass
+    let mut invs: Vec<GlVar> = vec![GlVar(FpVar::constant(InnerFr::from(0u64))); values.len()];
+    for i in (0..values.len()).rev() {
+        let prev = if i == 0 { GlVar(FpVar::constant(InnerFr::from(1u64))) } else { prefix[i - 1].clone() };
+        // invs[i] = inv_total * prev
+        invs[i] = gl_mul_light(cs.clone(), &inv_total, &prev)?;
+        // inv_total = inv_total * values[i]
+        inv_total = gl_mul_light(cs.clone(), &inv_total, &values[i])?;
+    }
+    Ok(invs)
+}

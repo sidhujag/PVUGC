@@ -616,7 +616,7 @@ fn derive_fs_challenges_in_circuit(
             fri_betas.push(beta_gl.0);  // Extract FpVar
         }
     }
-
+    
     Ok((z, deep_coeffs, fri_betas))
 }
 
