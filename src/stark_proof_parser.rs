@@ -131,13 +131,20 @@ where
         .clone()
         .parse::<E, H, V>(lde_domain_size, actual_num_queries, comp_width)
         .expect("parse comp batch");
-    let comp_batch_nodes: Vec<Vec<[u8; 32]>> = comp_batch_proof
+    let mut comp_batch_nodes: Vec<Vec<[u8; 32]>> = comp_batch_proof
         .nodes
         .iter()
         .map(|v| v.iter().map(|d| d.as_bytes()).collect())
         .collect();
     let comp_batch_depth: u8 = comp_batch_proof.depth;
     let comp_batch_indexes: Vec<usize> = positions_for_parsing.to_vec();
+    // Align nodes vector count with number of composition rows
+    if comp_batch_nodes.len() < comp_queries.len() {
+        let deficit = comp_queries.len() - comp_batch_nodes.len();
+        comp_batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
+    } else if comp_batch_nodes.len() > comp_queries.len() {
+        comp_batch_nodes.truncate(comp_queries.len());
+    }
     
     // Parse OOD frame
     let main_trace_width = air_params.trace_width;
@@ -286,11 +293,18 @@ where
         let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
         let mut idxs_aligned: Vec<usize> = positions.iter().map(|&p| p % tree_num_leaves).collect();
         idxs_aligned.truncate(segment_queries.len());
-        let batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
+        let mut batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
             .nodes
             .iter()
             .map(|v| v.iter().map(|d| d.as_bytes()).collect())
             .collect();
+        // Align nodes vector count with number of rows for this segment
+        if batch_nodes.len() < segment_queries.len() {
+            let deficit = segment_queries.len() - batch_nodes.len();
+            batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
+        } else if batch_nodes.len() > segment_queries.len() {
+            batch_nodes.truncate(segment_queries.len());
+        }
 
         segment_witnesses.push(TraceSegmentWitness {
             queries: segment_queries,
