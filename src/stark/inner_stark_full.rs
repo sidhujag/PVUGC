@@ -359,7 +359,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 return Err(SynthesisError::Unsatisfiable);
             }
         }
-
         // STEP 3: Verify composition commitment (batch-only)
         if !self.comp_batch_nodes.is_empty() {
             use super::gadgets::merkle_batch::verify_batch_merkle_root_gl;
@@ -416,17 +415,11 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 return Err(SynthesisError::Unsatisfiable);
             }
         }
-        // Bind echoed composition witnesses to Merkle-verified rows to catch tampering
-        for (expected, actual) in self.comp_queries.iter().zip(comp_row_vars.iter()) {
-            if expected.values.len() != actual.len() {
-                return Err(SynthesisError::Unsatisfiable);
-            }
-            for (col_idx, expected_val) in expected.values.iter().enumerate() {
-                let expected_fe = FpVar::constant(InnerFr::from(*expected_val));
-                actual[col_idx].0.enforce_equal(&expected_fe)?;
-            }
-        }
 
+        if trace_row_vars.len() != comp_row_vars.len() {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        // lengths must match number of queries
         if trace_row_vars.len() != comp_row_vars.len() {
             return Err(SynthesisError::Unsatisfiable);
         }

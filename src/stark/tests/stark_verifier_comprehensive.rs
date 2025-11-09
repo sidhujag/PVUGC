@@ -466,11 +466,10 @@ fn test_adversarial_tamper_comp_nodes() {
 fn test_adversarial_tamper_trace_row_value() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit(64, 1);
-    // Tamper a value in the first trace segment's first queried row
     if let Some(segment) = circuit.trace_segments.get_mut(0) {
-        if let Some(q) = segment.queries.get_mut(0) {
-            if let Some(v) = q.values.get_mut(0) {
-                *v ^= 1;
+        if let Some(query) = segment.queries.get_mut(0) {
+            if let Some(value) = query.values.get_mut(0) {
+                *value ^= 1;
             }
         }
     }
