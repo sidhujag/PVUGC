@@ -32,7 +32,7 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use crate::outer_compressed::InnerFr;
-use crate::gadgets::gl_fast::{GlVar, gl_mul_light, gl_add_light};
+use super::gl_fast::{GlVar, gl_mul_light, gl_add_light};
 
 pub type FpGLVar = FpVar<InnerFr>;
 
@@ -106,7 +106,7 @@ fn apply_inv_sbox_light(
     cs: ConstraintSystemRef<InnerFr>,
     y: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
-    use crate::gl_u64::{fr_to_gl_u64, gl_inv_sbox};
+    use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv_sbox};
     
     // Witness the inverse
     let y_val = fr_to_gl_u64(y.0.value().unwrap_or_default());
@@ -212,13 +212,13 @@ pub fn canonicalize_to_bytes(
     cs: ConstraintSystemRef<InnerFr>,
     gl_values: &[GlVar],  // 4 GL values for 32 bytes
 ) -> Result<Vec<UInt8<InnerFr>>, SynthesisError> {
-    use crate::gadgets::gl_range::gl_alloc_u64;
+    use super::gl_range::gl_alloc_u64;
     
     let mut bytes = Vec::with_capacity(32);
     
     for gl_val in gl_values {
         // Witness the canonical u64 value
-        use crate::gl_u64::fr_to_gl_u64;
+        use crate::stark::gl_u64::fr_to_gl_u64;
         let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
         
         // Allocate with range check to ensure < 2^64
@@ -226,7 +226,7 @@ pub fn canonicalize_to_bytes(
         
         // Enforce: gl_val ≡ canonical_fp (mod p_GL) with BOUNDED quotient
         // Use enforce_gl_eq_with_bound(q ≤ 1) for soundness
-        use crate::inner_stark_full::enforce_gl_eq_with_bound;
+        use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
         enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;
         
         // Convert u64 to bytes

@@ -3,11 +3,11 @@
 //! Verifies that our light GL-native RPO gadget produces identical output to Winterfell's Rp64_256
 //! This validates that light RPO is a drop-in replacement for heavy RPO
 
-use arkworks_groth16::gadgets::rpo_gl_light::{RpoParamsGLLight, rpo_hash_elements_light, rpo_merge_light};
-use arkworks_groth16::gadgets::gl_fast::GlVar;
-use arkworks_groth16::gadgets::gl_range::gl_alloc_u64_vec;
-use arkworks_groth16::inner_stark_full::enforce_gl_eq;
-use arkworks_groth16::outer_compressed::InnerFr;
+use crate::stark::gadgets::rpo_gl_light::{RpoParamsGLLight, rpo_hash_elements_light, rpo_merge_light};
+use crate::stark::gadgets::gl_fast::GlVar;
+use crate::stark::gadgets::gl_range::gl_alloc_u64_vec;
+use crate::stark::inner_stark_full::enforce_gl_eq;
+use crate::outer_compressed::InnerFr;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::R1CSVar;

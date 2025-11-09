@@ -1,10 +1,10 @@
 //! Unit tests for fast GL operations
 //! Test each operation in isolation with known values
 
-use arkworks_groth16::gadgets::gl_fast::{self, GlVar};
-use arkworks_groth16::gadgets::gl_range::gl_alloc_u64;
+use crate::stark::gadgets::gl_fast::{self, GlVar};
+use crate::stark::gadgets::gl_range::gl_alloc_u64;
 use ark_relations::r1cs::ConstraintSystem;
-use arkworks_groth16::outer_compressed::InnerFr;
+use crate::outer_compressed::InnerFr;
 use ark_r1cs_std::R1CSVar;
 
 #[test]
@@ -21,7 +21,7 @@ fn test_gl_add_simple() {
     let result = gl_fast::gl_add(cs.clone(), &a, &b).unwrap();
     
     // Check value is correct
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, 12, "5 + 7 should equal 12");
     
@@ -45,7 +45,7 @@ fn test_gl_add_overflow() {
     
     let result = gl_fast::gl_add(cs.clone(), &a, &b).unwrap();
     
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, 4, "(p-1) + 5 should wrap to 4");
     
@@ -66,7 +66,7 @@ fn test_gl_sub_simple() {
     
     let result = gl_fast::gl_sub(cs.clone(), &a, &b).unwrap();
     
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, 7, "10 - 3 should equal 7");
     
@@ -89,7 +89,7 @@ fn test_gl_sub_underflow() {
     
     let result = gl_fast::gl_sub(cs.clone(), &a, &b).unwrap();
     
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, P_U64 - 7, "3 - 10 should wrap to p-7");
     
@@ -111,7 +111,7 @@ fn test_gl_mul_simple() {
     eprintln!("Testing gl_mul(5, 7)...");
     let result = gl_fast::gl_mul(cs.clone(), &a, &b).unwrap();
     
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, 35, "5 * 7 should equal 35");
     
@@ -142,7 +142,7 @@ fn test_gl_mul_large() {
     eprintln!("Testing gl_mul(2^40, 2^20)...");
     let result = gl_fast::gl_mul(cs.clone(), &a, &b).unwrap();
     
-    use arkworks_groth16::gl_u64::{fr_to_gl_u64, gl_mul};
+    use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
     let expected = gl_mul(a_val, b_val);
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, expected, "Large multiplication should match");
@@ -167,7 +167,7 @@ fn test_gl_inv_simple() {
     // Test the actual gl_inv function
     let inv = gl_fast::gl_inv(cs.clone(), &v).unwrap();
     
-    use arkworks_groth16::gl_u64::{fr_to_gl_u64, gl_inv as host_gl_inv};
+    use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv as host_gl_inv};
     let expected_inv = host_gl_inv(7);
     let inv_val = fr_to_gl_u64(inv.0.value().unwrap());
     
@@ -214,7 +214,7 @@ fn test_gl_operations_sequence() {
     let result = gl_fast::gl_sub(cs.clone(), &prod, &one).unwrap();
     eprintln!("  After sub, satisfied: {}", cs.is_satisfied().unwrap());
     
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gl_u64::fr_to_gl_u64;
     let result_val = fr_to_gl_u64(result.0.value().unwrap());
     assert_eq!(result_val, 15, "(5+3)*2-1 should equal 15");
     
@@ -228,8 +228,8 @@ fn test_gl_operations_sequence() {
 
 #[test]
 fn test_gl_add_light() {
-    use arkworks_groth16::gadgets::gl_fast::{gl_add_light, GlVar};
-    use arkworks_groth16::gl_u64::{gl_add, fr_to_gl_u64};
+    use crate::stark::gadgets::gl_fast::{gl_add_light, GlVar};
+    use crate::stark::gl_u64::{gl_add, fr_to_gl_u64};
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -268,8 +268,8 @@ fn test_gl_add_light() {
 
 #[test]
 fn test_gl_sub_light() {
-    use arkworks_groth16::gadgets::gl_fast::{gl_sub_light, GlVar};
-    use arkworks_groth16::gl_u64::{gl_sub, fr_to_gl_u64};
+    use crate::stark::gadgets::gl_fast::{gl_sub_light, GlVar};
+    use crate::stark::gl_u64::{gl_sub, fr_to_gl_u64};
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -306,8 +306,8 @@ fn test_gl_sub_light() {
 
 #[test]
 fn test_gl_mul_light() {
-    use arkworks_groth16::gadgets::gl_fast::{gl_mul_light, GlVar};
-    use arkworks_groth16::gl_u64::{gl_mul, fr_to_gl_u64};
+    use crate::stark::gadgets::gl_fast::{gl_mul_light, GlVar};
+    use crate::stark::gl_u64::{gl_mul, fr_to_gl_u64};
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -345,8 +345,8 @@ fn test_gl_mul_light() {
 
 #[test]
 fn test_gl_inv_light() {
-    use arkworks_groth16::gadgets::gl_fast::{gl_inv_light, gl_mul_light, GlVar};
-    use arkworks_groth16::gl_u64::{gl_inv, fr_to_gl_u64};
+    use crate::stark::gadgets::gl_fast::{gl_inv_light, gl_mul_light, GlVar};
+    use crate::stark::gl_u64::{gl_inv, fr_to_gl_u64};
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -389,8 +389,8 @@ fn test_gl_inv_light() {
 #[test]
 fn test_light_ops_composition() {
     // Test that composing multiple light operations works correctly
-    use arkworks_groth16::gadgets::gl_fast::{gl_add_light, gl_sub_light, gl_mul_light, gl_inv_light, GlVar};
-    use arkworks_groth16::gl_u64::{gl_add, gl_sub, gl_mul, gl_inv, fr_to_gl_u64};
+    use crate::stark::gadgets::gl_fast::{gl_add_light, gl_sub_light, gl_mul_light, gl_inv_light, GlVar};
+    use crate::stark::gl_u64::{gl_add, gl_sub, gl_mul, gl_inv, fr_to_gl_u64};
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -431,8 +431,8 @@ fn test_light_ops_composition() {
 #[test]
 fn test_light_ops_edge_cases() {
     // Test edge cases and boundary conditions
-    use arkworks_groth16::gadgets::gl_fast::{gl_add_light, gl_sub_light, gl_mul_light, GlVar};
-    use arkworks_groth16::gl_u64::fr_to_gl_u64;
+    use crate::stark::gadgets::gl_fast::{gl_add_light, gl_sub_light, gl_mul_light, GlVar};
+    use crate::stark::gl_u64::fr_to_gl_u64;
     use ark_r1cs_std::fields::fp::FpVar;
     use ark_r1cs_std::alloc::AllocVar;
     
@@ -461,7 +461,7 @@ fn test_light_ops_edge_cases() {
     let prod = gl_mul_light(cs.clone(), &large, &large).unwrap();
     let prod_val = fr_to_gl_u64(prod.0.value().unwrap());
     // (P/2)^2 mod P should be computed correctly
-    let expected = arkworks_groth16::gl_u64::gl_mul(P_U64 / 2, P_U64 / 2);
+    let expected = crate::stark::gl_u64::gl_mul(P_U64 / 2, P_U64 / 2);
     assert_eq!(prod_val, expected, "Large multiplication should wrap correctly");
     
     assert!(cs.is_satisfied().unwrap(), "CS should be satisfied");

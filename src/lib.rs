@@ -38,19 +38,10 @@ pub mod test_circuits; // Shared test circuits
 pub mod test_fixtures; // Shared fixtures with disk caching
 
 // Inner STARK verifier modules
-pub mod inner_stark_full; // Full verifier approach
-pub mod stark_proof_parser; // Parser for full verifier (no hooks!)
-pub use inner_stark_full::{
-    AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness,
-};
-pub mod gadgets;
-pub mod gl_u64; // Goldilocks u64 arithmetic (for witness computation)
+pub mod stark;
 
-// Crypto helpers (Poseidon params + host Merkle helpers)
-pub mod crypto {
-    pub mod poseidon_fr377_t3;
-    pub mod poseidon_merkle_helpers;
-}
+// Re-export STARK types for backward compatibility
+pub use stark::{AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness};
 
 // Re-exports - Public API
 pub use api::{OneSidedPvugc, PvugcBundle};

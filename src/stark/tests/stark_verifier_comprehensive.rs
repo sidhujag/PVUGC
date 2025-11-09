@@ -5,14 +5,13 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 ///! 1. Different trace sizes (forcing FRI layers > 0)
 ///! 2. Negative cases (tampered proofs should fail)
 ///! 3. Different proof parameters
-use arkworks_groth16::inner_stark_full::AirParams;
-use arkworks_groth16::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
+use crate::stark::inner_stark_full::AirParams;
+use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
 use winter_crypto::hashers::Rp64_256;
 use winter_math::fields::f64::BaseElement;
 use winterfell::{Air, Trace};
 
-mod helpers;
-use helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir};
+use super::helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir};
 use serial_test::serial;
 
 fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
@@ -69,7 +68,7 @@ fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
         domain_offset: air.domain_offset().as_int(),
         g_lde: air.lde_domain_generator().as_int(),
         g_trace: air.trace_domain_generator().as_int(),
-        combiner_kind: arkworks_groth16::gadgets::utils::CombinerKind::RandomRho,
+        combiner_kind: crate::stark::gadgets::utils::CombinerKind::RandomRho,
         fri_terminal: {
             let coeffs_len = proof
                 .fri_proof
@@ -78,9 +77,9 @@ fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
                 .map(|v: Vec<BaseElement>| v.len())
                 .unwrap_or(0);
             if coeffs_len == 0 {
-                arkworks_groth16::gadgets::fri::FriTerminalKind::Constant
+                crate::stark::gadgets::fri::FriTerminalKind::Constant
             } else {
-                arkworks_groth16::gadgets::fri::FriTerminalKind::Poly {
+                crate::stark::gadgets::fri::FriTerminalKind::Poly {
                     degree: coeffs_len - 1,
                 }
             }
@@ -213,7 +212,7 @@ fn test_large_trace() {
 fn build_circuit(
     steps: usize,
     expected_fri_layers: usize,
-) -> arkworks_groth16::inner_stark_full::FullStarkVerifierCircuit {
+) -> crate::stark::inner_stark_full::FullStarkVerifierCircuit {
     use winter_crypto::hashers::Rp64_256;
     use winterfell::{Air, Trace};
     let start = BaseElement::new(3);
@@ -244,7 +243,7 @@ fn build_circuit(
         domain_offset: air.domain_offset().as_int(),
         g_lde: air.lde_domain_generator().as_int(),
         g_trace: air.trace_domain_generator().as_int(),
-        combiner_kind: arkworks_groth16::gadgets::utils::CombinerKind::RandomRho,
+        combiner_kind: crate::stark::gadgets::utils::CombinerKind::RandomRho,
         fri_terminal: {
             let coeffs_len = proof
                 .fri_proof
@@ -253,9 +252,9 @@ fn build_circuit(
                 .map(|v: Vec<BaseElement>| v.len())
                 .unwrap_or(0);
             if coeffs_len == 0 {
-                arkworks_groth16::gadgets::fri::FriTerminalKind::Constant
+                crate::stark::gadgets::fri::FriTerminalKind::Constant
             } else {
-                arkworks_groth16::gadgets::fri::FriTerminalKind::Poly {
+                crate::stark::gadgets::fri::FriTerminalKind::Poly {
                     degree: coeffs_len - 1,
                 }
             }

@@ -2,17 +2,16 @@ use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
-use arkworks_groth16::inner_stark_full::AirParams;
-use arkworks_groth16::outer_compressed::InnerE;
-use arkworks_groth16::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
+use crate::stark::inner_stark_full::AirParams;
+use crate::outer_compressed::InnerE;
+use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
 use winter_crypto::hashers::Rp64_256; // RPO-256 hasher
 use winter_crypto::{ElementHasher, RandomCoin};
 use winter_math::fields::f64::BaseElement;
 use winter_math::ToElements;
 use winterfell::{Air, Trace};
 
-mod helpers;
-use helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir};
+use super::helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir};
 
 // Same position derivation as deep composition test
 fn derive_query_positions<H, A>(
@@ -138,9 +137,9 @@ fn full_stark_verifier_smoke() {
         .map(|v: Vec<BaseElement>| v.len())
         .unwrap_or(0);
     let fri_terminal = if coeffs_len == 0 {
-        arkworks_groth16::gadgets::fri::FriTerminalKind::Constant
+        crate::stark::gadgets::fri::FriTerminalKind::Constant
     } else {
-        arkworks_groth16::gadgets::fri::FriTerminalKind::Poly {
+        crate::stark::gadgets::fri::FriTerminalKind::Poly {
             degree: coeffs_len - 1,
         }
     };
@@ -159,7 +158,7 @@ fn full_stark_verifier_smoke() {
         domain_offset: domain_offset_from_air, // From AIR!
         g_lde: lde_generator_from_air,
         g_trace: g_trace_from_air, // Trace domain generator from AIR!
-        combiner_kind: arkworks_groth16::gadgets::utils::CombinerKind::RandomRho,
+        combiner_kind: crate::stark::gadgets::utils::CombinerKind::RandomRho,
         fri_terminal,
         num_constraint_coeffs: proof.context.num_constraints(),
     };

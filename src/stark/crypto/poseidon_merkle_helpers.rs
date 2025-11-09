@@ -2,7 +2,7 @@ use ark_bls12_377::Fr as Fr377;
 use ark_crypto_primitives::sponge::poseidon::{PoseidonConfig, PoseidonSponge};
 use ark_crypto_primitives::sponge::CryptographicSponge;
 
-use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+use super::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
 
 #[inline]
 pub fn poseidon2_hash2(cfg: &PoseidonConfig<Fr377>, a: Fr377, b: Fr377) -> Fr377 {

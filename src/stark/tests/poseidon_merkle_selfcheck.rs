@@ -2,10 +2,10 @@ use ark_bls12_377::Fr as Fr377;
 use ark_ff::PrimeField;
 use ark_std::rand::{SeedableRng, rngs::StdRng, Rng};
 
-use arkworks_groth16::crypto::poseidon_merkle_helpers::{
+use crate::stark::crypto::poseidon_merkle_helpers::{
     poseidon2_merkle_root, poseidon2_merkle_path, verify_path_default,
 };
-use arkworks_groth16::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+use crate::stark::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
 
 fn leaves_from_u64s(vals: &[u64]) -> Vec<Fr377> {
     vals.iter().map(|&v| Fr377::from(v)).collect()

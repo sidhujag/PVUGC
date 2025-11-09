@@ -26,15 +26,15 @@
 //! 5. FS: Derive challenges in-circuit, verify consistency
 //! ```
 
-use crate::gadgets::rpo_gl_light::canonicalize_to_bytes;
+use super::gadgets::rpo_gl_light::canonicalize_to_bytes;
 use crate::outer_compressed::InnerFr;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 // Light RPO for internal operations, canonicalize only at serialization boundaries
-use crate::gadgets::gl_fast::{gl_add_light, gl_mul_light, gl_sub_light, GlVar};
-use crate::gadgets::gl_range::gl_alloc_u64_vec;
-use crate::gadgets::utils::CombinerKind;
+use super::gadgets::gl_fast::{gl_add_light, gl_mul_light, gl_sub_light, GlVar};
+use super::gadgets::gl_range::gl_alloc_u64_vec;
+use super::gadgets::utils::CombinerKind;
 
 // Use GL type alias for non-native Goldilocks operations in Fr377
 pub type FpGLVar = FpVar<InnerFr>;
@@ -54,7 +54,7 @@ pub struct AirParams {
     pub g_lde: u64,         // Same as lde_generator
     pub g_trace: u64,       // Trace domain generator (e.g., 2^24 for trace_len=8)
     pub combiner_kind: CombinerKind,
-    pub fri_terminal: crate::gadgets::fri::FriTerminalKind,
+    pub fri_terminal: super::gadgets::fri::FriTerminalKind,
     pub num_constraint_coeffs: usize,
 }
 
@@ -149,7 +149,7 @@ pub struct FriQuery {
 
 impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<InnerFr>) -> Result<(), SynthesisError> {
-        use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+        use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
         use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
         use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
 
@@ -228,7 +228,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         computed_hash[0].enforce_equal(&statement_hash_var)?;
 
         // STEP 1.5: Verify OOD frame commitment using light RPO
-        use crate::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
+        use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
         let rpo_params = RpoParamsGLLight::default();
 
         // Allocate OOD values - MATCH Winterfell's merge_ood_evaluations order
@@ -264,8 +264,8 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             if segment.batch_nodes.is_empty() {
                 return Err(SynthesisError::Unsatisfiable);
             }
-            use crate::gadgets::merkle_batch::verify_batch_merkle_root_gl;
-            use crate::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
+            use super::gadgets::merkle_batch::verify_batch_merkle_root_gl;
+            use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(segment.queries.len());
             for q in &segment.queries {
@@ -295,8 +295,8 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
 
         // STEP 3: Verify composition commitment (batch-only)
         if !self.comp_batch_nodes.is_empty() {
-            use crate::gadgets::merkle_batch::verify_batch_merkle_root_gl;
-            use crate::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
+            use super::gadgets::merkle_batch::verify_batch_merkle_root_gl;
+            use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
             let params = RpoParamsGLLight::default();
             let mut leaves: Vec<[GlVar; 4]> = Vec::with_capacity(self.comp_queries.len());
             for q in &self.comp_queries {
@@ -369,7 +369,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         )?;
 
         // STEP 6: Use the heavy FRI verifier for correct semantics
-        use crate::gadgets::fri::{verify_fri_layers_gl, FriConfigGL, FriLayerQueryGL};
+        use super::gadgets::fri::{verify_fri_layers_gl, FriConfigGL, FriLayerQueryGL};
 
         // Create FRI config using parameters from AIR (no recomputation needed!)
         let fri_config = FriConfigGL {
@@ -452,7 +452,7 @@ fn commit_positions_poseidon(
     cs: ConstraintSystemRef<InnerFr>,
     positions: &[usize],
 ) -> Result<FpVar<InnerFr>, SynthesisError> {
-    use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
     use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
 
@@ -487,7 +487,7 @@ pub fn enforce_gl_eq_with_bound(
     rhs: &FpGLVar,
     bound_q: Option<u64>,
 ) -> Result<(), SynthesisError> {
-    use crate::gl_u64::{quotient_from_fr_difference, P_GL};
+    use super::gl_u64::{quotient_from_fr_difference, P_GL};
     use ark_r1cs_std::alloc::AllocVar;
     use ark_r1cs_std::uint64::UInt64;
     let cs = lhs.cs();
@@ -589,9 +589,9 @@ fn derive_fs_challenges_in_circuit(
     air_params: &AirParams,
     comp_width: usize,
 ) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>), SynthesisError> {
-    use crate::gadgets::gl_range::gl_alloc_u64_vec;
-    use crate::gadgets::rpo_gl_light::{RandomCoinGL, RpoParamsGLLight};
-    use crate::gadgets::utils::digest32_to_gl4;
+    use super::gadgets::gl_range::gl_alloc_u64_vec;
+    use super::gadgets::rpo_gl_light::{RandomCoinGL, RpoParamsGLLight};
+    use super::gadgets::utils::digest32_to_gl4;
 
     // 0) Create counter-based RandomCoin with context seed
     let ctx = gl_alloc_u64_vec(cs.clone(), fs_context_seed_gl)?;
@@ -627,7 +627,7 @@ fn derive_fs_challenges_in_circuit(
     let ood_gl: Vec<GlVar> = ood_elems.iter().map(|fp| GlVar(fp.clone())).collect();
 
     // HASH the OOD elements first
-    use crate::gadgets::rpo_gl_light::rpo_hash_elements_light;
+    use super::gadgets::rpo_gl_light::rpo_hash_elements_light;
     let ood_digest = rpo_hash_elements_light(cs.clone(), &ood_gl, &RpoParamsGLLight::default())?;
 
     // Then reseed with the digest
@@ -768,7 +768,7 @@ pub fn verify_deep_composition(
             let p_gl = gl_mul_light(cs.clone(), &den_z_gl, &den_zg_gl)?;
 
             // P^{-1} with constraint check
-            use crate::gadgets::gl_fast::gl_inv_light;
+            use super::gadgets::gl_fast::gl_inv_light;
             gl_inv_light(cs.clone(), &p_gl)?
         };
 

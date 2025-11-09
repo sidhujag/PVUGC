@@ -2,9 +2,9 @@ use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use ark_r1cs_std::prelude::*;
 use ark_r1cs_std::fields::fp::FpVar;
 use crate::outer_compressed::InnerFr;
-use crate::gadgets::gl_fast::GlVar;
-use crate::gadgets::rpo_gl_light::{RpoParamsGLLight, rpo_merge_light};
-use crate::gadgets::utils::digest32_to_gl4;
+use super::gl_fast::GlVar;
+use super::rpo_gl_light::{RpoParamsGLLight, rpo_merge_light};
+use super::utils::digest32_to_gl4;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type FpGLVar = FpVar<InnerFr>;
@@ -123,7 +123,7 @@ pub fn verify_batch_merkle_root_gl(
     // Extract root at index 1
     let root = v.get(&1).ok_or(SynthesisError::Unsatisfiable)?;
     // Compare to expected bytes
-    let root_bytes = crate::gadgets::rpo_gl_light::canonicalize_to_bytes(cs.clone(), root)?;
+    let root_bytes = super::rpo_gl_light::canonicalize_to_bytes(cs.clone(), root)?;
     for (a, b) in root_bytes.iter().zip(expected_root_bytes.iter()) {
         let eq = a.is_eq(b)?;
         eq.enforce_equal(&Boolean::constant(true))?;

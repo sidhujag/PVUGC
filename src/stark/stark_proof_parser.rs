@@ -9,8 +9,8 @@
 //! - OOD frame
 //! - FRI layer proofs
 
-use crate::gadgets::fri::FriTerminalKind;
-use crate::inner_stark_full::{
+use super::gadgets::fri::FriTerminalKind;
+use super::inner_stark_full::{
     AirParams, CompQuery, FriLayerQueries, FriQuery, FullStarkVerifierCircuit, TraceQuery,
     TraceSegmentWitness,
 };
@@ -601,7 +601,7 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
 
 /// Poseidon commit to positions (off-chain, matches in-circuit)
 fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
-    use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, CryptographicSponge};
     
     let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
@@ -625,7 +625,7 @@ fn compute_statement_hash(
     pub_inputs: &[u64],
     query_positions: &[usize],
 ) -> InnerFr {
-    use crate::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_crypto_primitives::sponge::CryptographicSponge;
     

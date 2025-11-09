@@ -7,9 +7,9 @@ use ark_r1cs_std::prelude::*;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::boolean::Boolean;
 use crate::outer_compressed::InnerFr;
-use crate::gadgets::rpo_gl_light::RpoParamsGLLight;
-use crate::gadgets::gl_fast::GlVar;
-use crate::gadgets::gl_fast::{gl_add_light, gl_sub_light};
+use super::rpo_gl_light::RpoParamsGLLight;
+use super::gl_fast::GlVar;
+use super::gl_fast::{gl_add_light, gl_sub_light};
 
 pub type FpGLVar = FpVar<InnerFr>;
 
@@ -29,7 +29,7 @@ pub struct FriConfigGL {
 }
 
 pub struct FriLayerQueryGL<'a> {
-    pub queries: &'a [crate::inner_stark_full::FriQuery], // (v_lo, v_hi, path)
+    pub queries: &'a [crate::stark::inner_stark_full::FriQuery], // (v_lo, v_hi, path)
     pub root_bytes: &'a [UInt8<InnerFr>],                 // layer root (32B)
     pub beta: &'a FpGLVar,
     // batch data for this layer
@@ -48,7 +48,7 @@ pub fn verify_fri_layers_gl(
     layers: &[FriLayerQueryGL],
     remainder_coeffs_opt: Option<&[u64]>, // for Poly terminal: coeffs (low->high)
 ) -> Result<(), SynthesisError> {
-    use crate::inner_stark_full::{enforce_gl_eq, enforce_gl_eq_with_bound};
+    use crate::stark::inner_stark_full::{enforce_gl_eq, enforce_gl_eq_with_bound};
     
     let t = cfg.folding_factor;
     if t == 0 { return Err(SynthesisError::Unsatisfiable); }
@@ -103,7 +103,7 @@ pub fn verify_fri_layers_gl(
         }
         
         // Verify FRI layer commitment using batch multiproof (required)
-        use crate::gadgets::rpo_gl_light::rpo_hash_elements_light;
+        use super::rpo_gl_light::rpo_hash_elements_light;
         
         let row_length = domain_size / t;
         // Verify batch and retain Merkle-checked pairs
@@ -129,7 +129,7 @@ pub fn verify_fri_layers_gl(
             }
                 
             // Verify batch root equals expected
-            use crate::gadgets::merkle_batch::verify_batch_merkle_root_gl;
+            use super::merkle_batch::verify_batch_merkle_root_gl;
             verify_batch_merkle_root_gl(
                 cs.clone(),
                 &cfg.params_rpo,
@@ -176,7 +176,7 @@ pub fn verify_fri_layers_gl(
         }
             }
             // Batch compute denominators and invert once
-            use crate::gadgets::gl_fast::gl_batch_inv_light;
+            use super::gl_fast::gl_batch_inv_light;
             let two = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
             let mut xes: Vec<GlVar> = Vec::with_capacity(folded_positions_unique.len());
             let mut nums: Vec<GlVar> = Vec::with_capacity(folded_positions_unique.len());
@@ -228,7 +228,7 @@ pub fn verify_fri_layers_gl(
         }
    
         // Update domain generator for next layer: since t==2, g_current = g_current^2
-        use crate::gadgets::gl_fast::gl_mul_light;
+        use super::gl_fast::gl_mul_light;
         g_current = gl_mul_light(cs.clone(), &g_current, &g_current)?;
         
         // Update domain size and positions for next layer (unique)
@@ -265,7 +265,7 @@ pub fn verify_fri_layers_gl(
             let layers_cnt = layers.len();
             let offset_final = GlVar(FpGLVar::constant(InnerFr::from(cfg.domain_offset)));
             let mut g_final = GlVar(FpGLVar::constant(InnerFr::from(cfg.g_lde)));
-            use crate::gadgets::gl_fast::{gl_mul_light, gl_add_light};
+            use super::gl_fast::{gl_mul_light, gl_add_light};
             // Since t == 2, g_final = g_lde^(2^layers_cnt) via repeated squaring
             for _ in 0..layers_cnt {
                 g_final = gl_mul_light(cs.clone(), &g_final, &g_final)?;

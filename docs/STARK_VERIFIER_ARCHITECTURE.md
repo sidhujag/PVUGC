@@ -35,9 +35,9 @@ Compatibility: parsing, ordering, and pointer arithmetic match Winterfell; adver
 ## Constraint Growth (empirical)
 
 With batch verification:
-- 1 FRI layer (steps=64): ~3.77M constraints
-- 2 FRI layers (steps=128): ~5.24M constraints
-- 3 FRI layers (steps=256): ~6.91M constraints
+- 1 FRI layer (steps=64): ~3.7M constraints
+- 2 FRI layers (steps=128): ~5.2M constraints
+- 3 FRI layers (steps=256): ~6.9M constraints
 
 Growth is near-logarithmic in domain size for fixed query counts (batch Merkle/FRI). The outer Groth16 remains constant-size; PVUGC cost is constant (dozens of columns).
 
