@@ -36,13 +36,13 @@ ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
 ark-crypto-primitives = "0.5"
-# Use vendored Winterfell for debugging
-winterfell = { path = "winterfell-github/winterfell", features = ["std"] }
-winter-crypto = { path = "winterfell-github/crypto", package = "winter-crypto", features = ["std"] }
-winter-math = { path = "winterfell-github/math", package = "winter-math", features = ["std"] }
-winter-air = { path = "winterfell-github/air", package = "winter-air", features = ["std"] }
-winter-fri = { path = "winterfell-github/fri", package = "winter-fri", features = ["std"] }
-winter-verifier = { path = "winterfell-github/verifier", package = "winter-verifier", features = ["std"] }
+# Use released Winterfell without modifications
+winterfell = "0.13.1"
+winter-crypto = "0.13.1"
+winter-math = "0.13.1"
+winter-air = "0.13.1"
+winter-fri = "0.13.1"
+winter-verifier = "0.13.1"
 serde = { version = "1", features = ["derive"], optional = true }
 bincode = { version = "1", optional = true }
 
