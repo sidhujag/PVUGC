@@ -147,7 +147,7 @@ fn full_stark_verifier_smoke() {
 
     let air_params = AirParams {
         trace_width,
-        comp_width: 0,
+        comp_width: air.context().num_constraint_composition_columns(),
         trace_len,
         lde_blowup: lde_domain_size / trace_len,
         num_queries,

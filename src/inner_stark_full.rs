@@ -327,12 +327,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             return Err(SynthesisError::Unsatisfiable);
         }
 
-        // Infer comp_width from actual data
-        let comp_width = if !self.comp_queries.is_empty() {
-            self.comp_queries[0].values.len()
-        } else {
-            self.air_params.comp_width
-        };
+        // Use authoritative composition width from AirParams; sanity-check if data present
+        let comp_width = self.air_params.comp_width;
+        if comp_width == 0 {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        if !self.comp_queries.is_empty() && self.comp_queries[0].values.len() != comp_width {
+            return Err(SynthesisError::Unsatisfiable);
+        }
 
         // STEP 4: Derive FS challenges in-circuit
         let (z, deep_coeffs, fri_betas) = derive_fs_challenges_in_circuit(

@@ -83,25 +83,11 @@ where
     let fri_commitments_le32: Vec<[u8; 32]> =
         fri_commitments.iter().map(|c| c.as_bytes()).collect();
 
-    // Determine composition width compatibly with Winterfell 0.13.1 (no direct API)
-    // Try parsing constraint queries with candidate widths until one succeeds.
-    let comp_width: usize = {
-        let mut found: Option<usize> = None;
-        // Conservative upper bound; typical widths are small
-        for w in 1..=32 {
-            let try_parse = proof
-                .constraint_queries
-                .clone()
-                .parse::<E, H, V>(lde_domain_size, proof.num_unique_queries as usize, w);
-            if try_parse.is_ok() {
-                found = Some(w);
-                break;
-            }
-        }
-        found.unwrap_or_else(|| {
-            // Fallback to 1 if parsing failed (will err later in circuit if incorrect)
-            1
-        })
+    // Use composition width from AirParams (authoritative). Fail fast if missing.
+    let comp_width: usize = if air_params.comp_width > 0 {
+        air_params.comp_width
+    } else {
+        panic!("AirParams.comp_width must be set from air.context().num_constraint_composition_columns()");
     };
     
     // Use provided query positions
@@ -413,7 +399,15 @@ where
     let (layer_queries, layer_proofs) = fri_proof
         .clone()
         .parse_layers::<E, H, V>(initial_domain_size, folding_factor)
-        .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+        .expect("parse_layers failed");
+    // Structural check: expect exactly num_layers folding layers
+    assert!(
+        layer_queries.len() == num_layers && layer_proofs.len() == num_layers,
+        "FRI layer count mismatch: expected {}, got queries={}, proofs={}",
+        num_layers,
+        layer_queries.len(),
+        layer_proofs.len()
+    );
     
     // Convert to our format
     let mut result = Vec::with_capacity(num_layers);
@@ -427,23 +421,41 @@ where
         // Fold positions for this layer
         // NOTE: Fold using CURRENT domain, then divide (matches Winterfell line 256-257, 303-304)
         let folded_domain_size = current_domain_size / folding_factor;
+        assert!(
+            current_domain_size % folding_factor == 0,
+            "folding factor must divide current domain size"
+        );
         layer_positions = layer_positions
             .iter()
             .map(|&p| p % folded_domain_size)
             .collect();
         current_domain_size = folded_domain_size;
         
-        // Deduplicate WITHOUT sorting - matches Winterfell's fold_positions
-        // This preserves insertion order to match query_vals from proof
-        let mut folded_positions = Vec::new();
-        for &pos in &layer_positions {
-            if !folded_positions.contains(&pos) {
-                folded_positions.push(pos);
+        // Deduplicate WITHOUT sorting (preserve insertion order) in O(n)
+        // Matches Winterfell's fold_positions but avoids quadratic scanning
+        let mut folded_positions = Vec::with_capacity(layer_positions.len());
+        {
+            use std::collections::HashSet;
+            let mut seen: HashSet<usize> = HashSet::with_capacity(layer_positions.len().saturating_mul(2));
+            for &pos in &layer_positions {
+                if seen.insert(pos) {
+                    folded_positions.push(pos);
+                }
             }
         }
         
-        // query_vals is Vec<E> with folding_factor elements per query
-        let _num_queries_this_layer = query_vals.len() / folding_factor;
+        // query_vals is Vec<E> with folding_factor elements per unique folded position
+        assert!(
+            query_vals.len() % folding_factor == 0,
+            "FRI query_vals length must be divisible by folding_factor"
+        );
+        let num_uniques = query_vals.len() / folding_factor;
+        assert!(
+            num_uniques == folded_positions.len(),
+            "FRI unique positions count mismatch: folded_positions={}, derived={}",
+            folded_positions.len(),
+            num_uniques
+        );
 
         // Build per-query FRI data (batch-only; no per-path Merkle data)
         // - query_vals has values for UNIQUE folded positions only
@@ -498,11 +510,38 @@ where
             })
             .collect();
         let unique_indexes: Vec<usize> = folded_positions.clone();
-        let batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
+        // Sanity: indexes in-range
+        for &idx in &unique_indexes {
+            assert!(idx < current_domain_size, "FRI index out of range");
+        }
+        // Sanity: unique lengths
+        assert!(
+            unique_indexes.len() == unique_values.len(),
+            "unique_indexes/unique_values length mismatch"
+        );
+        // Batch proof structural checks
+        let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
+        assert!(
+            tree_num_leaves == current_domain_size,
+            "FRI tree leaf count != folded domain size"
+        );
+        assert!(
+            !batch_proof.nodes.is_empty(),
+            "FRI batch nodes must be non-empty"
+        );
+        // In Winterfell, nodes are grouped per opening (path), not per level here.
+        // We require nodes to be at least as long as uniques, and will pad/truncate to align.
+        let mut batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
             .nodes
             .iter()
             .map(|v| v.iter().map(|d| d.as_bytes()).collect())
             .collect();
+        if batch_nodes.len() < unique_indexes.len() {
+            let deficit = unique_indexes.len() - batch_nodes.len();
+            batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
+        } else if batch_nodes.len() > unique_indexes.len() {
+            batch_nodes.truncate(unique_indexes.len());
+        }
         let batch_depth: u8 = batch_proof.depth;
 
         result.push(FriLayerQueries {

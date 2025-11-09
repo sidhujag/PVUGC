@@ -59,7 +59,7 @@ fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
 
     let air_params = AirParams {
         trace_width: 2,
-        comp_width: 0,
+        comp_width: air.context().num_constraint_composition_columns(),
         trace_len,
         lde_blowup: lde_domain_size / trace_len,
         num_queries: proof.options().num_queries(),
@@ -234,7 +234,7 @@ fn build_circuit(
     assert_eq!(actual_fri_layers, expected_fri_layers);
     let air_params = AirParams {
         trace_width: 2,
-        comp_width: 0,
+        comp_width: air.context().num_constraint_composition_columns(),
         trace_len,
         lde_blowup: lde_domain_size / trace_len,
         num_queries: proof.options().num_queries(),
