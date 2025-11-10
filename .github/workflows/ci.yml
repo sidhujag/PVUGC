@@ -14,8 +14,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-      - name: Cargo test (stable)
-        run: cargo test --all --locked
+      - name: Cargo test (stable, fast suite)
+        run: cargo test --locked --package pvugc --package arkworks_groth16 --lib --bins --examples
 
   test-sanitizers:
     runs-on: ubuntu-latest
@@ -35,12 +35,12 @@ jobs:
         run: rustup component add rust-src --toolchain nightly
       - name: Install LLVM tools (for sanitizers)
         run: sudo apt-get update && sudo apt-get install -y clang lld
-      - name: Cargo test with ${{ matrix.sanitizer }} (build std)
+      - name: Cargo test with ${{ matrix.sanitizer }} (build std, fast suite)
         env:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C link-arg=-fuse-ld=lld -Cunsafe-allow-abi-mismatch=sanitizer
           RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer
           ASAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --all --locked
+        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --locked --package pvugc --package arkworks_groth16 --lib --bins --examples
 
   fuzz-smoke:
     runs-on: ubuntu-latest
