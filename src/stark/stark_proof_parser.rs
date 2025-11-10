@@ -63,20 +63,20 @@ where
         .into_iter()
         .map(|e: GL| e.as_int())
         .collect();
-    
+
     // Append public inputs to match Winterfell's initialization
     fs_context_seed_gl.extend(pub_inputs_u64.iter().copied());
-    
+
     let (trace_commitments, comp_commitment, fri_commitments) = proof
         .commitments
         .clone()
         .parse::<H>(num_trace_segments, num_fri_layers)
         .map_err(|e| e)
         .expect("parse commitments");
-    
+
     // Convert to 32-byte arrays
     use winter_crypto::Digest;
-    
+
     let trace_commitment_le32: Vec<[u8; 32]> =
         trace_commitments.iter().map(|c| c.as_bytes()).collect();
     let comp_commitment_le32: [u8; 32] = comp_commitment.as_bytes();
@@ -89,9 +89,23 @@ where
     } else {
         panic!("AirParams.comp_width must be set from air.context().num_constraint_composition_columns()");
     };
-    
+
+    // Guard unsupported parameters early for clear errors
+    if air_params.fri_folding_factor != 2 {
+        panic!(
+            "Unsupported FRI folding factor: {} (only binary t=2 is supported currently)",
+            air_params.fri_folding_factor
+        );
+    }
+    match air_params.combiner_kind {
+        super::gadgets::utils::CombinerKind::RandomRho => {}
+        super::gadgets::utils::CombinerKind::DegreeChunks { .. } => {
+            panic!("Unsupported combiner: DegreeChunks (only RandomRho is supported currently)");
+        }
+    }
+
     // Use provided query positions
-    
+
     // Parse query openings
     // Use proof.num_unique_queries as the authoritative count (what's actually in the proof)
     // Truncate query_positions to match if we derived too many
@@ -101,7 +115,7 @@ where
     } else {
         &query_positions[..]
     };
-    
+
     // Gather segment widths for all trace commitments (0.13.1 exposes main + aux)
     let trace_info = proof.context.trace_info();
     let main_w = trace_info.main_trace_width();
@@ -145,21 +159,21 @@ where
     } else if comp_batch_nodes.len() > comp_queries.len() {
         comp_batch_nodes.truncate(comp_queries.len());
     }
-    
+
     // Parse OOD frame
     let main_trace_width = air_params.trace_width;
     let aux_trace_width = proof.context.trace_info().aux_segment_width();
     let num_quotients = comp_width; // Use inferred comp_width!
-    
+
     let (trace_ood, quotient_ood) = proof
         .ood_frame
         .clone()
         .parse::<E>(main_trace_width, aux_trace_width, num_quotients)
         .expect("parse OOD frame");
-    
+
     let ood_trace_current: Vec<u64> = trace_ood.current_row().iter().map(|e| e.as_int()).collect();
     let ood_trace_next: Vec<u64> = trace_ood.next_row().iter().map(|e| e.as_int()).collect();
-    
+
     // OOD composition values (at both z and z*g for LINEAR batching!)
     let ood_comp: Vec<u64> = quotient_ood
         .current_row()
@@ -167,7 +181,7 @@ where
         .map(|e| e.as_int())
         .collect();
     let ood_comp_next: Vec<u64> = quotient_ood.next_row().iter().map(|e| e.as_int()).collect();
-    
+
     // Compute OOD commitment (hash of OOD frame - includes both current and next!)
     let ood_commitment_le32 = compute_ood_commitment::<H>(
         &ood_trace_current,
@@ -175,7 +189,7 @@ where
         &ood_comp,
         &ood_comp_next,
     );
-    
+
     // Parse FRI proof (with positions that fold layer-by-layer)
     // NOTE: Pass full LDE domain size - folding happens INSIDE parse_fri_layers
     let fri_layers = parse_fri_layers::<H, V>(
@@ -185,7 +199,7 @@ where
         lde_domain_size,  // Full LDE domain, NOT pre-divided
         &query_positions, // Pass main query positions
     );
-    
+
     // Parse FRI remainder coefficients depending on terminal kind
     let fri_remainder_coeffs: Vec<u64> = match air_params.fri_terminal {
         FriTerminalKind::Poly { .. } => {
@@ -199,7 +213,7 @@ where
         }
         FriTerminalKind::Constant => Vec::new(),
     };
-    
+
     // Compute statement hash (including position commitment!)
     let statement_hash = compute_statement_hash(
         &trace_commitment_le32,
@@ -209,7 +223,7 @@ where
         &pub_inputs_u64,
         &query_positions, // Bind positions to prevent adversarial selection!
     );
-    
+
     FullStarkVerifierCircuit {
         statement_hash,
         stark_pub_inputs: pub_inputs_u64,
@@ -262,8 +276,8 @@ where
         let (batch_proof, table) = query_set
             .clone()
             .parse::<E, H, V>(lde_domain_size, num_queries, width)
-        .expect("parse trace queries");
-    
+            .expect("parse trace queries");
+
         let rows_vec: Vec<Vec<E>> = table.rows().map(|row| row.to_vec()).collect();
 
         // Sanity: segment row counts consistent across segments
@@ -331,12 +345,12 @@ where
         .parse::<E, H, V>(lde_domain_size, num_queries, values_per_query)
         .map_err(|e| e)
         .expect("parse comp queries");
-    
+
     // Snapshot rows once to avoid iterator-order surprises
     let rows_vec: Vec<Vec<E>> = table.rows().map(|row| row.to_vec()).collect();
     // Compute leaf digests
     let leaves: Vec<H::Digest> = rows_vec.iter().map(|row| H::hash_elements(row)).collect();
-    
+
     // Use sorted-unique positions modulo tree size, length = leaves.len()
     let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
     let mut idxs_aligned: Vec<usize> = positions.iter().map(|&p| p % tree_num_leaves).collect();
@@ -350,8 +364,8 @@ where
         .into_iter()
         .enumerate()
         .map(|(idx, row)| {
-        let values: Vec<u64> = row.iter().map(|e| e.as_int()).collect();
-        
+            let values: Vec<u64> = row.iter().map(|e| e.as_int()).collect();
+
             // Use aligned openings directly by row index
             let (sib_vec, pos_actual) = aligned_openings
                 .get(idx)
@@ -368,12 +382,12 @@ where
 
             // Convert siblings to bytes for circuit
             let merkle_path: Vec<[u8; 32]> = Vec::new();
-        
-        CompQuery {
-            values,
-            merkle_path,
-            path_positions,
-        }
+
+            CompQuery {
+                values,
+                merkle_path,
+                path_positions,
+            }
         })
         .collect()
 }
@@ -391,10 +405,10 @@ where
     V: winter_crypto::VectorCommitment<H, MultiProof = winter_crypto::BatchMerkleProof<H>>,
 {
     type E = GL;
-    
+
     // Get num_partitions from proof
     let _num_partitions = fri_proof.num_partitions();
-    
+
     // Parse all FRI layers
     let (layer_queries, layer_proofs) = fri_proof
         .clone()
@@ -408,13 +422,13 @@ where
         layer_queries.len(),
         layer_proofs.len()
     );
-    
+
     // Convert to our format
     let mut result = Vec::with_capacity(num_layers);
-    
+
     let mut layer_positions = main_query_positions.to_vec();
     let mut current_domain_size = initial_domain_size;
-    
+
     for (_layer_idx, (query_vals, batch_proof)) in
         layer_queries.iter().zip(&layer_proofs).enumerate()
     {
@@ -430,20 +444,21 @@ where
             .map(|&p| p % folded_domain_size)
             .collect();
         current_domain_size = folded_domain_size;
-        
+
         // Deduplicate WITHOUT sorting (preserve insertion order) in O(n)
         // Matches Winterfell's fold_positions but avoids quadratic scanning
         let mut folded_positions = Vec::with_capacity(layer_positions.len());
         {
             use std::collections::HashSet;
-            let mut seen: HashSet<usize> = HashSet::with_capacity(layer_positions.len().saturating_mul(2));
+            let mut seen: HashSet<usize> =
+                HashSet::with_capacity(layer_positions.len().saturating_mul(2));
             for &pos in &layer_positions {
                 if seen.insert(pos) {
                     folded_positions.push(pos);
                 }
             }
         }
-        
+
         // query_vals is Vec<E> with folding_factor elements per unique folded position
         assert!(
             query_vals.len() % folding_factor == 0,
@@ -463,50 +478,50 @@ where
         // - Multiple original positions may map to the same folded position
         let mut folded_data: std::collections::HashMap<usize, Vec<u64>> =
             std::collections::HashMap::new();
-        
+
         for (unique_idx, &folded_pos) in folded_positions.iter().enumerate() {
-            // Get values for this unique position
             let chunk_start = unique_idx * folding_factor;
             let chunk_end = (chunk_start + folding_factor).min(query_vals.len());
             let values: Vec<u64> = query_vals[chunk_start..chunk_end]
                 .iter()
                 .map(|e| e.as_int())
                 .collect();
+            assert!(
+                values.len() == folding_factor,
+                "FRI unique folded values must equal folding_factor"
+            );
             folded_data.insert(folded_pos, values);
         }
-        
+
         // Now create one FriQuery per original layer_position
         let mut queries = Vec::with_capacity(layer_positions.len());
         let row_length = current_domain_size;
-        
+
         for (_pos_idx, &original_pos) in layer_positions.iter().enumerate() {
-            // Find which folded position this original position maps to
             let folded_pos = original_pos % row_length;
-            let values = folded_data.get(&folded_pos).expect(&format!(
-                "folded_pos {} not found in folded_data",
-                folded_pos
-            ));
-            
-            // For FRI, we need both v_lo and v_hi from the committed values
-            // (these come from the folding_factor elements at the folded position)
-            let v_lo = values.get(0).copied().unwrap_or(0);
-            let v_hi = values.get(1).copied().unwrap_or(0);
-            
-            queries.push(FriQuery { v_lo, v_hi });
+            let values = folded_data
+                .get(&folded_pos)
+                .cloned()
+                .expect("missing folded data for original position");
+
+            queries.push(FriQuery { values });
         }
 
-        // Collect unique values and batch nodes metadata for batch verification
+        // Collect unique (v_lo, v_hi) pairs and batch nodes metadata for batch verification
         let unique_values: Vec<(u64, u64)> = folded_positions
             .iter()
-            .filter_map(|fp| {
-                if let Some(vals) = folded_data.get(fp) {
-                    Some((
-                        vals.get(0).copied().unwrap_or(0),
-                        vals.get(1).copied().unwrap_or(0),
-                    ))
-                } else {
-                    None
-                }
+            .map(|fp| {
+                let vals = folded_data
+                    .get(fp)
+                    .cloned()
+                    .expect("missing folded data for unique index");
+                assert!(
+                    vals.len() == folding_factor,
+                    "unique folded values must equal folding_factor"
+                );
+                let lo = vals[0];
+                let hi = vals[1];
+                (lo, hi)
             })
             .collect();
         let unique_indexes: Vec<usize> = folded_positions.clone();
@@ -552,7 +567,7 @@ where
             batch_depth,
         });
     }
-    
+
     result
 }
 
@@ -564,7 +579,7 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
     ood_comp_next: &[u64],
 ) -> [u8; 32] {
     use winter_crypto::Digest;
-    
+
     // Hash OOD frame values - MATCH Winterfell's merge_ood_evaluations order
     // Per Winterfell source: [trace_current, constraint_current, trace_next, constraint_next]
     let mut elements = Vec::new();
@@ -580,7 +595,7 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
     for &v in ood_comp_next {
         elements.push(GL::try_from(v).unwrap_or(GL::ZERO));
     }
-    
+
     let digest = H::hash_elements(&elements);
     digest.as_bytes()
 }
@@ -589,7 +604,7 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
 fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
     use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, CryptographicSponge};
-    
+
     let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
     for &pos in positions {
         let b = (pos as u64).to_le_bytes();
@@ -614,9 +629,9 @@ fn compute_statement_hash(
     use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_crypto_primitives::sponge::CryptographicSponge;
-    
+
     let mut hasher = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
-    
+
     // Helper: Convert 8 LE bytes to field element
     let bytes_to_fe = |chunk: &[u8]| -> InnerFr {
         let mut val = 0u64;
@@ -625,11 +640,11 @@ fn compute_statement_hash(
         }
         InnerFr::from(val)
     };
-    
+
     // Absorb all commitments
     for trace_root in trace_roots {
-    for chunk in trace_root.chunks(8) {
-        hasher.absorb(&bytes_to_fe(chunk));
+        for chunk in trace_root.chunks(8) {
+            hasher.absorb(&bytes_to_fe(chunk));
         }
     }
     for chunk in comp_root.chunks(8) {
@@ -643,16 +658,16 @@ fn compute_statement_hash(
     for chunk in ood_commit.chunks(8) {
         hasher.absorb(&bytes_to_fe(chunk));
     }
-    
+
     // Absorb public inputs
     for pub_in in pub_inputs {
         hasher.absorb(&InnerFr::from(*pub_in));
     }
-    
+
     // Use the *same* positions commitment as the circuit
     let pos_commit = poseidon_commit_positions_offchain(query_positions);
     hasher.absorb(&pos_commit);
-    
+
     let hash = hasher.squeeze_field_elements::<InnerFr>(1);
     hash[0]
 }

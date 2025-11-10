@@ -80,9 +80,9 @@ pub struct FullStarkVerifierCircuit {
     pub ood_commitment_le32: [u8; 32],       // Binds OOD frame to prevent free witnesses
 
     // Query openings (witness)
-    pub query_positions: Vec<usize>,    // LDE domain positions
+    pub query_positions: Vec<usize>, // LDE domain positions
     pub trace_segments: Vec<TraceSegmentWitness>, // Per-segment openings + Merkle metadata
-    pub comp_queries: Vec<CompQuery>,   // Per-query composition openings
+    pub comp_queries: Vec<CompQuery>, // Per-query composition openings
 
     pub comp_batch_nodes: Vec<Vec<[u8; 32]>>,
     pub comp_batch_depth: u8,
@@ -135,15 +135,14 @@ pub struct FriLayerQueries {
     pub queries: Vec<FriQuery>, // Per-query in this layer
     // Batch multiproof data for the layer
     pub unique_indexes: Vec<usize>, // folded_positions_unique for this layer
-    pub unique_values: Vec<(u64, u64)>, // (v_lo, v_hi) per unique index in same order
+    pub unique_values: Vec<(u64, u64)>, // (v_lo, v_hi) per unique index (t=2)
     pub batch_nodes: Vec<Vec<[u8; 32]>>, // nodes vectors
     pub batch_depth: u8,            // tree depth
 }
 
 #[derive(Clone, Debug)]
 pub struct FriQuery {
-    pub v_lo: u64, // Lower half (GL)
-    pub v_hi: u64, // Upper half (GL)
+    pub values: Vec<u64>, // All values required to fold this query (length = folding_factor)
 }
 
 impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
@@ -420,10 +419,10 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &comp_root_bytes,
             &fri_roots_bytes,
             &self.fs_context_seed_gl,
-            &self.ood_trace_current,
-            &self.ood_trace_next,
-            &self.ood_comp,
-            &self.ood_comp_next,
+            &ood_trace_current_fp,
+            &ood_trace_next_fp,
+            &ood_comp_current_fp,
+            &ood_comp_next_fp,
             self.air_params.num_constraint_coeffs,
             &self.air_params,
             comp_width,
@@ -657,10 +656,10 @@ fn derive_fs_challenges_in_circuit(
     comp_root: &[UInt8<InnerFr>],
     fri_roots: &[Vec<UInt8<InnerFr>>],
     fs_context_seed_gl: &[u64], // proof.context.to_elements().as_int()
-    ood_trace_current: &[u64],
-    ood_trace_next: &[u64],
-    ood_comp: &[u64],
-    ood_comp_next: &[u64],        // Composition at z*g (for LINEAR batching)
+    ood_trace_current: &[FpGLVar],
+    ood_trace_next: &[FpGLVar],
+    ood_comp: &[FpGLVar],
+    ood_comp_next: &[FpGLVar], // Composition at z*g (for LINEAR batching)
     num_constraint_coeffs: usize, // proof.context.num_constraints()
     air_params: &AirParams,
     comp_width: usize,
@@ -694,13 +693,13 @@ fn derive_fs_challenges_in_circuit(
     let z = z_gl.0; // Extract FpVar from GlVar
 
     // 3) Reseed with OOD frames - hash elements first, then reseed with digest
-    let mut ood_elems = Vec::new();
-    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_trace_current)?);
-    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_comp)?);
-    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_trace_next)?);
-    ood_elems.extend(gl_alloc_u64_vec(cs.clone(), ood_comp_next)?);
-
-    let ood_gl: Vec<GlVar> = ood_elems.iter().map(|fp| GlVar(fp.clone())).collect();
+    let mut ood_gl: Vec<GlVar> = Vec::with_capacity(
+        ood_trace_current.len() + ood_comp.len() + ood_trace_next.len() + ood_comp_next.len(),
+    );
+    ood_gl.extend(ood_trace_current.iter().map(|fp| GlVar(fp.clone())));
+    ood_gl.extend(ood_comp.iter().map(|fp| GlVar(fp.clone())));
+    ood_gl.extend(ood_trace_next.iter().map(|fp| GlVar(fp.clone())));
+    ood_gl.extend(ood_comp_next.iter().map(|fp| GlVar(fp.clone())));
 
     // HASH the OOD elements first
     use super::gadgets::rpo_gl_light::rpo_hash_elements_light;
@@ -709,12 +708,12 @@ fn derive_fs_challenges_in_circuit(
     // Then reseed with the digest
     coin.reseed(&ood_digest)?;
 
-    // DEEP coeffs: ONE per trace column + ONE per composition column
+    // DEEP coeffs: RandomRho only (one coefficient per column)
     let num_deep = air_params.trace_width + comp_width;
     let mut deep_coeffs = Vec::with_capacity(num_deep);
     for _ in 0..num_deep {
         let coeff_gl = coin.draw()?;
-        deep_coeffs.push(coeff_gl.0); // Extract FpVar
+        deep_coeffs.push(coeff_gl.0);
     }
 
     // 4) Reseed with FRI commitments → draw beta only for folding layers
