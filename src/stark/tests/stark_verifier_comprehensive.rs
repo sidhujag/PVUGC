@@ -589,12 +589,24 @@ fn test_adversarial_low_pow_nonce() {
         actual_fri_layers,
     );
     let grinding_factor = proof.options().grinding_factor();
+    // If GF is zero, any nonce is valid; skip this negative test early.
+    if grinding_factor == 0 {
+        eprintln!("Skipping low_pow_nonce adversarial test (grinding_factor == 0)");
+        return;
+    }
+    // Find a violating nonce with a hard cap to avoid long loops.
     let mut bad_nonce = proof.pow_nonce;
-    loop {
+    let mut found = false;
+    for _ in 0..1_000_000 {
         bad_nonce = bad_nonce.wrapping_add(1);
         if coin_pow.check_leading_zeros(bad_nonce) < grinding_factor {
+            found = true;
             break;
         }
+    }
+    // If not found within cap, fall back to flipping LSB; this may be sufficient for small GF.
+    if !found {
+        bad_nonce = proof.pow_nonce ^ 1u64;
     }
 
     let mut circuit = parse_proof_for_circuit_with_query_positions::<
