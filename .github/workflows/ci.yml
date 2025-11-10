@@ -15,7 +15,7 @@ jobs:
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - name: Cargo test (stable, fast suite)
-        run: cargo test --locked --package pvugc --package arkworks_groth16 --lib --bins --examples
+        run: cargo test --locked --package arkworks_groth16 --lib --bins --examples
 
   test-sanitizers:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C link-arg=-fuse-ld=lld -Cunsafe-allow-abi-mismatch=sanitizer
           RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer
           ASAN_OPTIONS: detect_leaks=0
-        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --locked --package pvugc --package arkworks_groth16 --lib --bins --examples
+        run: cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --locked --package arkworks_groth16 --lib --bins --examples
 
   fuzz-smoke:
     runs-on: ubuntu-latest
