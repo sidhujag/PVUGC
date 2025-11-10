@@ -979,16 +979,78 @@ pub fn verify_deep_composition(
 }
 
 fn sort_uint64_in_place(values: &mut [UInt64GLVar]) -> Result<(), SynthesisError> {
-    let n = values.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let swap = values[i].is_gt(&values[j])?;
-            let new_i = UInt64GLVar::conditionally_select(&swap, &values[j], &values[i])?;
-            let new_j = UInt64GLVar::conditionally_select(&swap, &values[i], &values[j])?;
-            values[i] = new_i;
-            values[j] = new_j;
-        }
+    let original_len = values.len();
+    if original_len <= 1 {
+        return Ok(());
     }
+
+    fn compare_and_swap(
+        arr: &mut [UInt64GLVar],
+        i: usize,
+        j: usize,
+        ascending: bool,
+    ) -> Result<(), SynthesisError> {
+        let should_swap = if ascending {
+            arr[i].is_gt(&arr[j])?
+        } else {
+            arr[i].is_lt(&arr[j])?
+        };
+        let new_i = UInt64GLVar::conditionally_select(&should_swap, &arr[j], &arr[i])?;
+        let new_j = UInt64GLVar::conditionally_select(&should_swap, &arr[i], &arr[j])?;
+        arr[i] = new_i;
+        arr[j] = new_j;
+        Ok(())
+    }
+
+    fn greatest_power_of_two_less_than(n: usize) -> usize {
+        let mut k = 1;
+        while k < n {
+            k <<= 1;
+        }
+        k >> 1
+    }
+
+    fn bitonic_merge(arr: &mut [UInt64GLVar], ascending: bool) -> Result<(), SynthesisError> {
+        let n = arr.len();
+        if n <= 1 {
+            return Ok(());
+        }
+        let m = greatest_power_of_two_less_than(n);
+        for i in 0..(n - m) {
+            compare_and_swap(arr, i, i + m, ascending)?;
+        }
+        let (left, right) = arr.split_at_mut(m);
+        bitonic_merge(left, ascending)?;
+        bitonic_merge(right, ascending)?;
+        Ok(())
+    }
+
+    fn bitonic_sort(arr: &mut [UInt64GLVar], ascending: bool) -> Result<(), SynthesisError> {
+        let n = arr.len();
+        if n <= 1 {
+            return Ok(());
+        }
+        let mid = n / 2;
+        let (left, right) = arr.split_at_mut(mid);
+        bitonic_sort(left, true)?;
+        bitonic_sort(right, false)?;
+        bitonic_merge(arr, ascending)?;
+        Ok(())
+    }
+
+    let mut scratch: Vec<UInt64GLVar> = values.to_vec();
+    let target_len = original_len.next_power_of_two();
+    if target_len > scratch.len() {
+        let pad = target_len - scratch.len();
+        scratch.extend((0..pad).map(|_| UInt64GLVar::constant(u64::MAX)));
+    }
+
+    bitonic_sort(&mut scratch, true)?;
+
+    for (dst, src) in values.iter_mut().zip(scratch.iter()) {
+        *dst = src.clone();
+    }
+
     Ok(())
 }
 
