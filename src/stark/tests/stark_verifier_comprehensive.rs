@@ -588,18 +588,15 @@ fn test_adversarial_low_pow_nonce() {
         &ood_digest,
         actual_fri_layers,
     );
-    let grinding_factor = proof.options().grinding_factor();
-    // If GF is zero, any nonce is valid; skip this negative test early.
-    if grinding_factor == 0 {
-        eprintln!("Skipping low_pow_nonce adversarial test (grinding_factor == 0)");
-        return;
-    }
+    let mut target_gf = proof.options().grinding_factor();
+    // If GF is zero in options, force a non-zero target for this adversarial test
+    if target_gf == 0 { target_gf = 4; }
     // Find a violating nonce with a hard cap to avoid long loops.
     let mut bad_nonce = proof.pow_nonce;
     let mut found = false;
     for _ in 0..1_000_000 {
         bad_nonce = bad_nonce.wrapping_add(1);
-        if coin_pow.check_leading_zeros(bad_nonce) < grinding_factor {
+        if coin_pow.check_leading_zeros(bad_nonce) < target_gf {
             found = true;
             break;
         }
@@ -613,6 +610,8 @@ fn test_adversarial_low_pow_nonce() {
         Rp64_256,
         winter_crypto::MerkleTree<Rp64_256>,
     >(&proof, pub_inputs_u64, air_params, query_positions);
+    // Override the enforced grinding factor for this adversarial test
+    circuit.air_params.grinding_factor = target_gf;
     circuit.pow_nonce = bad_nonce;
 
     let cs = ConstraintSystem::new_ref();
