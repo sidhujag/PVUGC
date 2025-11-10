@@ -10,10 +10,10 @@
 //! tapleaf_version || txid_template || path_tag || share_index || T_i || T ||
 //! {D_j} || D_δ || GS_instance_digest
 
-use sha2::{Sha256, Digest};
-use subtle::ConstantTimeEq;
+use crate::error::{Error, Result};
 use ark_ec::pairing::{Pairing, PairingOutput};
-use crate::error::{Result, Error};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 /// Complete AD_core binding per spec §8:293
 /// Binds all 15 components to ensure ciphertext integrity
@@ -85,7 +85,7 @@ impl AdCore {
             gs_instance_digest,
         }
     }
-    
+
     /// Serialize AD_core for hash input
     /// Strictly ordered per spec §8:293
     pub fn serialize(&self) -> Vec<u8> {
@@ -96,28 +96,28 @@ impl AdCore {
         result.extend_from_slice(&self.ctx_hash);
         result.extend_from_slice(&self.tapleaf_hash);
         result.push(self.tapleaf_version);
-        
+
         // Length-prefixed fields
         result.extend_from_slice(&(self.txid_template.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.txid_template);
-        
+
         result.extend_from_slice(&(self.path_tag.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.path_tag);
-        
+
         result.extend_from_slice(&self.share_index.to_le_bytes());
-        
+
         result.extend_from_slice(&(self.t_i.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.t_i);
-        
+
         result.extend_from_slice(&(self.t_aggregate.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.t_aggregate);
-        
+
         result.extend_from_slice(&(self.armed_bases.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.armed_bases);
-        
+
         result.extend_from_slice(&(self.armed_delta.len() as u32).to_le_bytes());
         result.extend_from_slice(&self.armed_delta);
-        
+
         result.extend_from_slice(&self.gs_instance_digest);
         result
     }
@@ -141,58 +141,55 @@ impl DemP2 {
             ad_core: ad_core.to_vec(),
         }
     }
-    
+
     /// Encrypt plaintext with DEM-SHA256
     /// ct = pt ⊕ keystream
     pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
         let keystream = self.derive_keystream(plaintext.len());
-        plaintext.iter()
+        plaintext
+            .iter()
             .zip(keystream.iter())
             .map(|(p, k)| p ^ k)
             .collect()
     }
-    
+
     /// Decrypt ciphertext with DEM-SHA256
     /// pt = ct ⊕ keystream
     pub fn decrypt(&self, ciphertext: &[u8]) -> Vec<u8> {
         // XOR is symmetric
         self.encrypt(ciphertext)
     }
-    
+
     /// Derive keystream via domain-separated SHA-256
     fn derive_keystream(&self, len: usize) -> Vec<u8> {
         let mut hasher = Sha256::new();
         hasher.update(b"PVUGC/DEM-SHA256/keystream");
         hasher.update(&self.key);
         hasher.update(&self.ad_core);
-        
+
         let mut keystream = Vec::with_capacity(len);
         let mut hash = hasher.finalize().to_vec();
-        
+
         while keystream.len() < len {
             keystream.extend_from_slice(&hash);
             let mut next_hasher = Sha256::new();
             next_hasher.update(&hash);
             hash = next_hasher.finalize().to_vec();
         }
-        
+
         keystream.truncate(len);
         keystream
     }
 }
 
 /// Compute key-commitment tag τ_i per spec §8:286 (DEM-SHA256)
-pub fn compute_key_commitment_tag(
-    k_bytes: &[u8],
-    ad_core: &[u8],
-    ciphertext: &[u8],
-) -> [u8; 32] {
+pub fn compute_key_commitment_tag(k_bytes: &[u8], ad_core: &[u8], ciphertext: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"PVUGC/DEM-SHA256/tag");
     hasher.update(k_bytes);
     hasher.update(ad_core);
     hasher.update(ciphertext);
-    
+
     let mut result = [0u8; 32];
     result.copy_from_slice(&hasher.finalize());
     result
@@ -212,20 +209,17 @@ pub fn verify_key_commitment(
 
 /// GS attestation size bounds per spec §6:185
 /// MUST reject if m_1 + m_2 > 96 pairings
-pub fn validate_gs_size_bounds(
-    num_g1_commitments: usize,
-    num_g2_commitments: usize,
-) -> Result<()> {
+pub fn validate_gs_size_bounds(num_g1_commitments: usize, num_g2_commitments: usize) -> Result<()> {
     const MAX_PAIRINGS: usize = 96;
     let total = num_g1_commitments + num_g2_commitments;
-    
+
     if total > MAX_PAIRINGS {
         return Err(Error::Crypto(format!(
             "GS attestation too large: {} pairings (max {})",
             total, MAX_PAIRINGS
         )));
     }
-    
+
     Ok(())
 }
 
@@ -244,7 +238,9 @@ pub fn gt_eq_ct<E: Pairing>(a: &PairingOutput<E>, b: &PairingOutput<E>) -> bool 
     let mut bb = Vec::new();
     a.0.serialize_compressed(&mut ab).expect("serialize");
     b.0.serialize_compressed(&mut bb).expect("serialize");
-    if ab.len() != bb.len() { return false; }
+    if ab.len() != bb.len() {
+        return false;
+    }
     ab.ct_eq(&bb).into()
 }
 
@@ -257,25 +253,28 @@ mod tests {
         let k_bytes = b"test-key-bytes";
         let ad_core = b"test-ad-core-binding";
         let plaintext = b"hello world";
-        
+
         let dem = DemP2::new(k_bytes, ad_core);
         let ciphertext = dem.encrypt(plaintext);
         let decrypted = dem.decrypt(&ciphertext);
-        
+
         assert_eq!(decrypted, plaintext);
     }
 
     #[test]
     fn dem_p2_different_keys_different_ct() {
         let plaintext = b"hello world";
-        
+
         let dem1 = DemP2::new(b"key1", b"ad-core");
         let dem2 = DemP2::new(b"key2", b"ad-core");
-        
+
         let ct1 = dem1.encrypt(plaintext);
         let ct2 = dem2.encrypt(plaintext);
-        
-        assert_ne!(ct1, ct2, "Different keys must produce different ciphertexts");
+
+        assert_ne!(
+            ct1, ct2,
+            "Different keys must produce different ciphertexts"
+        );
     }
 
     #[test]
@@ -295,10 +294,10 @@ mod tests {
             vec![9u8; 64],
             [10u8; 32],
         );
-        
+
         let ser1 = ad_core.serialize();
         let ser2 = ad_core.serialize();
-        
+
         assert_eq!(ser1, ser2, "AD_core serialization must be deterministic");
     }
 
@@ -307,10 +306,10 @@ mod tests {
         let k_bytes = b"test-key";
         let ad_core = b"test-ad-core";
         let ciphertext = b"test-ciphertext";
-        
+
         let tau = compute_key_commitment_tag(k_bytes, ad_core, ciphertext);
         assert!(verify_key_commitment(k_bytes, ad_core, ciphertext, &tau));
-        
+
         // Different ciphertext must fail verification
         let wrong_ct = b"wrong-ciphertext";
         assert!(!verify_key_commitment(k_bytes, ad_core, wrong_ct, &tau));
@@ -320,9 +319,13 @@ mod tests {
     fn gs_size_bounds() {
         assert!(validate_gs_size_bounds(50, 40).is_ok());
         assert!(validate_gs_size_bounds(96, 0).is_ok());
-        assert!(validate_gs_size_bounds(50, 46).is_ok(), "96 pairings should be OK");
-        assert!(validate_gs_size_bounds(50, 47).is_err(), "97 pairings exceeds limit");
+        assert!(
+            validate_gs_size_bounds(50, 46).is_ok(),
+            "96 pairings should be OK"
+        );
+        assert!(
+            validate_gs_size_bounds(50, 47).is_err(),
+            "97 pairings exceeds limit"
+        );
     }
 }
-
-

@@ -1,17 +1,19 @@
 use ark_bls12_377::Fr as Fr377;
 use ark_ff::PrimeField;
-use ark_std::rand::{SeedableRng, rngs::StdRng, Rng};
+use ark_std::rand::{rngs::StdRng, Rng, SeedableRng};
 
-use crate::stark::crypto::poseidon_merkle_helpers::{
-    poseidon2_merkle_root, poseidon2_merkle_path, verify_path_default,
-};
 use crate::stark::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+use crate::stark::crypto::poseidon_merkle_helpers::{
+    poseidon2_merkle_path, poseidon2_merkle_root, verify_path_default,
+};
 
 fn leaves_from_u64s(vals: &[u64]) -> Vec<Fr377> {
     vals.iter().map(|&v| Fr377::from(v)).collect()
 }
 
-fn is_right(idx: usize) -> bool { (idx & 1) == 1 }
+fn is_right(idx: usize) -> bool {
+    (idx & 1) == 1
+}
 
 #[test]
 fn poseidon_merkle_convention_and_odd_duplication() {
@@ -27,13 +29,19 @@ fn poseidon_merkle_convention_and_odd_duplication() {
             assert!(
                 verify_path_default(leaves[idx], &path, &pos, root),
                 "verify failed for n={}, idx={}, path_len={}, pos={:?}",
-                n, idx, path.len(), pos
+                n,
+                idx,
+                path.len(),
+                pos
             );
             if !pos.is_empty() {
                 assert_eq!(
-                    pos[0], is_right(idx),
+                    pos[0],
+                    is_right(idx),
                     "first pos bit mismatch: n={}, idx={}, pos[0]={}",
-                    n, idx, pos[0]
+                    n,
+                    idx,
+                    pos[0]
                 );
             }
         }
@@ -59,14 +67,18 @@ fn poseidon_merkle_randomized_roundtrip() {
         let root = poseidon2_merkle_root(cfg, leaves.clone());
         for idx in 0..n {
             let (r2, path, pos) = poseidon2_merkle_path(cfg, &leaves, idx);
-            assert_eq!(r2, root, "root mismatch in randomized, n={}, idx={}", n, idx);
+            assert_eq!(
+                r2, root,
+                "root mismatch in randomized, n={}, idx={}",
+                n, idx
+            );
             assert!(
                 verify_path_default(leaves[idx], &path, &pos, root),
                 "verify failed (randomized) for n={}, idx={}, depth= {}",
-                n, idx, path.len()
+                n,
+                idx,
+                path.len()
             );
         }
     }
 }
-
-

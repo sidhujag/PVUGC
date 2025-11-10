@@ -22,10 +22,10 @@
 //!
 //! Use for internal arithmetic. Canonicalize only when comparing to proof bytes.
 
-use ark_r1cs_std::{fields::fp::FpVar, uint8::UInt8, prelude::*};
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
-use ark_ff::{PrimeField, BigInteger};
 use crate::outer_compressed::InnerFr;
+use ark_ff::{BigInteger, PrimeField};
+use ark_r1cs_std::{fields::fp::FpVar, prelude::*, uint8::UInt8};
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 const P_U64: u64 = 0xFFFF_FFFF_0000_0001;
 
@@ -42,11 +42,12 @@ fn fp_p() -> FpVar<InnerFr> {
 fn alloc_u32(
     cs: ConstraintSystemRef<InnerFr>,
     hint: Option<u32>,
-) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>;4]), SynthesisError> {
+) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>; 4]), SynthesisError> {
     let w = hint.unwrap_or(0);
-    let bytes: [UInt8<InnerFr>;4] =
-        core::array::from_fn(|i| UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap());
-    
+    let bytes: [UInt8<InnerFr>; 4] = core::array::from_fn(|i| {
+        UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap()
+    });
+
     // Manual pack
     let mut v = FpVar::constant(InnerFr::from(0u64));
     let mut pow = FpVar::constant(InnerFr::from(1u64));
@@ -61,11 +62,12 @@ fn alloc_u32(
 fn alloc_u64(
     cs: ConstraintSystemRef<InnerFr>,
     hint: Option<u64>,
-) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>;8]), SynthesisError> {
+) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>; 8]), SynthesisError> {
     let w = hint.unwrap_or(0);
-    let bytes: [UInt8<InnerFr>;8] =
-        core::array::from_fn(|i| UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap());
-    
+    let bytes: [UInt8<InnerFr>; 8] = core::array::from_fn(|i| {
+        UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap()
+    });
+
     // Manual pack
     let mut v = FpVar::constant(InnerFr::from(0u64));
     let mut pow = FpVar::constant(InnerFr::from(1u64));
@@ -80,7 +82,7 @@ fn alloc_u64(
 #[allow(dead_code)]
 fn canon_u64(
     cs: ConstraintSystemRef<InnerFr>,
-    r64: &FpVar<InnerFr>
+    r64: &FpVar<InnerFr>,
 ) -> Result<FpVar<InnerFr>, SynthesisError> {
     // Compute hints from r64's value - extract as u64 without GL reduction
     // The Fr value represents a u64 that might be >= p
@@ -103,7 +105,7 @@ fn canon_u64(
     let hi_eq_max = hi32.is_eq(&max32)?;
     let lo_is_zero = lo32.is_eq(&FpVar::zero())?;
     let ge = &hi_eq_max & &(!lo_is_zero);
-    let p  = FpVar::constant(InnerFr::from(P_U64 as u128));
+    let p = FpVar::constant(InnerFr::from(P_U64 as u128));
     Ok(r64.clone() - FpVar::conditionally_select(&ge, &p, &FpVar::zero())?)
 }
 
@@ -111,7 +113,7 @@ fn canon_u64(
 pub fn gl_add(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     let sum = &a.0 + &b.0;
     let s = Boolean::new_witness(cs.clone(), || {
@@ -129,7 +131,7 @@ pub fn gl_add(
 pub fn gl_sub(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     let diff = &a.0 - &b.0;
     let t = Boolean::new_witness(cs.clone(), || {
@@ -147,23 +149,23 @@ pub fn gl_sub(
 pub fn gl_mul(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     // Compute the correct GL multiplication result
     let result_hint = {
-        use crate::stark::gl_u64::{gl_mul, fr_to_gl_u64};
-            let av = fr_to_gl_u64(a.0.value()?);
-            let bv = fr_to_gl_u64(b.0.value()?);
+        use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
+        let av = fr_to_gl_u64(a.0.value()?);
+        let bv = fr_to_gl_u64(b.0.value()?);
         gl_mul(av, bv)
     };
-    
+
     // Allocate the result (already range-checked to 64 bits)
     let (result_fp, _) = alloc_u64(cs.clone(), Some(result_hint))?;
     let result = GlVar(result_fp);
-    
+
     // The key insight: a * b = result + k * p for some integer k
     // We need to find and witness k, then verify the equation
-    
+
     // Compute k from the witness values
     let k_hint = {
         use crate::stark::gl_u64::fr_to_gl_u64;
@@ -175,35 +177,32 @@ pub fn gl_mul(
         let k_u128 = (prod_u128 - result_u128) / (P_U64 as u128);
         k_u128 as u64
     };
-    
+
     // Allocate k (for a,b < p, we have k < p)
     let (k_fp, _) = alloc_u64(cs.clone(), Some(k_hint))?;
-    
+
     // Verify: a * b == result + k * p
     let p = FpVar::constant(InnerFr::from(P_U64 as u128));
     let prod_fr = &a.0 * &b.0;
     let right = &result.0 + &(&k_fp * &p);
     prod_fr.enforce_equal(&right)?;
-    
+
     Ok(result)
 }
 
 /// GL inversion
-pub fn gl_inv(
-    cs: ConstraintSystemRef<InnerFr>,
-    v: &GlVar
-) -> Result<GlVar, SynthesisError> {
+pub fn gl_inv(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
-    
+
     let inv_val = gl_inv(fr_to_gl_u64(v.0.value().unwrap_or_default()));
     let (inv_fp, _) = alloc_u64(cs.clone(), Some(inv_val))?;
     let inv = GlVar(inv_fp);
-    
+
     // Enforce: v * inv = 1 (gl_mul returns canonical GL, so plain equality works)
     let prod = gl_mul(cs.clone(), v, &inv)?;
     let one = FpVar::constant(InnerFr::from(1u64));
     prod.0.enforce_equal(&one)?;
-    
+
     Ok(inv)
 }
 
@@ -217,7 +216,7 @@ pub fn gl_inv(
 pub fn gl_add_light(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     // Witness the result (may not be canonical)
     let r = FpVar::new_witness(cs.clone(), || {
@@ -226,7 +225,7 @@ pub fn gl_add_light(
         let bv = fr_to_gl_u64(b.0.value()?);
         Ok(InnerFr::from(gl_add(av, bv) as u128))
     })?;
-    
+
     // Witness quotient s ∈ {0,1}
     let s = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
@@ -234,7 +233,7 @@ pub fn gl_add_light(
         let bv = fr_to_gl_u64(b.0.value()?);
         Ok((av as u128 + bv as u128) >= P_U64 as u128)
     })?;
-    
+
     // Enforce: a + b = r + s·p
     let s_fp: FpVar<InnerFr> = s.into();
     (a.0.clone() + b.0.clone()).enforce_equal(&(r.clone() + s_fp * fp_p()))?;
@@ -246,7 +245,7 @@ pub fn gl_add_light(
 pub fn gl_sub_light(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     // Witness the result
     let r = FpVar::new_witness(cs.clone(), || {
@@ -255,7 +254,7 @@ pub fn gl_sub_light(
         let bv = fr_to_gl_u64(b.0.value()?);
         Ok(InnerFr::from(gl_sub(av, bv) as u128))
     })?;
-    
+
     // Witness quotient t ∈ {0,1}
     let t = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
@@ -263,7 +262,7 @@ pub fn gl_sub_light(
         let bv = fr_to_gl_u64(b.0.value()?);
         Ok(av < bv)
     })?;
-    
+
     // Enforce: a - b = r - t·p
     let t_fp: FpVar<InnerFr> = t.into();
     (a.0.clone() - b.0.clone()).enforce_equal(&(r.clone() - t_fp * fp_p()))?;
@@ -275,7 +274,7 @@ pub fn gl_sub_light(
 pub fn gl_mul_light(
     cs: ConstraintSystemRef<InnerFr>,
     a: &GlVar,
-    b: &GlVar
+    b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     // Witness the GL-reduced result
     let r = FpVar::new_witness(cs.clone(), || {
@@ -284,7 +283,7 @@ pub fn gl_mul_light(
         let bv = fr_to_gl_u64(b.0.value()?);
         Ok(InnerFr::from(gl_mul(av, bv) as u128))
     })?;
-    
+
     // Witness quotient k
     let k = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
@@ -294,28 +293,27 @@ pub fn gl_mul_light(
         let res = crate::stark::gl_u64::gl_mul(av, bv) as u128;
         Ok(InnerFr::from((prod - res) / P_U64 as u128))
     })?;
-    
+
     // Enforce: a·b = r + k·p
     (a.0.clone() * b.0.clone()).enforce_equal(&(r.clone() + k * fp_p()))?;
     Ok(GlVar(r))
 }
 
 /// Light GL inverse - witness and verify with single mul
-pub fn gl_inv_light(
-    cs: ConstraintSystemRef<InnerFr>,
-    v: &GlVar
-) -> Result<GlVar, SynthesisError> {
+pub fn gl_inv_light(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
-    
+
     // Witness the inverse
     let inv_val = gl_inv(fr_to_gl_u64(v.0.value().unwrap_or_default()));
-    let inv = GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(inv_val as u128)))?);
-    
+    let inv = GlVar(FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(inv_val as u128))
+    })?);
+
     // Verify: v * inv = 1 using light mul
     let prod = gl_mul_light(cs.clone(), v, &inv)?;
     let one = FpVar::constant(InnerFr::from(1u64));
     prod.0.enforce_equal(&one)?;
-    
+
     Ok(inv)
 }
 
@@ -339,7 +337,11 @@ pub fn gl_batch_inv_light(
     // Backwards pass
     let mut invs: Vec<GlVar> = vec![GlVar(FpVar::constant(InnerFr::from(0u64))); values.len()];
     for i in (0..values.len()).rev() {
-        let prev = if i == 0 { GlVar(FpVar::constant(InnerFr::from(1u64))) } else { prefix[i - 1].clone() };
+        let prev = if i == 0 {
+            GlVar(FpVar::constant(InnerFr::from(1u64)))
+        } else {
+            prefix[i - 1].clone()
+        };
         // invs[i] = inv_total * prev
         invs[i] = gl_mul_light(cs.clone(), &inv_total, &prev)?;
         // inv_total = inv_total * values[i]

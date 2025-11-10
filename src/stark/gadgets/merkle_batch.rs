@@ -1,10 +1,10 @@
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
-use ark_r1cs_std::prelude::*;
-use ark_r1cs_std::fields::fp::FpVar;
-use crate::outer_compressed::InnerFr;
 use super::gl_fast::GlVar;
-use super::rpo_gl_light::{RpoParamsGLLight, rpo_merge_light};
+use super::rpo_gl_light::{rpo_merge_light, RpoParamsGLLight};
 use super::utils::digest32_to_gl4;
+use crate::outer_compressed::InnerFr;
+use ark_r1cs_std::fields::fp::FpVar;
+use ark_r1cs_std::prelude::*;
+use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type FpGLVar = FpVar<InnerFr>;
@@ -24,7 +24,7 @@ pub fn verify_batch_merkle_root_gl(
     nodes_bytes: &[Vec<[u8; 32]>],
     depth: usize,
     expected_root_bytes: &[UInt8<InnerFr>],
-    ) -> Result<(), SynthesisError> {
+) -> Result<(), SynthesisError> {
     // Replace odd indexes with even and dedup in ascending order
     let mut set = BTreeSet::new();
     for &index in indexes {
@@ -54,18 +54,42 @@ pub fn verify_batch_merkle_root_gl(
                 right = leaves[i2].clone();
                 proof_pointers.push(0);
             } else {
-                let sib_arr = if nodes_bytes[i].is_empty() { [0u8; 32] } else { nodes_bytes[i][0] };
-                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr.iter().map(|b| UInt8::new_witness(cs.clone(), || Ok(*b))).collect::<Result<_, _>>()?;
+                let sib_arr = if nodes_bytes[i].is_empty() {
+                    [0u8; 32]
+                } else {
+                    nodes_bytes[i][0]
+                };
+                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
+                    .iter()
+                    .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
+                    .collect::<Result<_, _>>()?;
                 let sib_fp = digest32_to_gl4(&sib_bytes)?;
-                right = [GlVar(sib_fp[0].clone()), GlVar(sib_fp[1].clone()), GlVar(sib_fp[2].clone()), GlVar(sib_fp[3].clone())];
+                right = [
+                    GlVar(sib_fp[0].clone()),
+                    GlVar(sib_fp[1].clone()),
+                    GlVar(sib_fp[2].clone()),
+                    GlVar(sib_fp[3].clone()),
+                ];
                 proof_pointers.push(1);
             }
         } else {
             // left from nodes[i][0]
-            let sib_arr = if nodes_bytes[i].is_empty() { [0u8; 32] } else { nodes_bytes[i][0] };
-            let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr.iter().map(|b| UInt8::new_witness(cs.clone(), || Ok(*b))).collect::<Result<_, _>>()?;
+            let sib_arr = if nodes_bytes[i].is_empty() {
+                [0u8; 32]
+            } else {
+                nodes_bytes[i][0]
+            };
+            let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
+                .iter()
+                .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
+                .collect::<Result<_, _>>()?;
             let sib_fp = digest32_to_gl4(&sib_bytes)?;
-            left = [GlVar(sib_fp[0].clone()), GlVar(sib_fp[1].clone()), GlVar(sib_fp[2].clone()), GlVar(sib_fp[3].clone())];
+            left = [
+                GlVar(sib_fp[0].clone()),
+                GlVar(sib_fp[1].clone()),
+                GlVar(sib_fp[2].clone()),
+                GlVar(sib_fp[3].clone()),
+            ];
             if let Some(&i2) = index_map.get(&(index + 1)) {
                 right = leaves[i2].clone();
             } else {
@@ -76,7 +100,15 @@ pub fn verify_batch_merkle_root_gl(
         buf = [left, right];
         let parent = rpo_merge_light(cs.clone(), &buf[0], &buf[1], params)?;
         let parent_index = (offset + index) >> 1;
-        v.insert(parent_index, [parent[0].clone(), parent[1].clone(), parent[2].clone(), parent[3].clone()]);
+        v.insert(
+            parent_index,
+            [
+                parent[0].clone(),
+                parent[1].clone(),
+                parent[2].clone(),
+                parent[3].clone(),
+            ],
+        );
         next_indexes.push(parent_index);
     }
 
@@ -84,7 +116,7 @@ pub fn verify_batch_merkle_root_gl(
     for _depth_level in 1..depth {
         let indexes = next_indexes.clone();
         next_indexes.clear();
-        
+
         let mut i = 0usize;
         while i < indexes.len() {
             let node_index = indexes[i];
@@ -96,15 +128,26 @@ pub fn verify_batch_merkle_root_gl(
                 sibling = [s[0].clone(), s[1].clone(), s[2].clone(), s[3].clone()];
                 i += 1;
             } else {
-                
                 let ptr = proof_pointers.get(i).copied().unwrap_or(0);
                 let node_vec = nodes_bytes.get(i).cloned().unwrap_or_default();
-                if ptr >= node_vec.len() { return Err(SynthesisError::Unsatisfiable); }
+                if ptr >= node_vec.len() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
                 let sib_arr = node_vec[ptr];
-                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr.iter().map(|b| UInt8::new_witness(cs.clone(), || Ok(*b))).collect::<Result<_, _>>()?;
+                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
+                    .iter()
+                    .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
+                    .collect::<Result<_, _>>()?;
                 let sib_fp = digest32_to_gl4(&sib_bytes)?;
-                sibling = [GlVar(sib_fp[0].clone()), GlVar(sib_fp[1].clone()), GlVar(sib_fp[2].clone()), GlVar(sib_fp[3].clone())];
-                if i < proof_pointers.len() { proof_pointers[i] += 1; }
+                sibling = [
+                    GlVar(sib_fp[0].clone()),
+                    GlVar(sib_fp[1].clone()),
+                    GlVar(sib_fp[2].clone()),
+                    GlVar(sib_fp[3].clone()),
+                ];
+                if i < proof_pointers.len() {
+                    proof_pointers[i] += 1;
+                }
             }
             // node
             let node = v.get(&node_index).ok_or(SynthesisError::Unsatisfiable)?;
@@ -115,7 +158,15 @@ pub fn verify_batch_merkle_root_gl(
                 rpo_merge_light(cs.clone(), node, &sibling, params)?
             };
             let parent_index = node_index >> 1;
-            v.insert(parent_index, [parent[0].clone(), parent[1].clone(), parent[2].clone(), parent[3].clone()]);
+            v.insert(
+                parent_index,
+                [
+                    parent[0].clone(),
+                    parent[1].clone(),
+                    parent[2].clone(),
+                    parent[3].clone(),
+                ],
+            );
             next_indexes.push(parent_index);
             i += 1;
         }
@@ -130,5 +181,3 @@ pub fn verify_batch_merkle_root_gl(
     }
     Ok(())
 }
-
-

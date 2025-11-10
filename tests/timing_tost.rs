@@ -15,18 +15,9 @@ fn build_instance(
     num_theta: usize,
     rng: &mut ark_std::rand::rngs::StdRng,
 ) -> (
-    Vec<(
-        <E as Pairing>::G1Affine,
-        <E as Pairing>::G1Affine,
-    )>,
-    Vec<(
-        <E as Pairing>::G1Affine,
-        <E as Pairing>::G1Affine,
-    )>,
-    (
-        <E as Pairing>::G1Affine,
-        <E as Pairing>::G1Affine,
-    ),
+    Vec<(<E as Pairing>::G1Affine, <E as Pairing>::G1Affine)>,
+    Vec<(<E as Pairing>::G1Affine, <E as Pairing>::G1Affine)>,
+    (<E as Pairing>::G1Affine, <E as Pairing>::G1Affine),
     Vec<<E as Pairing>::G2Affine>,
     <E as Pairing>::G2Affine,
 ) {
@@ -97,6 +88,10 @@ fn tost_constant_shape_decap() {
     let min_ns = samples.iter().map(|d| d.as_nanos()).min().unwrap();
     let max_ns = samples.iter().map(|d| d.as_nanos()).max().unwrap();
     // Ratio bound (tunable): allow up to 2x spread to remain resilient to noisy CI nodes
-    assert!(max_ns <= min_ns * 2, "timing spread too large: min={}ns max={}ns", min_ns, max_ns);
+    assert!(
+        max_ns <= min_ns * 2,
+        "timing spread too large: min={}ns max={}ns",
+        min_ns,
+        max_ns
+    );
 }
-

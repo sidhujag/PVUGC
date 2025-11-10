@@ -6,18 +6,17 @@ use ark_bls12_381::{Bls12_381 as E, Fr};
 use ark_ec::{pairing::Pairing, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
-use ark_serialize::CanonicalSerialize;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
-    OneSidedPvugc,
-    PvugcBundle,
     coeff_recorder::SimpleCoeffRecorder,
-    ppe::PvugcVk,
-    ct::{AdCore, DemP2, serialize_gt},
+    ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
+    ppe::PvugcVk,
+    OneSidedPvugc, PvugcBundle,
 };
 
 type PairingE = E;
@@ -31,10 +30,10 @@ struct SquareCircuit {
 impl ConstraintSynthesizer<Fr> for SquareCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar};
-        let x_var =
-            FpVar::new_input(cs.clone(), || self.x.ok_or(SynthesisError::AssignmentMissing))?;
-        let y_var =
-            FpVar::new_witness(cs, || self.y.ok_or(SynthesisError::AssignmentMissing))?;
+        let x_var = FpVar::new_input(cs.clone(), || {
+            self.x.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let y_var = FpVar::new_witness(cs, || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         x_var.enforce_equal(&(y_var.clone() * y_var))?;
         Ok(())
     }
@@ -163,7 +162,8 @@ fn build_fixture(seed: u64) -> Fixture {
     let dem = DemP2::new(&k_bytes, &ad_core_bytes);
     let plaintext = format!("share-{seed}").into_bytes();
     let ciphertext = dem.encrypt(&plaintext);
-    let tau = OneSidedPvugc::compute_key_commitment_tag_dem(&honest_key, &ad_core_bytes, &ciphertext);
+    let tau =
+        OneSidedPvugc::compute_key_commitment_tag_dem(&honest_key, &ad_core_bytes, &ciphertext);
 
     let poce_proof = OneSidedPvugc::attest_column_arming(
         &bases,
@@ -221,8 +221,8 @@ fn verify_rejects_mutated_bundles() {
             OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs),
             "baseline bundle must verify"
         );
-        let expected_key = OneSidedPvugc::decapsulate(&bundle.gs_commitments, &column_arms)
-            .expect("decap");
+        let expected_key =
+            OneSidedPvugc::decapsulate(&bundle.gs_commitments, &column_arms).expect("decap");
         assert_eq!(expected_key, honest_key, "baseline key mismatch");
 
         let mut rng = StdRng::seed_from_u64(seed.wrapping_mul(0xA5A5_5A5A_u64));
@@ -313,42 +313,42 @@ fn poce_cross_session_replay_fails() {
         );
 
         let tamper_cases = vec![
-        (
-            "replay_with_other_ctx_hash",
-            fixture_b.ctx_hash,
-            fixture_a.gs_digest,
-            fixture_a.ciphertext.clone(),
-            fixture_a.tau,
-            fixture_a.bases.clone(),
-            fixture_a.column_arms.clone(),
-        ),
-        (
-            "replay_with_other_gs_digest",
-            fixture_a.ctx_hash,
-            fixture_b.gs_digest,
-            fixture_a.ciphertext.clone(),
-            fixture_a.tau,
-            fixture_a.bases.clone(),
-            fixture_a.column_arms.clone(),
-        ),
-        (
-            "swap_ciphertext_and_tau",
-            fixture_a.ctx_hash,
-            fixture_a.gs_digest,
-            fixture_b.ciphertext.clone(),
-            fixture_b.tau,
-            fixture_a.bases.clone(),
-            fixture_a.column_arms.clone(),
-        ),
-        (
-            "swap_column_arms",
-            fixture_a.ctx_hash,
-            fixture_a.gs_digest,
-            fixture_a.ciphertext.clone(),
-            fixture_a.tau,
-            fixture_b.bases.clone(),
-            fixture_b.column_arms.clone(),
-        ),
+            (
+                "replay_with_other_ctx_hash",
+                fixture_b.ctx_hash,
+                fixture_a.gs_digest,
+                fixture_a.ciphertext.clone(),
+                fixture_a.tau,
+                fixture_a.bases.clone(),
+                fixture_a.column_arms.clone(),
+            ),
+            (
+                "replay_with_other_gs_digest",
+                fixture_a.ctx_hash,
+                fixture_b.gs_digest,
+                fixture_a.ciphertext.clone(),
+                fixture_a.tau,
+                fixture_a.bases.clone(),
+                fixture_a.column_arms.clone(),
+            ),
+            (
+                "swap_ciphertext_and_tau",
+                fixture_a.ctx_hash,
+                fixture_a.gs_digest,
+                fixture_b.ciphertext.clone(),
+                fixture_b.tau,
+                fixture_a.bases.clone(),
+                fixture_a.column_arms.clone(),
+            ),
+            (
+                "swap_column_arms",
+                fixture_a.ctx_hash,
+                fixture_a.gs_digest,
+                fixture_a.ciphertext.clone(),
+                fixture_a.tau,
+                fixture_b.bases.clone(),
+                fixture_b.column_arms.clone(),
+            ),
         ];
 
         for (label, ctx_hash, gs_digest, ciphertext, tau, bases, column_arms) in tamper_cases {

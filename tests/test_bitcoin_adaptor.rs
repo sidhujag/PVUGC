@@ -25,8 +25,8 @@
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ec::pairing::Pairing;
-use ark_ec::PrimeGroup; // for G1::generator()
 use ark_ec::CurveGroup; // for into_affine()
+use ark_ec::PrimeGroup; // for G1::generator()
 use ark_groth16::Groth16;
 use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
@@ -35,14 +35,12 @@ use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
+use arkworks_groth16::ct::AdCore;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::{OneSidedCommitments, OneSidedPvugc, PvugcBundle};
-use arkworks_groth16::ct::AdCore;
 
 use arkworks_groth16::bitcoin::{
-    encoded_x, y_is_even,
-    tagged_hash, bip340_challenge,
-    signature_bytes, verify_schnorr_signature,
+    bip340_challenge, encoded_x, signature_bytes, tagged_hash, verify_schnorr_signature, y_is_even,
 };
 
 use bitcoin::absolute::LockTime;
@@ -63,7 +61,6 @@ use k256::elliptic_curve::PrimeField;
 use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, U256};
 
 use sha2::{Digest, Sha256};
-
 
 type E = Bls12_381;
 
@@ -491,7 +488,10 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     let bases = {
         let mut y_cols = vec![pvugc_vk.beta_g2];
         y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        arkworks_groth16::arming::ColumnBases::<E> { y_cols, delta: pvugc_vk.delta_g2 }
+        arkworks_groth16::arming::ColumnBases::<E> {
+            y_cols,
+            delta: pvugc_vk.delta_g2,
+        }
     };
 
     // === Phase A: pre-arming and registration ===
@@ -542,7 +542,10 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             adaptor_share: share,
             adaptor_commitment: affine_from_projective(&commitment),
             column_arms: col_arms.clone(),
-            encrypted_share: EncryptedShare { ciphertext: Vec::new(), tau: Vec::new() },
+            encrypted_share: EncryptedShare {
+                ciphertext: Vec::new(),
+                tau: Vec::new(),
+            },
             expected_key,
         });
     }
@@ -556,11 +559,14 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
 
     // Context binding per spec §3 (DEM-SHA256 AD_core requires vk_hash and x_hash)
     let mut vk_bytes = Vec::new();
-    vk.serialize_compressed(&mut vk_bytes).expect("serialize vk");
+    vk.serialize_compressed(&mut vk_bytes)
+        .expect("serialize vk");
     let vk_hash = sha256(&vk_bytes);
 
     let mut x_bytes = Vec::new();
-    public_input.serialize_compressed(&mut x_bytes).expect("serialize x");
+    public_input
+        .serialize_compressed(&mut x_bytes)
+        .expect("serialize x");
     let x_hash = sha256(&x_bytes);
 
     // Build PVUGC context inputs used later for final layered ctx_hash
@@ -572,17 +578,23 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     assert_eq!(participants.len(), 3, "expected 3 operators");
     for op in &operator_armings {
         let aff = op.adaptor_commitment;
-        assert!(!bool::from(AffinePoint::from(aff).is_identity()), "T_i must not be identity");
+        assert!(
+            !bool::from(AffinePoint::from(aff).is_identity()),
+            "T_i must not be identity"
+        );
     }
-    let summed_commitments = operator_armings.iter().fold(
-        ProjectivePoint::IDENTITY,
-        |acc, operator| acc + ProjectivePoint::from(operator.adaptor_commitment),
-    );
+    let summed_commitments = operator_armings
+        .iter()
+        .fold(ProjectivePoint::IDENTITY, |acc, operator| {
+            acc + ProjectivePoint::from(operator.adaptor_commitment)
+        });
     let summed_affine = AffinePoint::from(summed_commitments);
-    assert!(!bool::from(summed_affine.is_identity()), "Σ T_i must not be identity");
+    assert!(
+        !bool::from(summed_affine.is_identity()),
+        "Σ T_i must not be identity"
+    );
     assert_eq!(encoded_x(&summed_affine), encoded_x(&adaptor_point));
     assert_eq!(y_is_even(&summed_affine), adaptor_y_is_even);
-
 
     let mut armers: Vec<_> = operator_armings
         .iter()
@@ -598,10 +610,11 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     let taproot_tweak = taproot_tweak_scalar(&aggregated_key, None);
     let taproot_output_key = taproot_output_key(&aggregated_key, None);
     let p2tr_script = build_p2tr_script(&taproot_output_key);
-    let summed_commitments = operator_armings.iter().fold(
-        ProjectivePoint::IDENTITY,
-        |acc, operator| acc + ProjectivePoint::from(operator.adaptor_commitment),
-    );
+    let summed_commitments = operator_armings
+        .iter()
+        .fold(ProjectivePoint::IDENTITY, |acc, operator| {
+            acc + ProjectivePoint::from(operator.adaptor_commitment)
+        });
     let summed_affine = affine_from_projective(&summed_commitments);
     assert_eq!(encoded_x(&summed_affine), encoded_x(&adaptor_point));
     assert_eq!(y_is_even(&summed_affine), adaptor_y_is_even);
@@ -615,7 +628,6 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         anti_replay: bridge_context.anti_replay.clone(),
         armers,
     };
-
 
     let sorted_pk_x: Vec<[u8; 32]> = deposit_package
         .armers
@@ -727,7 +739,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         adaptor_y_is_even,
     };
     let pre_signature_hash = pre_signature.hash();
-    
+
     // Build full layered ctx_hash (arming + presig packages)
     use arkworks_groth16::ctx::PvugcContextBuilder;
     // Arming package: concatenate all column_arms bytes as armed_bases; empty header_meta for test
@@ -754,7 +766,9 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         v
     };
     let mut signer_set_bytes = Vec::new();
-    for pkx in &signer_set { signer_set_bytes.extend_from_slice(pkx); }
+    for pkx in &signer_set {
+        signer_set_bytes.extend_from_slice(pkx);
+    }
     let presig_pkg_hash = PvugcContextBuilder::build_presig_pkg_hash(
         &withdraw_sighash,
         &t_bytes,
@@ -763,7 +777,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         &musig_l,
     );
     // Finalize ctx_hash
-    let full_ctx = PvugcContextBuilder::new(vk_hash, x_hash, [0u8;32], epoch_nonce)
+    let full_ctx = PvugcContextBuilder::new(vk_hash, x_hash, [0u8; 32], epoch_nonce)
         .with_tapleaf(tapleaf_hash_bytes, 0xc0)
         .with_txid_template(tx_template_bytes.clone())
         .with_path_tag("compute")
@@ -810,8 +824,9 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             gs_digest,
         );
         let ad_bytes = ad_core.serialize();
-        let ciphertext = OneSidedPvugc::encrypt_with_key_dem(&operator.expected_key, &ad_bytes, &share_bytes)
-            .expect("encrypt share (DEM-SHA256)");
+        let ciphertext =
+            OneSidedPvugc::encrypt_with_key_dem(&operator.expected_key, &ad_bytes, &share_bytes)
+                .expect("encrypt share (DEM-SHA256)");
         let tau = OneSidedPvugc::compute_key_commitment_tag_dem(
             &operator.expected_key,
             &ad_bytes,
@@ -854,8 +869,15 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         let mut pok_msg = [0u8; 32];
         pok_msg.copy_from_slice(&pok_digest);
         let pok_sig = bip340_sign_with_scalar(&operator.adaptor_share, &pok_msg, &mut rng);
-        assert!(verify_schnorr_signature(&operator.adaptor_commitment, &pok_msg, &pok_sig));
-        operator.encrypted_share = EncryptedShare { ciphertext, tau: tau.to_vec() };
+        assert!(verify_schnorr_signature(
+            &operator.adaptor_commitment,
+            &pok_msg,
+            &pok_sig
+        ));
+        operator.encrypted_share = EncryptedShare {
+            ciphertext,
+            tau: tau.to_vec(),
+        };
     }
     // Recompute armers and deposit package with updated encrypted shares
     armers = operator_armings
@@ -993,7 +1015,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             &ad_bytes,
             &operator.encrypted_share.ciphertext,
             &{
-                let mut a = [0u8;32];
+                let mut a = [0u8; 32];
                 a.copy_from_slice(&operator.encrypted_share.tau);
                 a
             },
@@ -1057,11 +1079,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         &final_sig_bytes
     ));
     assert!(
-        !verify_schnorr_signature(
-            &aggregated_key,
-            &pre_signature.message,
-            &final_sig_bytes
-        ),
+        !verify_schnorr_signature(&aggregated_key, &pre_signature.message, &final_sig_bytes),
         "Taproot spends must verify under the tweaked output key, not the internal key"
     );
 
@@ -1111,8 +1129,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         v
     };
     let mut bases_bytes0 = Vec::new();
-    op0
-        .column_arms
+    op0.column_arms
         .serialize_compressed(&mut bases_bytes0)
         .expect("serialize column arms");
     let ad_core0 = AdCore::new(
@@ -1137,7 +1154,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         &ad_bytes0,
         &tampered_ciphertext,
         &{
-            let mut a = [0u8;32];
+            let mut a = [0u8; 32];
             a.copy_from_slice(&operator_armings[0].encrypted_share.tau);
             a
         },
@@ -1166,7 +1183,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         &ad_bytes_mismatch,
         &operator_armings[0].encrypted_share.ciphertext,
         &{
-            let mut a = [0u8;32];
+            let mut a = [0u8; 32];
             a.copy_from_slice(&operator_armings[0].encrypted_share.tau);
             a
         },
@@ -1248,7 +1265,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             &ad_bytes,
             &operator.encrypted_share.ciphertext,
             &{
-                let mut a = [0u8;32];
+                let mut a = [0u8; 32];
                 a.copy_from_slice(&operator.encrypted_share.tau);
                 a
             },
@@ -1304,15 +1321,25 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
     // Proving system setup
     let public_input = Fr::from(25u64);
     let witness = Fr::from(5u64);
-    let circuit = SquareCircuit { x: Some(public_input), y: Some(witness) };
+    let circuit = SquareCircuit {
+        x: Some(public_input),
+        y: Some(witness),
+    };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+    let pvugc_vk = PvugcVk {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
 
     // Shared column bases for PoCE-A
     let bases = {
         let mut y_cols = vec![pvugc_vk.beta_g2];
         y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        arkworks_groth16::arming::ColumnBases::<E> { y_cols, delta: pvugc_vk.delta_g2 }
+        arkworks_groth16::arming::ColumnBases::<E> {
+            y_cols,
+            delta: pvugc_vk.delta_g2,
+        }
     };
 
     // Participants
@@ -1329,13 +1356,16 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
     for _ in &participants {
         let share = loop {
             let candidate = Scalar::random(&mut rng);
-            if bool::from(candidate.is_zero()) { continue; }
+            if bool::from(candidate.is_zero()) {
+                continue;
+            }
             break candidate;
         };
         let commitment = AffinePoint::from(ProjectivePoint::GENERATOR * share);
         let rho = Fr::rand(&mut rng);
         rhos.push(rho);
-        let (_bases, col_arms, _r, _k) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho).unwrap();
+        let (_bases, col_arms, _r, _k) =
+            OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho).unwrap();
         operator_armings.push((share, commitment, col_arms));
     }
 
@@ -1368,7 +1398,11 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         // PoCE-A: operator 2 uses wrong rho to simulate failure
         let s_i_pairing = Fr::rand(&mut rng);
         let t_i_pairing = (<E as Pairing>::G1::generator() * s_i_pairing).into_affine();
-        let rho_use = if i == 2 { rhos[i] + Fr::from(1u64) } else { rhos[i] };
+        let rho_use = if i == 2 {
+            rhos[i] + Fr::from(1u64)
+        } else {
+            rhos[i]
+        };
         let poce_proof = OneSidedPvugc::attest_column_arming(
             &bases,
             col_arms,
@@ -1394,7 +1428,10 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
     }
 
     let pre_sign_allowed = pok_ok.iter().all(|&b| b) && poce_ok.iter().all(|&b| b);
-    assert!(!pre_sign_allowed, "pre-sign MUST NOT proceed when any PoK or PoCE-A fails");
+    assert!(
+        !pre_sign_allowed,
+        "pre-sign MUST NOT proceed when any PoK or PoCE-A fails"
+    );
 }
 
 #[test]
@@ -1406,28 +1443,42 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
     // Proving system setup
     let public_input = Fr::from(25u64);
     let witness = Fr::from(5u64);
-    let circuit = SquareCircuit { x: Some(public_input), y: Some(witness) };
+    let circuit = SquareCircuit {
+        x: Some(public_input),
+        y: Some(witness),
+    };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+    let pvugc_vk = PvugcVk {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
 
     // Build bases and a valid commitments bundle for the statement
     let mut recorder = SimpleCoeffRecorder::<E>::new();
-    let _proof = Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder).unwrap();
+    let _proof =
+        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
+            .unwrap();
     let commitments = commitments_from_recorder(&recorder);
     let mut y_cols = vec![pvugc_vk.beta_g2];
     y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
     assert_eq!(commitments.x_b_cols.len(), y_cols.len());
 
     // Shared bases
-    let bases = arkworks_groth16::arming::ColumnBases::<E> { y_cols, delta: pvugc_vk.delta_g2 };
+    let bases = arkworks_groth16::arming::ColumnBases::<E> {
+        y_cols,
+        delta: pvugc_vk.delta_g2,
+    };
 
     // Construct a malicious operator with mismatched (arms rho) vs (encryption key rho)
     let rho_right = Fr::rand(&mut rng);
     let rho_wrong = rho_right + Fr::from(1u64);
     // Use API to get R and the correct key K_right = R^{rho_right}
-    let (_bases_tmp, _col_arms_right, _r_target, k_right) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho_right).unwrap();
+    let (_bases_tmp, _col_arms_right, _r_target, k_right) =
+        OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho_right).unwrap();
     // Publish wrong arms using rho_wrong
-    let col_arms_wrong = arkworks_groth16::arming::arm_columns(&bases, &rho_wrong).expect("arm_columns");
+    let col_arms_wrong =
+        arkworks_groth16::arming::arm_columns(&bases, &rho_wrong).expect("arm_columns");
 
     // Build minimal AD_core and encrypt under K_right
     let vk_hash = [0u8; 32];
@@ -1435,8 +1486,11 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
     let ctx_hash = [0u8; 32];
     let gs_digest = [1u8; 32];
     let ad_core = AdCore::new(
-        vk_hash, x_hash, ctx_hash,
-        [9u8; 32], 0xc0,
+        vk_hash,
+        x_hash,
+        ctx_hash,
+        [9u8; 32],
+        0xc0,
         Vec::new(),
         "compute",
         0,
@@ -1448,17 +1502,29 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
     );
     let ad_bytes = ad_core.serialize();
     let share_bytes = [7u8; 32];
-    let ciphertext = OneSidedPvugc::encrypt_with_key_dem(&k_right, &ad_bytes, &share_bytes).expect("encrypt");
+    let ciphertext =
+        OneSidedPvugc::encrypt_with_key_dem(&k_right, &ad_bytes, &share_bytes).expect("encrypt");
     let tau = OneSidedPvugc::compute_key_commitment_tag_dem(&k_right, &ad_bytes, &ciphertext);
 
     // At decap-time, the derived key from wrong arms is K_wrong = R^{rho_wrong}
     let k_wrong = OneSidedPvugc::decapsulate(&commitments, &col_arms_wrong).expect("decap");
     // PoCE-B key-commit must reject because ciphertext/tag were made with K_right, not K_wrong
-    assert!(!OneSidedPvugc::verify_key_commitment_dem(&k_wrong, &ad_bytes, &ciphertext, &{
-        let mut a = [0u8; 32]; a.copy_from_slice(&tau); a
-    }));
+    assert!(!OneSidedPvugc::verify_key_commitment_dem(
+        &k_wrong,
+        &ad_bytes,
+        &ciphertext,
+        &{
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&tau);
+            a
+        }
+    ));
 
     // Decryption with K_wrong yields wrong bytes (but still returns Ok), adapter cannot be completed
-    let wrong_plain = OneSidedPvugc::decrypt_with_key_dem(&k_wrong, &ad_bytes, &ciphertext).expect("decrypt");
-    assert_ne!(wrong_plain, share_bytes, "mismatched arms must not yield the original share");
+    let wrong_plain =
+        OneSidedPvugc::decrypt_with_key_dem(&k_wrong, &ad_bytes, &ciphertext).expect("decrypt");
+    assert_ne!(
+        wrong_plain, share_bytes,
+        "mismatched arms must not yield the original share"
+    );
 }

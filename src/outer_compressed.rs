@@ -225,10 +225,11 @@ pub fn prove_outer_for<C: RecursionCycle>(
     rng: &mut (impl ark_std::rand::RngCore + ark_std::rand::CryptoRng),
 ) -> Result<(OuterProof<C>, OuterVk<C>, Vec<OuterScalar<C>>), SynthesisError> {
     use ark_relations::r1cs::ConstraintSystem;
-    
+
     // First, synthesize the circuit to extract the actual public inputs that BooleanInputVar creates
     // (BooleanInputVar compresses the inputs for efficiency)
-    let circuit_for_extraction = OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
+    let circuit_for_extraction =
+        OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
     let cs = ConstraintSystem::<OuterScalar<C>>::new_ref();
     circuit_for_extraction.generate_constraints(cs.clone())?;
     let actual_public_inputs = cs.borrow().unwrap().instance_assignment.clone();
@@ -236,7 +237,8 @@ pub fn prove_outer_for<C: RecursionCycle>(
     let actual_public_inputs: Vec<_> = actual_public_inputs.into_iter().skip(1).collect();
 
     // Now prove with a fresh circuit instance
-    let circuit_for_proving = OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
+    let circuit_for_proving =
+        OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
     let proof_outer = Groth16::<C::OuterE>::prove(pk_outer, circuit_for_proving, rng)?;
     let vk_outer = pk_outer.vk.clone();
 
@@ -408,7 +410,8 @@ mod tests {
         );
 
         // Convert public_x from inner to outer field elements (1 element, no compression)
-        let public_x_outer: Vec<OuterScalar<C>> = public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
+        let public_x_outer: Vec<OuterScalar<C>> =
+            public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
         assert!(verify_outer_for::<C>(&*vk_outer, &public_x_outer, &proof_outer).unwrap());
 
         let run_decap = std::env::var("PVUGC_RUN_DECAP")
@@ -424,7 +427,10 @@ mod tests {
             let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &public_x);
             let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
-            assert!(crate::ct::gt_eq_ct::<C::OuterE>(&k_decapped, &k_expected), "Decapsulated K doesn't match R^ρ!");
+            assert!(
+                crate::ct::gt_eq_ct::<C::OuterE>(&k_decapped, &k_expected),
+                "Decapsulated K doesn't match R^ρ!"
+            );
         } else {
             eprintln!(
                 "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable)",

@@ -71,7 +71,8 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         C::name(),
         outer_setup_time
     );
-    let pvugc_vk_outer_recursive = crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive);
+    let pvugc_vk_outer_recursive =
+        crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive);
 
     GlobalFixture {
         pk_inner: Arc::new(pk_inner),

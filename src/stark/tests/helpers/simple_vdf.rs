@@ -7,11 +7,10 @@ use winterfell::{
     crypto::{DefaultRandomCoin, ElementHasher, MerkleTree},
     math::{fields::f64::BaseElement, FieldElement},
     matrix::ColMatrix,
-    Air, AirContext, Assertion, AuxRandElements, CompositionPoly,
-    CompositionPolyTrace, ConstraintCompositionCoefficients, DefaultConstraintCommitment,
-    DefaultConstraintEvaluator, DefaultTraceLde, EvaluationFrame, PartitionOptions, Proof,
-    ProofOptions, Prover, StarkDomain, Trace, TraceInfo, TracePolyTable, TraceTable,
-    TransitionConstraintDegree,
+    Air, AirContext, Assertion, AuxRandElements, CompositionPoly, CompositionPolyTrace,
+    ConstraintCompositionCoefficients, DefaultConstraintCommitment, DefaultConstraintEvaluator,
+    DefaultTraceLde, EvaluationFrame, PartitionOptions, Proof, ProofOptions, Prover, StarkDomain,
+    Trace, TraceInfo, TracePolyTable, TraceTable, TransitionConstraintDegree,
 };
 
 const TRACE_WIDTH: usize = 2;
@@ -33,7 +32,7 @@ impl Air for VdfAir {
     fn new(trace_info: TraceInfo, pub_inputs: BaseElement, options: ProofOptions) -> Self {
         let degrees = vec![TransitionConstraintDegree::new(ALPHA as usize)];
         assert_eq!(TRACE_WIDTH, trace_info.width());
-        
+
         VdfAir {
             context: AirContext::new(trace_info, degrees, 1, options),
             result: pub_inputs,
@@ -52,13 +51,17 @@ impl Air for VdfAir {
     ) {
         let current = &frame.current();
         let next = &frame.next();
-        
+
         // Constraint: next[0] = current[0]^3 + 1
         result[0] = next[0].clone() - (current[0].clone().exp(ALPHA.into()) + E::ONE);
     }
 
     fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
-        vec![Assertion::single(1, self.context.trace_len() - 1, self.result)]
+        vec![Assertion::single(
+            1,
+            self.context.trace_len() - 1,
+            self.result,
+        )]
     }
 }
 
@@ -73,7 +76,10 @@ pub struct VdfProver<H: ElementHasher<BaseField = BaseElement> + Send + Sync> {
 
 impl<H: ElementHasher<BaseField = BaseElement> + Send + Sync> VdfProver<H> {
     pub fn new(options: ProofOptions) -> Self {
-        Self { options, _hasher: core::marker::PhantomData }
+        Self {
+            options,
+            _hasher: core::marker::PhantomData,
+        }
     }
 }
 
@@ -84,8 +90,10 @@ impl<H: ElementHasher<BaseField = BaseElement> + Send + Sync> Prover for VdfProv
     type HashFn = H;
     type VC = MerkleTree<Self::HashFn>;
     type RandomCoin = DefaultRandomCoin<Self::HashFn>;
-    type TraceLde<E: FieldElement<BaseField = BaseElement>> = DefaultTraceLde<E, Self::HashFn, Self::VC>;
-    type ConstraintCommitment<E: FieldElement<BaseField = BaseElement>> = DefaultConstraintCommitment<E, Self::HashFn, Self::VC>;
+    type TraceLde<E: FieldElement<BaseField = BaseElement>> =
+        DefaultTraceLde<E, Self::HashFn, Self::VC>;
+    type ConstraintCommitment<E: FieldElement<BaseField = BaseElement>> =
+        DefaultConstraintCommitment<E, Self::HashFn, Self::VC>;
     type ConstraintEvaluator<'a, E: FieldElement<BaseField = BaseElement>> =
         DefaultConstraintEvaluator<'a, Self::Air, E>;
 
@@ -170,22 +178,26 @@ pub fn generate_test_vdf_proof_rpo(
     steps: usize,
 ) -> (Proof, TraceTable<BaseElement>) {
     let trace = build_vdf_trace(start, steps);
-    
+
     let options = ProofOptions::new(
-        28, 8, 0,
+        28,
+        8,
+        0,
         winterfell::FieldExtension::None,
-        2, 31,
+        2,
+        31,
         winterfell::BatchingMethod::Linear,
         winterfell::BatchingMethod::Linear,
     );
-    
+
     // Use RPO-256 hasher to match circuit!
     type RpoHasher = winter_crypto::hashers::Rp64_256;
     let prover = VdfProver::<RpoHasher>::new(options);
-    let proof = prover.prove(trace.clone()).expect("VDF proof with RPO-256 failed");
-    
+    let proof = prover
+        .prove(trace.clone())
+        .expect("VDF proof with RPO-256 failed");
+
     (proof, trace)
 }
 
 // (helper functions removed: use RPO generator directly for tests)
-

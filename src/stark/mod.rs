@@ -7,10 +7,10 @@
 //! - Full AIR constraint checking
 //! - Poseidon hash function implementation
 
-pub mod inner_stark_full;
-pub mod stark_proof_parser;
 pub mod gadgets;
 pub mod gl_u64;
+pub mod inner_stark_full;
+pub mod stark_proof_parser;
 
 // Crypto helpers (Poseidon params + host Merkle helpers)
 pub mod crypto {
@@ -30,10 +30,9 @@ mod tests {
     mod gl_fast_unit_tests;
     mod poseidon_merkle_selfcheck;
     mod stark_verifier_comprehensive;
-    
+
     pub(crate) mod helpers {
         pub(crate) mod rpo_compatibility;
         pub(crate) mod simple_vdf;
     }
 }
-

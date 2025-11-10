@@ -19,7 +19,9 @@ pub fn poseidon2_merkle_parent(cfg: &PoseidonConfig<Fr377>, left: Fr377, right: 
 
 pub fn poseidon2_merkle_root(cfg: &PoseidonConfig<Fr377>, mut leaves: Vec<Fr377>) -> Fr377 {
     assert!(!leaves.is_empty(), "empty tree not allowed");
-    if leaves.len() == 1 { return leaves[0]; }
+    if leaves.len() == 1 {
+        return leaves[0];
+    }
     while leaves.len() > 1 {
         let mut next = Vec::with_capacity((leaves.len() + 1) / 2);
         let mut i = 0usize;
@@ -41,7 +43,9 @@ pub fn poseidon2_merkle_path(
     mut idx: usize,
 ) -> (Fr377, Vec<Fr377>, Vec<bool>) {
     assert!(!leaves.is_empty(), "empty tree not allowed");
-    if leaves.len() == 1 { return (leaves[0], vec![], vec![]); }
+    if leaves.len() == 1 {
+        return (leaves[0], vec![], vec![]);
+    }
     let mut levels: Vec<Vec<Fr377>> = Vec::new();
     levels.push(leaves.to_vec());
     while levels.last().unwrap().len() > 1 {
@@ -65,7 +69,11 @@ pub fn poseidon2_merkle_path(
         let cur = &levels[lvl];
         // Convention: pos[k] == true means current node is the RIGHT child at level k
         let cur_is_right = (idx & 1) == 1;
-        let sib_idx = if cur_is_right { idx.saturating_sub(1) } else { idx + 1 };
+        let sib_idx = if cur_is_right {
+            idx.saturating_sub(1)
+        } else {
+            idx + 1
+        };
         if sib_idx < cur.len() {
             path.push(cur[sib_idx]);
             pos.push(cur_is_right);
@@ -89,7 +97,11 @@ pub fn poseidon2_verify_merkle_path(
     assert_eq!(path.len(), pos.len());
     for (sib, is_right) in path.iter().zip(pos.iter().copied()) {
         // Convention: is_right == true means current node is RIGHT child → parent(left=sib, right=leaf)
-        leaf = if is_right { poseidon2_merkle_parent(cfg, *sib, leaf) } else { poseidon2_merkle_parent(cfg, leaf, *sib) };
+        leaf = if is_right {
+            poseidon2_merkle_parent(cfg, *sib, leaf)
+        } else {
+            poseidon2_merkle_parent(cfg, leaf, *sib)
+        };
     }
     leaf == root
 }
@@ -126,5 +138,3 @@ mod tests {
         assert!(verify_path_default(leaves[3], &path, &pos, root));
     }
 }
-
-
