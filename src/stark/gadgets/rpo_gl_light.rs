@@ -28,11 +28,15 @@
 //! - Any digest compared to proof bytes
 //!
 
+use super::gl_fast::{gl_add_light, gl_mul_light, GlVar};
+use crate::outer_compressed::InnerFr;
+use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
+use ark_r1cs_std::uint64::UInt64 as UInt64Var;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
-use crate::outer_compressed::InnerFr;
-use super::gl_fast::{GlVar, gl_mul_light, gl_add_light};
+
+type UInt64GLVar = UInt64Var<InnerFr>;
 
 pub type FpGLVar = FpVar<InnerFr>;
 
@@ -41,16 +45,16 @@ pub type FpGLVar = FpVar<InnerFr>;
 pub struct RpoParamsGLLight {
     pub rounds: usize,
     pub width: usize,
-    pub ark1: Vec<Vec<u64>>,  // Round constants (first half)
-    pub ark2: Vec<Vec<u64>>,  // Round constants (second half)
-    pub mds: Vec<Vec<u64>>,   // MDS matrix
+    pub ark1: Vec<Vec<u64>>, // Round constants (first half)
+    pub ark2: Vec<Vec<u64>>, // Round constants (second half)
+    pub mds: Vec<Vec<u64>>,  // MDS matrix
 }
 
 impl Default for RpoParamsGLLight {
     fn default() -> Self {
         // Extract actual Winterfell Rp64_256 constants
         use winter_crypto::hashers::Rp64_256;
-        
+
         let mut ark1 = Vec::with_capacity(Rp64_256::NUM_ROUNDS);
         for r in 0..Rp64_256::NUM_ROUNDS {
             let mut round_consts = Vec::with_capacity(Rp64_256::STATE_WIDTH);
@@ -59,7 +63,7 @@ impl Default for RpoParamsGLLight {
             }
             ark1.push(round_consts);
         }
-        
+
         let mut ark2 = Vec::with_capacity(Rp64_256::NUM_ROUNDS);
         for r in 0..Rp64_256::NUM_ROUNDS {
             let mut round_consts = Vec::with_capacity(Rp64_256::STATE_WIDTH);
@@ -68,7 +72,7 @@ impl Default for RpoParamsGLLight {
             }
             ark2.push(round_consts);
         }
-        
+
         let mut mds = Vec::with_capacity(Rp64_256::STATE_WIDTH);
         for i in 0..Rp64_256::STATE_WIDTH {
             let mut row = Vec::with_capacity(Rp64_256::STATE_WIDTH);
@@ -77,10 +81,10 @@ impl Default for RpoParamsGLLight {
             }
             mds.push(row);
         }
-        
+
         Self {
-            rounds: Rp64_256::NUM_ROUNDS,  // 7
-            width: Rp64_256::STATE_WIDTH,  // 12
+            rounds: Rp64_256::NUM_ROUNDS, // 7
+            width: Rp64_256::STATE_WIDTH, // 12
             ark1,
             ark2,
             mds,
@@ -89,15 +93,12 @@ impl Default for RpoParamsGLLight {
 }
 
 /// Apply S-box: x^7 using light GL operations
-fn apply_sbox_light(
-    cs: ConstraintSystemRef<InnerFr>,
-    x: &GlVar,
-) -> Result<GlVar, SynthesisError> {
+fn apply_sbox_light(cs: ConstraintSystemRef<InnerFr>, x: &GlVar) -> Result<GlVar, SynthesisError> {
     // x^7 = x * x^2 * x^4
-    let x2 = gl_mul_light(cs.clone(), x, x)?;      // x^2
-    let x4 = gl_mul_light(cs.clone(), &x2, &x2)?;  // x^4
-    let x3 = gl_mul_light(cs.clone(), &x2, x)?;    // x^3 = x^2 * x
-    let x7 = gl_mul_light(cs.clone(), &x4, &x3)?;  // x^7 = x^4 * x^3
+    let x2 = gl_mul_light(cs.clone(), x, x)?; // x^2
+    let x4 = gl_mul_light(cs.clone(), &x2, &x2)?; // x^4
+    let x3 = gl_mul_light(cs.clone(), &x2, x)?; // x^3 = x^2 * x
+    let x7 = gl_mul_light(cs.clone(), &x4, &x3)?; // x^7 = x^4 * x^3
     Ok(x7)
 }
 
@@ -107,16 +108,18 @@ fn apply_inv_sbox_light(
     y: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv_sbox};
-    
+
     // Witness the inverse
     let y_val = fr_to_gl_u64(y.0.value().unwrap_or_default());
     let x_val = gl_inv_sbox(y_val);
-    let x = GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(x_val as u128)))?);
-    
+    let x = GlVar(FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(x_val as u128))
+    })?);
+
     // Verify: x^7 = y (this enforces the modular congruence)
     let x7 = apply_sbox_light(cs, &x)?;
     x7.0.enforce_equal(&y.0)?;
-    
+
     Ok(x)
 }
 
@@ -127,7 +130,7 @@ fn apply_mds_light(
     mds: &[Vec<u64>],
 ) -> Result<(), SynthesisError> {
     let mut new_state = vec![GlVar(FpVar::constant(InnerFr::from(0u64))); state.len()];
-    
+
     for i in 0..state.len() {
         for j in 0..state.len() {
             // new_state[i] += mds[i][j] * state[j]
@@ -136,7 +139,7 @@ fn apply_mds_light(
             new_state[i] = gl_add_light(cs.clone(), &new_state[i], &prod)?;
         }
     }
-    
+
     // Copy back
     state.clone_from_slice(&new_state);
     Ok(())
@@ -156,84 +159,84 @@ fn apply_round_light(
     for i in 0..state.len() {
         state[i] = apply_sbox_light(cs.clone(), &state[i])?;
     }
-    
+
     // Step 2: Apply MDS
     apply_mds_light(cs.clone(), state, mds)?;
-    
+
     // Step 3: Add ARK1 constants
     for i in 0..state.len() {
         let rc = GlVar(FpVar::constant(InnerFr::from(ark1[i] as u128)));
         state[i] = gl_add_light(cs.clone(), &state[i], &rc)?;
     }
-    
+
     // Step 4: Apply inverse S-boxes (x^(1/7)) to ALL elements
     for i in 0..state.len() {
         state[i] = apply_inv_sbox_light(cs.clone(), &state[i])?;
     }
-    
+
     // Step 5: Apply MDS again
     apply_mds_light(cs.clone(), state, mds)?;
-    
+
     // Step 6: Add ARK2 constants
     for i in 0..state.len() {
         let rc = GlVar(FpVar::constant(InnerFr::from(ark2[i] as u128)));
         state[i] = gl_add_light(cs.clone(), &state[i], &rc)?;
     }
-    
+
     Ok(())
 }
 
 /// Light RPO-256 permutation
 pub fn rpo256_permute_light(
     cs: ConstraintSystemRef<InnerFr>,
-    input: &[GlVar],  // 12 GL elements
+    input: &[GlVar], // 12 GL elements
     params: &RpoParamsGLLight,
 ) -> Result<Vec<GlVar>, SynthesisError> {
     assert_eq!(input.len(), params.width, "Input must be width 12");
-    
+
     let mut state = input.to_vec();
-    
+
     // Apply all rounds (Winterfell RPO: α → MDS → ARK1 → α⁻¹ → MDS → ARK2)
     for round_idx in 0..params.rounds {
         apply_round_light(
-            cs.clone(), 
-            &mut state, 
-            &params.ark1[round_idx], 
+            cs.clone(),
+            &mut state,
+            &params.ark1[round_idx],
             &params.ark2[round_idx],
-            &params.mds
+            &params.mds,
         )?;
     }
-    
+
     Ok(state)
 }
 
 /// Canonicalize GL values to bytes ONLY at serialization boundaries
 pub fn canonicalize_to_bytes(
     cs: ConstraintSystemRef<InnerFr>,
-    gl_values: &[GlVar],  // 4 GL values for 32 bytes
+    gl_values: &[GlVar], // 4 GL values for 32 bytes
 ) -> Result<Vec<UInt8<InnerFr>>, SynthesisError> {
     use super::gl_range::gl_alloc_u64;
-    
+
     let mut bytes = Vec::with_capacity(32);
-    
+
     for gl_val in gl_values {
         // Witness the canonical u64 value
         use crate::stark::gl_u64::fr_to_gl_u64;
         let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
-        
+
         // Allocate with range check to ensure < 2^64
         let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
-        
+
         // Enforce: gl_val ≡ canonical_fp (mod p_GL) with BOUNDED quotient
         // Use enforce_gl_eq_with_bound(q ≤ 1) for soundness
         use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
         enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;
-        
+
         // Convert u64 to bytes
         let bytes_8 = u64_var.to_bytes_le()?;
         bytes.extend_from_slice(&bytes_8);
     }
-    
+
     Ok(bytes)
 }
 
@@ -249,30 +252,30 @@ pub fn rpo_hash_elements_light(
     let mut state: Vec<GlVar> = (0..12)
         .map(|_| GlVar(FpVar::constant(InnerFr::from(0u64))))
         .collect();
-    
+
     // state[0] = input length (Winterfell stores total length)
     let len = elems.len() as u64;
     state[0] = GlVar(FpVar::constant(InnerFr::from(len as u128)));
-    
+
     // Absorb elements into rate portion (state[4..12])
     let mut i = 0;
     for elem in elems.iter() {
         // Add element to state[4 + i]
         state[4 + i] = gl_add_light(cs.clone(), &state[4 + i], elem)?;
         i += 1;
-        
+
         // If we've filled 8 rate elements, permute
         if i == 8 {
             state = rpo256_permute_light(cs.clone(), &state, params)?;
             i = 0; // Reset for next block
         }
     }
-    
+
     // If there are remaining elements (partial block), permute once more
     if i > 0 {
         state = rpo256_permute_light(cs.clone(), &state, params)?;
     }
-    
+
     // Return digest from state[4..8]
     Ok(state[4..8].to_vec())
 }
@@ -280,18 +283,18 @@ pub fn rpo_hash_elements_light(
 /// Merge two digests using light RPO (matches Winterfell's merge)
 pub fn rpo_merge_light(
     cs: ConstraintSystemRef<InnerFr>,
-    left: &[GlVar],   // 4 GL elements
-    right: &[GlVar],  // 4 GL elements
+    left: &[GlVar],  // 4 GL elements
+    right: &[GlVar], // 4 GL elements
     params: &RpoParamsGLLight,
 ) -> Result<Vec<GlVar>, SynthesisError> {
     assert_eq!(left.len(), 4, "Left digest must be 4 elements");
     assert_eq!(right.len(), 4, "Right digest must be 4 elements");
-    
+
     // Merge is just hash of concatenated digests
     let mut input = Vec::with_capacity(8);
     input.extend_from_slice(left);
     input.extend_from_slice(right);
-    
+
     rpo_hash_elements_light(cs, &input, params)
 }
 
@@ -299,20 +302,20 @@ pub fn rpo_merge_light(
 /// Used in counter-based PRNG: hash(digest || counter)
 pub fn rpo_merge_with_int_light(
     cs: ConstraintSystemRef<InnerFr>,
-    digest: &[GlVar],  // 4 GL elements
+    digest: &[GlVar], // 4 GL elements
     counter: u64,
     params: &RpoParamsGLLight,
 ) -> Result<Vec<GlVar>, SynthesisError> {
     assert_eq!(digest.len(), 4, "Digest must be 4 elements");
-    
+
     // Convert counter to GL element
     let counter_gl = GlVar(FpVar::constant(InnerFr::from(counter as u128)));
-    
+
     // Merge is hash(digest || counter)
     let mut input = Vec::with_capacity(5);
     input.extend_from_slice(digest);
     input.push(counter_gl);
-    
+
     rpo_hash_elements_light(cs, &input, params)
 }
 
@@ -320,8 +323,8 @@ pub fn rpo_merge_with_int_light(
 /// This is an alias for rpo_merge_light for Merkle tree use
 pub fn hash_merkle_nodes_light(
     cs: ConstraintSystemRef<InnerFr>,
-    left: &[GlVar],   // 4 GL elements
-    right: &[GlVar],  // 4 GL elements
+    left: &[GlVar],  // 4 GL elements
+    right: &[GlVar], // 4 GL elements
     params: &RpoParamsGLLight,
 ) -> Result<Vec<GlVar>, SynthesisError> {
     rpo_merge_light(cs, left, right, params)
@@ -336,12 +339,15 @@ pub struct Rpo256GlVarLight {
 }
 
 impl Rpo256GlVarLight {
-    pub fn new(cs: ConstraintSystemRef<InnerFr>, params: RpoParamsGLLight) -> Result<Self, SynthesisError> {
+    pub fn new(
+        cs: ConstraintSystemRef<InnerFr>,
+        params: RpoParamsGLLight,
+    ) -> Result<Self, SynthesisError> {
         // Initialize state to zeros
         let state = (0..12)
             .map(|_| GlVar(FpVar::constant(InnerFr::from(0u64))))
             .collect();
-        
+
         Ok(Self {
             cs,
             params,
@@ -349,40 +355,43 @@ impl Rpo256GlVarLight {
             rate_idx: 0,
         })
     }
-    
+
     /// Absorb elements into the sponge (rate portion starts at index 4)
     pub fn absorb(&mut self, elems: &[GlVar]) -> Result<(), SynthesisError> {
         let rate_base = 4; // Rate starts at lane 4 in Rp64_256
-        
+
         for elem in elems {
             if self.rate_idx == 8 {
                 // Rate full, permute before continuing
                 self.permute()?;
                 self.rate_idx = 0;
             }
-            
+
             // Add element to state[rate_base + rate_idx]
-            self.state[rate_base + self.rate_idx] = 
-                gl_add_light(self.cs.clone(), &self.state[rate_base + self.rate_idx], elem)?;
+            self.state[rate_base + self.rate_idx] = gl_add_light(
+                self.cs.clone(),
+                &self.state[rate_base + self.rate_idx],
+                elem,
+            )?;
             self.rate_idx += 1;
         }
-        
+
         Ok(())
     }
-    
+
     /// Apply the RPO permutation to current state
     pub fn permute(&mut self) -> Result<(), SynthesisError> {
         self.state = rpo256_permute_light(self.cs.clone(), &self.state, &self.params)?;
         Ok(())
     }
-    
+
     /// Squeeze n field elements from the sponge
     pub fn squeeze(&mut self, n: usize) -> Result<Vec<GlVar>, SynthesisError> {
         let mut output = Vec::with_capacity(n);
-        
+
         while output.len() < n {
             self.permute()?;
-            
+
             // Extract from digest lanes [4..8)
             for i in 4..8 {
                 if output.len() == n {
@@ -391,7 +400,7 @@ impl Rpo256GlVarLight {
                 output.push(self.state[i].clone());
             }
         }
-        
+
         Ok(output)
     }
 }
@@ -400,33 +409,44 @@ impl Rpo256GlVarLight {
 mod tests {
     use super::*;
     use ark_relations::r1cs::ConstraintSystem;
-    
+
     #[test]
     fn test_light_rpo_constraints() {
         let cs = ConstraintSystem::<InnerFr>::new_ref();
-        
+
         // Create test input
         let input: Vec<GlVar> = (0..12)
-            .map(|i| GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(i as u128))).unwrap()))
+            .map(|i| {
+                GlVar(FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(i as u128))).unwrap())
+            })
             .collect();
-        
+
         let params = RpoParamsGLLight::default();
-        
+
         let start = cs.num_constraints();
         rpo256_permute_light(cs.clone(), &input, &params).unwrap();
         let permute_constraints = cs.num_constraints() - start;
-        
+
         assert!(permute_constraints < 15000, "Should be <15k constraints");
-        
+
         // Test canonicalization
         let gl_values: Vec<GlVar> = (0..4)
-            .map(|i| GlVar(FpVar::new_witness(cs.clone(), || 
-                Ok(InnerFr::from((12345678901234567u64 + i) as u128))).unwrap()))
+            .map(|i| {
+                GlVar(
+                    FpVar::new_witness(cs.clone(), || {
+                        Ok(InnerFr::from((12345678901234567u64 + i) as u128))
+                    })
+                    .unwrap(),
+                )
+            })
             .collect();
-        
-         canonicalize_to_bytes(cs.clone(), &gl_values).unwrap();
-        
-        assert!(cs.is_satisfied().unwrap(), "Constraints should be satisfied");
+
+        canonicalize_to_bytes(cs.clone(), &gl_values).unwrap();
+
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "Constraints should be satisfied"
+        );
     }
 }
 
@@ -438,16 +458,20 @@ mod tests {
 pub struct RandomCoinGL {
     cs: ConstraintSystemRef<InnerFr>,
     pub params: RpoParamsGLLight,
-    pub seed: Vec<GlVar>,  // Current seed (4 GL elements)
-    pub counter: u64,       // Draw counter
+    pub seed: Vec<GlVar>, // Current seed (4 GL elements)
+    pub counter: u64,     // Draw counter
 }
 
 impl RandomCoinGL {
     /// Create new RandomCoin by hashing the initial seed elements
-    pub fn new(cs: ConstraintSystemRef<InnerFr>, seed_elems: &[GlVar], params: RpoParamsGLLight) -> Result<Self, SynthesisError> {
+    pub fn new(
+        cs: ConstraintSystemRef<InnerFr>,
+        seed_elems: &[GlVar],
+        params: RpoParamsGLLight,
+    ) -> Result<Self, SynthesisError> {
         // seed = hash(seed_elems)
         let seed = rpo_hash_elements_light(cs.clone(), seed_elems, &params)?;
-        
+
         Ok(RandomCoinGL {
             cs,
             params,
@@ -455,7 +479,7 @@ impl RandomCoinGL {
             counter: 0,
         })
     }
-    
+
     /// Reseed the coin: new_seed = merge(current_seed, data), counter = 0
     pub fn reseed(&mut self, data: &[GlVar]) -> Result<(), SynthesisError> {
         assert_eq!(data.len(), 4, "Reseed data must be 4 GL elements (digest)");
@@ -463,12 +487,51 @@ impl RandomCoinGL {
         self.counter = 0;
         Ok(())
     }
-    
+
+    /// Reseed the coin with a public nonce (matches merge_with_int)
+    pub fn reseed_with_nonce(&mut self, nonce: u64) -> Result<(), SynthesisError> {
+        self.seed = rpo_merge_with_int_light(self.cs.clone(), &self.seed, nonce, &self.params)?;
+        self.counter = 0;
+        Ok(())
+    }
+
     /// Draw next random GL element: hash(seed || ++counter)
     pub fn draw(&mut self) -> Result<GlVar, SynthesisError> {
         self.counter += 1;
-        let digest = rpo_merge_with_int_light(self.cs.clone(), &self.seed, self.counter, &self.params)?;
+        let digest =
+            rpo_merge_with_int_light(self.cs.clone(), &self.seed, self.counter, &self.params)?;
         // Return first element of digest as the random value
         Ok(digest[0].clone())
+    }
+
+    /// Draw next pseudo-random integer limited to domain_bits (power-of-two domain)
+    pub fn draw_integer_masked(
+        &mut self,
+        domain_bits: usize,
+    ) -> Result<UInt64GLVar, SynthesisError> {
+        if domain_bits > 64 {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        self.counter += 1;
+        let digest =
+            rpo_merge_with_int_light(self.cs.clone(), &self.seed, self.counter, &self.params)?;
+        let digest_bytes = canonicalize_to_bytes(self.cs.clone(), &digest)?;
+        let mut bits = Vec::with_capacity(64);
+        for byte in digest_bytes.iter().take(8) {
+            bits.extend(byte.to_bits_le()?);
+        }
+        if bits.len() != 64 {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        let mut truncated_bits = Vec::with_capacity(64);
+        for i in 0..64 {
+            if i < domain_bits {
+                truncated_bits.push(bits[i].clone());
+            } else {
+                truncated_bits.push(Boolean::constant(false));
+            }
+        }
+        let uint = UInt64GLVar::from_bits_le(&truncated_bits);
+        Ok(uint)
     }
 }

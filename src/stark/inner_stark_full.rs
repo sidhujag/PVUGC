@@ -28,16 +28,21 @@
 
 use super::gadgets::rpo_gl_light::canonicalize_to_bytes;
 use crate::outer_compressed::InnerFr;
+use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::cmp::CmpGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
+use ark_r1cs_std::uint64::UInt64 as UInt64Var;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use std::ops::Not;
 // Light RPO for internal operations, canonicalize only at serialization boundaries
 use super::gadgets::gl_fast::{gl_add_light, gl_mul_light, gl_sub_light, GlVar};
-use super::gadgets::gl_range::gl_alloc_u64_vec;
+use super::gadgets::gl_range::{gl_alloc_u64, gl_alloc_u64_vec};
 use super::gadgets::utils::CombinerKind;
 
 // Use GL type alias for non-native Goldilocks operations in Fr377
 pub type FpGLVar = FpVar<InnerFr>;
+type UInt64GLVar = UInt64Var<InnerFr>;
 
 /// AIR parameters needed for verification (constants, not witnesses)
 #[derive(Clone, Debug)]
@@ -81,6 +86,7 @@ pub struct FullStarkVerifierCircuit {
 
     // Query openings (witness)
     pub query_positions: Vec<usize>, // LDE domain positions
+    pub pow_nonce: u64,              // PoW nonce used to salt query seed
     pub trace_segments: Vec<TraceSegmentWitness>, // Per-segment openings + Merkle metadata
     pub comp_queries: Vec<CompQuery>, // Per-query composition openings
 
@@ -281,12 +287,28 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             return Err(SynthesisError::Unsatisfiable);
         }
         let expected_queries = self.query_positions.len();
+        if expected_queries > self.air_params.num_queries {
+            return Err(SynthesisError::Unsatisfiable);
+        }
         // Prepare holders for query values reused across Merkle + DEEP.
         // Rows are filled from Merkle-verified leaves, so start with empty per-query vectors.
         let mut trace_row_vars: Vec<Vec<GlVar>> = vec![Vec::new(); expected_queries];
         let mut comp_row_vars: Vec<Vec<GlVar>> = vec![Vec::new(); expected_queries];
         if self.comp_queries.len() != expected_queries {
             return Err(SynthesisError::Unsatisfiable);
+        }
+        let lde_domain_size = self.air_params.trace_len * self.air_params.lde_blowup;
+        let mut query_pos_uint_vars: Vec<UInt64GLVar> = Vec::with_capacity(expected_queries);
+        for &pos in &self.query_positions {
+            if pos >= lde_domain_size {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            let (pos_uint, _) = gl_alloc_u64(cs.clone(), Some(pos as u64))?;
+            query_pos_uint_vars.push(pos_uint);
+        }
+        for idx in 1..expected_queries {
+            let gt = query_pos_uint_vars[idx].is_gt(&query_pos_uint_vars[idx - 1])?;
+            gt.enforce_equal(&Boolean::constant(true))?;
         }
         // Ensure data shapes are consistent with commitments
         if let Some(first_segment) = self.trace_segments.first() {
@@ -413,7 +435,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         }
 
         // STEP 4: Derive FS challenges in-circuit
-        let (z, deep_coeffs, fri_betas) = derive_fs_challenges_in_circuit(
+        let (z, deep_coeffs, fri_betas, raw_query_positions) = derive_fs_challenges_in_circuit(
             cs.clone(),
             &trace_root_bytes,
             &comp_root_bytes,
@@ -426,6 +448,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             self.air_params.num_constraint_coeffs,
             &self.air_params,
             comp_width,
+            self.pow_nonce,
+        )?;
+
+        enforce_query_positions_alignment(
+            &query_pos_uint_vars,
+            raw_query_positions,
+            expected_queries,
+            self.air_params.num_queries,
         )?;
 
         // STEP 5: Compute DEEP composition polynomial (returns DEEP evaluations for FRI)
@@ -663,7 +693,8 @@ fn derive_fs_challenges_in_circuit(
     num_constraint_coeffs: usize, // proof.context.num_constraints()
     air_params: &AirParams,
     comp_width: usize,
-) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>), SynthesisError> {
+    pow_nonce: u64,
+) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>, Vec<UInt64GLVar>), SynthesisError> {
     use super::gadgets::gl_range::gl_alloc_u64_vec;
     use super::gadgets::rpo_gl_light::{RandomCoinGL, RpoParamsGLLight};
     use super::gadgets::utils::digest32_to_gl4;
@@ -731,7 +762,20 @@ fn derive_fs_challenges_in_circuit(
         }
     }
 
-    Ok((z, deep_coeffs, fri_betas))
+    // 5) Derive query positions in-circuit (mirrors Winterfell verifier)
+    coin.reseed_with_nonce(pow_nonce)?;
+    let lde_domain_size = air_params.trace_len * air_params.lde_blowup;
+    if lde_domain_size == 0 || !lde_domain_size.is_power_of_two() {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    let domain_bits = lde_domain_size.trailing_zeros() as usize;
+    let mut raw_positions = Vec::with_capacity(air_params.num_queries);
+    for _ in 0..air_params.num_queries {
+        let pos = coin.draw_integer_masked(domain_bits)?;
+        raw_positions.push(pos);
+    }
+
+    Ok((z, deep_coeffs, fri_betas, raw_positions))
 }
 
 /// Compute DEEP composition polynomial
@@ -918,4 +962,92 @@ pub fn verify_deep_composition(
     }
 
     Ok(deep_evaluations)
+}
+
+fn sort_uint64_in_place(values: &mut [UInt64GLVar]) -> Result<(), SynthesisError> {
+    let n = values.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let swap = values[i].is_gt(&values[j])?;
+            let new_i = UInt64GLVar::conditionally_select(&swap, &values[j], &values[i])?;
+            let new_j = UInt64GLVar::conditionally_select(&swap, &values[i], &values[j])?;
+            values[i] = new_i;
+            values[j] = new_j;
+        }
+    }
+    Ok(())
+}
+
+fn enforce_query_positions_alignment(
+    expected_positions: &[UInt64GLVar],
+    mut raw_positions: Vec<UInt64GLVar>,
+    expected_unique_len: usize,
+    total_queries: usize,
+) -> Result<(), SynthesisError> {
+    if total_queries != raw_positions.len() {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    if expected_positions.len() != expected_unique_len {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    if total_queries == 0 {
+        if expected_unique_len == 0 {
+            return Ok(());
+        } else {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+    }
+
+    sort_uint64_in_place(&mut raw_positions)?;
+
+    let zero = FpGLVar::constant(InnerFr::from(0u64));
+    let one = FpGLVar::constant(InnerFr::from(1u64));
+
+    let mut unique_flags = Vec::with_capacity(total_queries);
+    for i in 0..total_queries {
+        if i == 0 {
+            unique_flags.push(Boolean::constant(true));
+        } else {
+            let eq_prev = raw_positions[i].is_eq(&raw_positions[i - 1])?;
+            unique_flags.push(eq_prev.not());
+        }
+    }
+
+    let mut unique_flags_fp = Vec::with_capacity(total_queries);
+    let mut unique_counts = Vec::with_capacity(total_queries);
+    let mut running = zero.clone();
+    for flag in &unique_flags {
+        let flag_fp = FpGLVar::conditionally_select(flag, &one, &zero)?;
+        running = &running + &flag_fp;
+        unique_flags_fp.push(flag_fp);
+        unique_counts.push(running.clone());
+    }
+
+    unique_counts
+        .last()
+        .expect("non-empty")
+        .enforce_equal(&FpGLVar::constant(InnerFr::from(
+            expected_unique_len as u64,
+        )))?;
+
+    for k in 0..expected_unique_len {
+        let target_rank = FpGLVar::constant(InnerFr::from((k as u64) + 1));
+        let host_value_fp = expected_positions[k].to_fp()?;
+        let mut indicator_sum = zero.clone();
+
+        for i in 0..total_queries {
+            let rank_match = unique_counts[i].is_eq(&target_rank)?;
+            let rank_fp = FpGLVar::conditionally_select(&rank_match, &one, &zero)?;
+            let indicator_fp = &unique_flags_fp[i] * &rank_fp;
+            indicator_sum = &indicator_sum + &indicator_fp;
+
+            let derived_fp = raw_positions[i].to_fp()?;
+            let diff = derived_fp - &host_value_fp;
+            (diff * &indicator_fp).enforce_equal(&zero)?;
+        }
+
+        indicator_sum.enforce_equal(&one)?;
+    }
+
+    Ok(())
 }

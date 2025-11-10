@@ -233,6 +233,7 @@ where
         fri_commitments_le32,
         ood_commitment_le32,
         query_positions,
+        pow_nonce: proof.pow_nonce,
         trace_segments,
         comp_queries,
         comp_batch_nodes,
