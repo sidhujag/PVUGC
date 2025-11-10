@@ -8,15 +8,13 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
-use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use ark_std::Zero;
-use arkworks_groth16::ppe::PvugcVk;
+use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use arkworks_groth16::api::VerifyLimits;
 use arkworks_groth16::api::{
-    DEFAULT_MAX_B_COLUMNS,
-    DEFAULT_MAX_THETA_ROWS,
-    DEFAULT_MAX_TOTAL_PAIRINGS,
+    DEFAULT_MAX_B_COLUMNS, DEFAULT_MAX_THETA_ROWS, DEFAULT_MAX_TOTAL_PAIRINGS,
 };
+use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::PoceColumnProof;
 use arkworks_groth16::*;
 
@@ -453,7 +451,10 @@ fn test_r_independence_from_rho() {
     let public_x = vec![x];
 
     // Setup Groth16
-    let circuit = TestCircuit { x: Some(x), y: Some(y) };
+    let circuit = TestCircuit {
+        x: Some(x),
+        y: Some(y),
+    };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
@@ -465,9 +466,13 @@ fn test_r_independence_from_rho() {
 
     // Two fresh exponents ρ1 != 0 and ρ2 != 0
     let mut rho1 = Fr::rand(&mut rng);
-    if rho1.is_zero() { rho1 = Fr::from(7u64); }
+    if rho1.is_zero() {
+        rho1 = Fr::from(7u64);
+    }
     let mut rho2 = Fr::rand(&mut rng);
-    if rho2.is_zero() { rho2 = Fr::from(11u64); }
+    if rho2.is_zero() {
+        rho2 = Fr::from(11u64);
+    }
 
     // Compute R directly from (vk, x) twice; must be identical and ρ-independent
     let r1 = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
@@ -485,15 +490,14 @@ fn test_r_independence_from_rho() {
 
     // Build two valid proofs and commitments (proof randomness differs)
     let mut rec1 = SimpleCoeffRecorder::<E>::new();
-    let _proof1 = Groth16::<E>::create_random_proof_with_hook(
-        circuit.clone(), &pk, &mut rng, &mut rec1,
-    ).unwrap();
+    let _proof1 =
+        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut rec1)
+            .unwrap();
     let comm1: OneSidedCommitments<E> = rec1.build_commitments();
 
     let mut rec2 = SimpleCoeffRecorder::<E>::new();
-    let _proof2 = Groth16::<E>::create_random_proof_with_hook(
-        circuit, &pk, &mut rng, &mut rec2,
-    ).unwrap();
+    let _proof2 =
+        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec2).unwrap();
     let comm2: OneSidedCommitments<E> = rec2.build_commitments();
 
     // Decap with (comm1, arms1) and (comm2, arms2)
@@ -504,7 +508,10 @@ fn test_r_independence_from_rho() {
     assert_eq!(k1, k1_expected, "Decap must produce R^ρ₁");
     assert_eq!(k2, k2_expected, "Decap must produce R^ρ₂");
     if rho1 != rho2 {
-        assert_ne!(k1, k2, "Different ρ must yield different keys for fixed (vk,x)");
+        assert_ne!(
+            k1, k2,
+            "Different ρ must yield different keys for fixed (vk,x)"
+        );
     }
 }
 
@@ -527,8 +534,8 @@ fn test_rejects_gamma2_in_statement_bases() {
 
     // Produce a valid bundle for the honest pvugc_vk
     let mut recorder = SimpleCoeffRecorder::<E>::new();
-    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
-        .unwrap();
+    let proof =
+        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
@@ -543,7 +550,12 @@ fn test_rejects_gamma2_in_statement_bases() {
     // Tamper pvugc_vk so that β₂ is replaced with γ₂ → must be rejected
     let mut pvugc_vk_bad = pvugc_vk.clone();
     pvugc_vk_bad.beta_g2 = vk.gamma_g2;
-    assert!(!OneSidedPvugc::verify(&bundle, &pvugc_vk_bad, &vk, &public_x));
+    assert!(!OneSidedPvugc::verify(
+        &bundle,
+        &pvugc_vk_bad,
+        &vk,
+        &public_x
+    ));
 }
 
 #[test]
@@ -557,7 +569,10 @@ fn test_r_is_not_identity_for_typical_statement() {
     let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
     let r = compute_groth16_target(&vk, &[Fr::from(25u64)]).expect("compute_groth16_target");
     use ark_std::One;
-    assert!(r != PairingOutput::<E>(One::one()), "R(vk,x) must not be identity");
+    assert!(
+        r != PairingOutput::<E>(One::one()),
+        "R(vk,x) must not be identity"
+    );
 }
 
 #[test]
@@ -578,8 +593,8 @@ fn test_size_caps_enforced_in_verify() {
 
     // Build a valid bundle via recorder
     let mut recorder = SimpleCoeffRecorder::<E>::new();
-    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
-        .unwrap();
+    let proof =
+        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
@@ -604,7 +619,10 @@ fn test_size_caps_enforced_in_verify() {
             max_total_pairings: Some(DEFAULT_MAX_TOTAL_PAIRINGS),
         },
     );
-    assert!(ok_defaults, "verify_with_limits should pass under default size caps");
+    assert!(
+        ok_defaults,
+        "verify_with_limits should pass under default size caps"
+    );
 
     // Failing caps: zero theta rows
     let fail_theta = OneSidedPvugc::verify_with_limits(
@@ -618,7 +636,10 @@ fn test_size_caps_enforced_in_verify() {
             max_total_pairings: None,
         },
     );
-    assert!(!fail_theta, "verify must fail when theta rows cap is too small");
+    assert!(
+        !fail_theta,
+        "verify must fail when theta rows cap is too small"
+    );
 
     // Failing caps: too small pairing budget
     let fail_pairings = OneSidedPvugc::verify_with_limits(
@@ -632,5 +653,8 @@ fn test_size_caps_enforced_in_verify() {
             max_total_pairings: Some(1),
         },
     );
-    assert!(!fail_pairings, "verify must fail when total pairing budget is too small");
+    assert!(
+        !fail_pairings,
+        "verify must fail when total pairing budget is too small"
+    );
 }

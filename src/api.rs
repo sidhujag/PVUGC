@@ -189,14 +189,14 @@ impl OneSidedPvugc {
         let mut ad_core = Vec::new();
         ad_core.extend_from_slice(ctx_hash);
         ad_core.extend_from_slice(gs_digest);
-        
+
         // Ensure tau_i is 32 bytes
         if tau_i.len() != 32 {
             return false;
         }
         let mut tau_array = [0u8; 32];
         tau_array.copy_from_slice(tau_i);
-        
+
         crate::ct::verify_key_commitment(&k_bytes, &ad_core, ct_i, &tau_array)
     }
 
@@ -214,7 +214,7 @@ impl OneSidedPvugc {
         let mut ad_core = Vec::new();
         ad_core.extend_from_slice(ctx_hash);
         ad_core.extend_from_slice(gs_digest);
-        
+
         let tau = crate::ct::compute_key_commitment_tag(&k_bytes, &ad_core, ciphertext);
         tau.to_vec()
     }
@@ -285,12 +285,8 @@ impl OneSidedPvugc {
         .into_affine();
 
         // Verify over b_g2_query[1..] only (variable part)
-        let dlrep_b_ok = verify_b_msm::<E>(
-            b_prime,
-            variable_b_cols,
-            pvugc_vk.delta_g2,
-            &bundle.dlrep_b,
-        );
+        let dlrep_b_ok =
+            verify_b_msm::<E>(b_prime, variable_b_cols, pvugc_vk.delta_g2, &bundle.dlrep_b);
         if !dlrep_b_ok {
             return false;
         }

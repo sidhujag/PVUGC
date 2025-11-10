@@ -11,7 +11,7 @@
 
 use core::marker::PhantomData;
 
-use ark_crypto_primitives::snark::constraints::{BooleanInputVar, SNARKGadget};
+use ark_crypto_primitives::snark::constraints::SNARKGadget;
 use ark_ec::pairing::Pairing;
 use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{
@@ -150,8 +150,9 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             Ok(self.proof_inner)
         })?;
 
-        // BooleanInputVar performs a bit-decomposition and reconstruction over the constraint field,
-        // giving the verifier gadget the same public inputs that Groth16 expects.  No hashing occurs.
+        // BooleanInputVar handles field element conversion for recursion
+        // It converts inner field elements to the outer constraint field
+        use ark_crypto_primitives::snark::BooleanInputVar;
         let input_var =
             BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_input(cs.clone(), || {
                 Ok(self.x_inner.clone())
@@ -213,6 +214,9 @@ pub fn setup_outer_params(
 }
 
 /// Prove outer circuit (generate proof-of-proof) for the provided cycle.
+///
+/// Note: BooleanInputVar compresses inner field elements for recursion efficiency.
+/// This function extracts the actual compressed public inputs from the circuit.
 pub fn prove_outer_for<C: RecursionCycle>(
     pk_outer: &OuterPk<C>,
     vk_inner: &InnerVk<C>,
@@ -220,17 +224,25 @@ pub fn prove_outer_for<C: RecursionCycle>(
     proof_inner: &InnerProof<C>,
     rng: &mut (impl ark_std::rand::RngCore + ark_std::rand::CryptoRng),
 ) -> Result<(OuterProof<C>, OuterVk<C>, Vec<OuterScalar<C>>), SynthesisError> {
-    let circuit = OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
+    use ark_relations::r1cs::ConstraintSystem;
 
-    let public_inputs = x_inner
-        .iter()
-        .map(fr_inner_to_outer_for::<C>)
-        .collect::<Vec<_>>();
+    // First, synthesize the circuit to extract the actual public inputs that BooleanInputVar creates
+    // (BooleanInputVar compresses the inputs for efficiency)
+    let circuit_for_extraction =
+        OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
+    let cs = ConstraintSystem::<OuterScalar<C>>::new_ref();
+    circuit_for_extraction.generate_constraints(cs.clone())?;
+    let actual_public_inputs = cs.borrow().unwrap().instance_assignment.clone();
+    // Remove the constant "1" at index 0
+    let actual_public_inputs: Vec<_> = actual_public_inputs.into_iter().skip(1).collect();
 
-    let proof_outer = Groth16::<C::OuterE>::prove(pk_outer, circuit, rng)?;
+    // Now prove with a fresh circuit instance
+    let circuit_for_proving =
+        OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
+    let proof_outer = Groth16::<C::OuterE>::prove(pk_outer, circuit_for_proving, rng)?;
     let vk_outer = pk_outer.vk.clone();
 
-    Ok((proof_outer, vk_outer, public_inputs))
+    Ok((proof_outer, vk_outer, actual_public_inputs))
 }
 
 /// Default-cycle convenience wrapper around [`prove_outer_for`].
@@ -245,24 +257,28 @@ pub fn prove_outer(
 }
 
 /// Verify outer Groth16 proof for the provided cycle.
+///
+/// Note: The public inputs must be the compressed inputs returned by `prove_outer`,
+/// not the original x_inner. BooleanInputVar compresses the inner public inputs.
 pub fn verify_outer_for<C: RecursionCycle>(
     vk_outer: &OuterVk<C>,
-    x_inner: &[InnerScalar<C>],
+    compressed_public_inputs: &[OuterScalar<C>],
     proof_outer: &OuterProof<C>,
 ) -> Result<bool, SynthesisError> {
-    let x_outer: Vec<_> = x_inner.iter().map(fr_inner_to_outer_for::<C>).collect();
-
     let pvk = Groth16::<C::OuterE>::process_vk(vk_outer)?;
-    Groth16::<C::OuterE>::verify_with_processed_vk(&pvk, &x_outer, proof_outer)
+    Groth16::<C::OuterE>::verify_with_processed_vk(&pvk, compressed_public_inputs, proof_outer)
 }
 
 /// Default-cycle convenience wrapper around [`verify_outer_for`].
+///
+/// Note: The public inputs must be the compressed inputs returned by `prove_outer`,
+/// not the original x_inner. BooleanInputVar compresses the inner public inputs.
 pub fn verify_outer(
     vk_outer: &OuterVkDefault,
-    x_inner: &[InnerFr],
+    compressed_public_inputs: &[OuterFr],
     proof_outer: &OuterProofDefault,
 ) -> Result<bool, SynthesisError> {
-    verify_outer_for::<DefaultCycle>(vk_outer, x_inner, proof_outer)
+    verify_outer_for::<DefaultCycle>(vk_outer, compressed_public_inputs, proof_outer)
 }
 
 #[cfg(test)]
@@ -393,7 +409,10 @@ mod tests {
             outer_start.elapsed()
         );
 
-        assert!(verify_outer_for::<C>(&*vk_outer, &public_x, &proof_outer).unwrap());
+        // Convert public_x from inner to outer field elements (1 element, no compression)
+        let public_x_outer: Vec<OuterScalar<C>> =
+            public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
+        assert!(verify_outer_for::<C>(&*vk_outer, &public_x_outer, &proof_outer).unwrap());
 
         let run_decap = std::env::var("PVUGC_RUN_DECAP")
             .map(|flag| flag == "1" || flag.eq_ignore_ascii_case("true"))
@@ -408,7 +427,10 @@ mod tests {
             let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &public_x);
             let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
-            assert!(crate::ct::gt_eq_ct::<C::OuterE>(&k_decapped, &k_expected), "Decapsulated K doesn't match R^ρ!");
+            assert!(
+                crate::ct::gt_eq_ct::<C::OuterE>(&k_decapped, &k_expected),
+                "Decapsulated K doesn't match R^ρ!"
+            );
         } else {
             eprintln!(
                 "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable)",

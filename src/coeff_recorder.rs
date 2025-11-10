@@ -7,8 +7,8 @@
 //! only used to compute the aggregated X values needed for GS commitments.
 
 use ark_ec::pairing::Pairing;
-use ark_ec::{CurveGroup, AffineRepr};
-use ark_ff::{Field};
+use ark_ec::{AffineRepr, CurveGroup};
+use ark_ff::Field;
 use ark_groth16::pvugc_hook::PvugcCoefficientHook;
 
 /// Coefficients extracted from Groth16 prover
@@ -27,7 +27,7 @@ pub struct SimpleCoeffRecorder<E: Pairing> {
     a: Option<E::G1Affine>,
     b_coeffs: Vec<E::ScalarField>,
     s: Option<E::ScalarField>,
-    c: Option<E::G1Affine>,  // For C-side (will be negated)
+    c: Option<E::G1Affine>,            // For C-side (will be negated)
     b_commitment: Option<E::G2Affine>, // DLREP_B commitment for joint binding
 }
 
@@ -41,12 +41,12 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             b_commitment: None,
         }
     }
-    
+
     /// Check if A was recorded
     pub fn has_a(&self) -> bool {
         self.a.is_some()
     }
-    
+
     /// Create per-column tie proofs: for each variable column j, prove X_j = b_j · A
     pub fn create_dlrep_ties<R: ark_std::rand::RngCore + rand_core::CryptoRng>(
         &self,
@@ -69,12 +69,12 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     pub fn has_c(&self) -> bool {
         self.c.is_some()
     }
-    
+
     /// Get number of coefficients recorded
     pub fn num_coeffs(&self) -> usize {
         self.b_coeffs.len()
     }
-    
+
     /// Get the raw coefficients (for PoK generation)
     pub fn get_coefficients(&self) -> Option<BCoefficients<E::ScalarField>> {
         match (&self.a, &self.s) {
@@ -100,7 +100,7 @@ impl<E: Pairing> PvugcCoefficientHook<E> for SimpleCoeffRecorder<E> {
         self.b_coeffs = assignment.to_vec();
         self.s = Some(*s);
     }
-    
+
     fn on_c_computed(&mut self, c: &E::G1Affine, _delta_g2: &E::G2Affine) {
         // Store C for negation in GS PPE
         // PPE uses e(-C, δ) to match Groth16 equation
@@ -114,12 +114,12 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     pub fn get_neg_c(&self) -> Option<E::G1Affine> {
         self.c.map(|c| c.into_group().neg().into_affine())
     }
-    
+
     /// Get C as recorded (positive)
     pub fn get_c(&self) -> Option<E::G1Affine> {
         self.c
     }
-    
+
     /// Create DLREP proof for B coefficients
     /// Proves: B - β = s·δ + Σ b_j·query[j]
     pub fn create_dlrep_b<R: ark_std::rand::RngCore + rand_core::CryptoRng>(
@@ -129,8 +129,8 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     ) -> crate::dlrep::DlrepBProof<E> {
         use crate::dlrep::prove_b_msm;
         use ark_ec::CurveGroup;
-        
-        let b_coeffs = &self.b_coeffs;  // These correspond to b_g2_query[1..]
+
+        let b_coeffs = &self.b_coeffs; // These correspond to b_g2_query[1..]
         let s = self.s.expect("s not recorded");
 
         let b_query: &[E::G2Affine] = &pvugc_vk.b_g2_query;
@@ -162,16 +162,15 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         self.b_commitment = Some(proof.commitment);
         proof
     }
-    
+
     /// Build GS commitments from recorded coefficients (column-wise)
-    pub fn build_commitments(
-        &self,
-    ) -> crate::decap::OneSidedCommitments<E> {
+    pub fn build_commitments(&self) -> crate::decap::OneSidedCommitments<E> {
         // Build per-column X_B_j limbs to mirror [β₂, b_g2_query[0], b_g2_query[1..], δ₂]
         let a = self.a.expect("A not recorded");
         let a_g = a.into_group();
         // Columns: [A (β), A (b_g2_query[0]), b1·A, ..., b_{n-1}·A]
-        let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> = Vec::with_capacity(2 + self.b_coeffs.len());
+        let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> =
+            Vec::with_capacity(2 + self.b_coeffs.len());
         // Column 0: β column = 1·A
         x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
         // Column 1: b_g2_query[0] constant row = 1·A (hook b_coeffs covers query[1..] only)
@@ -188,28 +187,36 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let s = self.s.expect("s not recorded");
         let theta0 = ((a_g * s) - self.get_c().expect("C not recorded").into_group()).into_affine();
         // Derive deterministic r_Theta from (A,C,s) to simulate RAND-row and provide canceller
-        use sha2::{Sha256, Digest};
-        use ark_ff::{PrimeField, BigInteger};
+        use ark_ff::{BigInteger, PrimeField};
         use ark_serialize::CanonicalSerialize;
+        use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         let a_aff = self.a.expect("A not recorded");
         let c_aff = self.get_c().expect("C not recorded");
         let mut buf = Vec::new();
         a_aff.serialize_compressed(&mut buf).unwrap();
-        h.update(&buf); buf.clear();
+        h.update(&buf);
+        buf.clear();
         c_aff.serialize_compressed(&mut buf).unwrap();
-        h.update(&buf); buf.clear();
+        h.update(&buf);
+        buf.clear();
         h.update(&s.into_bigint().to_bytes_be());
         let bytes = h.finalize();
         let r_theta = <E as Pairing>::ScalarField::from_le_bytes_mod_order(&bytes);
         let rand_limb = (a_g * r_theta).into_affine();
         // RAND-row limbs for Θ and matching canceller to neutralize rand_limb pairing against δ2
         let theta = vec![(theta0, rand_limb)];
-        let theta_delta_cancel = (rand_limb.into_group().neg().into_affine(), <E as Pairing>::G1Affine::zero());
-        
-        crate::decap::OneSidedCommitments { x_b_cols, theta, theta_delta_cancel }
+        let theta_delta_cancel = (
+            rand_limb.into_group().neg().into_affine(),
+            <E as Pairing>::G1Affine::zero(),
+        );
+
+        crate::decap::OneSidedCommitments {
+            x_b_cols,
+            theta,
+            theta_delta_cancel,
+        }
     }
-    
 }
 
 use std::ops::Neg;
@@ -224,15 +231,13 @@ impl<E: Pairing> Default for SimpleCoeffRecorder<E> {
 mod tests {
     use super::*;
     use ark_bls12_381::Bls12_381;
-    
+
     type E = Bls12_381;
-    
+
     #[test]
     fn test_coefficient_recording() {
         let recorder = SimpleCoeffRecorder::<E>::new();
         // Test that recorder initializes correctly
         assert!(recorder.get_coefficients().is_none());
     }
-    
 }
-

@@ -167,7 +167,6 @@ pub fn verify_poce_column<E: Pairing>(
     t_left.into_affine() == t_right.into_affine()
 }
 
-
 /// Compute Fiat-Shamir challenge for PoCE
 fn compute_poce_challenge<E: Pairing>(
     y_bases: &[E::G2Affine],
@@ -243,8 +242,8 @@ fn compute_poce_challenge<E: Pairing>(
 mod tests {
     use super::*;
     use ark_bls12_381::{Bls12_381 as E, Fr, G2Affine};
-    use ark_std::rand::SeedableRng;
     use ark_std::rand::rngs::StdRng;
+    use ark_std::rand::SeedableRng;
 
     #[test]
     fn test_poce_column_proof() {
