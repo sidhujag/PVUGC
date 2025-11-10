@@ -240,6 +240,19 @@ pub fn canonicalize_to_bytes(
     Ok(bytes)
 }
 
+/// Canonicalize a single GL element to UInt64 and enforce modular congruence with bounded quotient.
+pub fn canonicalize_gl_to_u64_light(
+    cs: ConstraintSystemRef<InnerFr>,
+    gl_val: &GlVar,
+) -> Result<UInt64GLVar, SynthesisError> {
+    use super::gl_range::gl_alloc_u64;
+    use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
+    use crate::stark::gl_u64::fr_to_gl_u64;
+    let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
+    let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
+    enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;
+    Ok(u64_var)
+}
 /// Hash elements using light RPO (matches Winterfell's hash_elements)
 /// State layout: [len, 0, 0, 0, input..., padding]
 /// Digest output: state[4..8]
@@ -499,25 +512,12 @@ impl RandomCoinGL {
         }
 
         let new_seed = rpo_merge_with_int_light(self.cs.clone(), &self.seed, nonce, &self.params)?;
-        let digest_bytes = canonicalize_to_bytes(self.cs.clone(), &new_seed)?;
-
+        // Enforce grinding on first limb only (matches DefaultRandomCoin::check_leading_zeros)
         if grinding_factor > 0 {
-            let mut bits_consumed = 0usize;
-            for byte in digest_bytes.iter().take(8) {
-                let bits = byte.to_bits_le()?;
-                for bit in bits {
-                    if bits_consumed >= grinding_factor {
-                        break;
-                    }
-                    bit.enforce_equal(&Boolean::constant(false))?;
-                    bits_consumed += 1;
-                }
-                if bits_consumed >= grinding_factor {
-                    break;
-                }
-            }
-            if bits_consumed < grinding_factor {
-                return Err(SynthesisError::Unsatisfiable);
+            let u64_limb = canonicalize_gl_to_u64_light(self.cs.clone(), &new_seed[0])?;
+            let bits = u64_limb.to_bits_le()?;
+            for i in 0..grinding_factor {
+                bits[i].enforce_equal(&Boolean::constant(false))?;
             }
         }
 
@@ -546,23 +546,17 @@ impl RandomCoinGL {
         self.counter += 1;
         let digest =
             rpo_merge_with_int_light(self.cs.clone(), &self.seed, self.counter, &self.params)?;
-        let digest_bytes = canonicalize_to_bytes(self.cs.clone(), &digest)?;
-        let mut bits = Vec::with_capacity(64);
-        for byte in digest_bytes.iter().take(8) {
-            bits.extend(byte.to_bits_le()?);
-        }
-        if bits.len() != 64 {
-            return Err(SynthesisError::Unsatisfiable);
-        }
-        let mut truncated_bits = Vec::with_capacity(64);
+        // Use only first digest limb; canonicalize to u64 and mask high bits (no constraints on discarded bits)
+        let u64_full = canonicalize_gl_to_u64_light(self.cs.clone(), &digest[0])?;
+        let bits_full = u64_full.to_bits_le()?;
+        let mut masked_bits = Vec::with_capacity(64);
         for i in 0..64 {
             if i < domain_bits {
-                truncated_bits.push(bits[i].clone());
+                masked_bits.push(bits_full[i].clone());
             } else {
-                truncated_bits.push(Boolean::constant(false));
+                masked_bits.push(Boolean::constant(false));
             }
         }
-        let uint = UInt64GLVar::from_bits_le(&truncated_bits);
-        Ok(uint)
+        Ok(UInt64GLVar::from_bits_le(&masked_bits))
     }
 }
