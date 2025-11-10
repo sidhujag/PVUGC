@@ -1,4 +1,3 @@
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 ///! Comprehensive STARK verifier tests
 ///!
 ///! Tests:
@@ -7,6 +6,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 ///! 3. Different proof parameters
 use crate::stark::inner_stark_full::AirParams;
 use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use winter_crypto::hashers::Rp64_256;
 use winter_math::fields::f64::BaseElement;
 use winterfell::{Air, Trace};
@@ -85,6 +85,7 @@ fn test_proof_verification(steps: usize, expected_fri_layers: usize) -> bool {
             }
         },
         num_constraint_coeffs: proof.context.num_constraints(),
+        grinding_factor: proof.options().grinding_factor(),
     };
 
     // Derive query positions
@@ -260,6 +261,7 @@ fn build_circuit(
             }
         },
         num_constraint_coeffs: proof.context.num_constraints(),
+        grinding_factor: proof.options().grinding_factor(),
     };
     use winter_crypto::DefaultRandomCoin;
     use winter_crypto::{ElementHasher, RandomCoin};
@@ -438,6 +440,169 @@ fn test_adversarial_wrong_positions_commitment() {
     if let Some(first) = circuit.query_positions.get_mut(0) {
         *first ^= 1usize;
     }
+    let cs = ConstraintSystem::new_ref();
+    let res = circuit.generate_constraints(cs.clone());
+    assert!(res.is_ok());
+    assert!(!cs.is_satisfied().unwrap_or(true));
+}
+
+#[test]
+#[serial]
+fn test_adversarial_low_pow_nonce() {
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
+    use winter_crypto::hashers::Rp64_256;
+    use winter_crypto::{DefaultRandomCoin, ElementHasher, RandomCoin};
+    use winter_math::fields::f64::BaseElement;
+    use winter_math::ToElements;
+    use winterfell::{Air, Trace};
+
+    let steps = 64;
+    let start = BaseElement::new(3);
+    let (proof, trace) = generate_test_vdf_proof_rpo(start, steps);
+    let pub_inputs_u64 = vec![trace.get(1, trace.length() - 1).as_int()];
+    let pub_inputs_fe = BaseElement::new(pub_inputs_u64[0]);
+    let air = VdfAir::new(
+        proof.context.trace_info().clone(),
+        pub_inputs_fe,
+        proof.options().clone(),
+    );
+
+    let lde_domain_size = proof.context.lde_domain_size();
+    let trace_len = proof.context.trace_info().length();
+    let actual_fri_layers = proof
+        .options()
+        .to_fri_options()
+        .num_fri_layers(lde_domain_size);
+    let air_params = AirParams {
+        trace_width: 2,
+        comp_width: air.context().num_constraint_composition_columns(),
+        trace_len,
+        lde_blowup: lde_domain_size / trace_len,
+        num_queries: proof.options().num_queries(),
+        fri_folding_factor: 2,
+        fri_num_layers: actual_fri_layers,
+        lde_generator: air.lde_domain_generator().as_int(),
+        domain_offset: air.domain_offset().as_int(),
+        g_lde: air.lde_domain_generator().as_int(),
+        g_trace: air.trace_domain_generator().as_int(),
+        combiner_kind: crate::stark::gadgets::utils::CombinerKind::RandomRho,
+        fri_terminal: {
+            let coeffs_len = proof
+                .fri_proof
+                .clone()
+                .parse_remainder::<BaseElement>()
+                .map(|v: Vec<BaseElement>| v.len())
+                .unwrap_or(0);
+            if coeffs_len == 0 {
+                crate::stark::gadgets::fri::FriTerminalKind::Constant
+            } else {
+                crate::stark::gadgets::fri::FriTerminalKind::Poly {
+                    degree: coeffs_len - 1,
+                }
+            }
+        },
+        num_constraint_coeffs: proof.context.num_constraints(),
+        grinding_factor: proof.options().grinding_factor(),
+    };
+
+    let mut public_coin_seed = proof.context.to_elements();
+    public_coin_seed.append(&mut pub_inputs_fe.to_elements());
+
+    let (trace_commitments, constraint_commitment, fri_commitments) = proof
+        .commitments
+        .clone()
+        .parse::<Rp64_256>(air.trace_info().num_segments(), actual_fri_layers)
+        .expect("parse commitments");
+
+    let (trace_ood_frame, constraint_ood_frame) = proof
+        .ood_frame
+        .clone()
+        .parse::<BaseElement>(
+            air.trace_info().main_trace_width(),
+            air.trace_info().aux_segment_width(),
+            air.context().num_constraint_composition_columns(),
+        )
+        .expect("parse OOD frame");
+    use winter_air::proof::merge_ood_evaluations;
+    let ood_evals = merge_ood_evaluations(&trace_ood_frame, &constraint_ood_frame);
+    let ood_digest = Rp64_256::hash_elements(&ood_evals);
+
+    type Digest = <Rp64_256 as winter_crypto::Hasher>::Digest;
+
+    fn prime_coin(
+        coin: &mut DefaultRandomCoin<Rp64_256>,
+        air: &VdfAir,
+        trace_commitments: &[Digest],
+        constraint_commitment: &Digest,
+        fri_commitments: &[Digest],
+        ood_digest: &Digest,
+        actual_fri_layers: usize,
+    ) {
+        for trace_root in trace_commitments {
+            coin.reseed(*trace_root);
+        }
+        let _ = air
+            .get_constraint_composition_coefficients::<BaseElement, _>(coin)
+            .unwrap();
+        coin.reseed(*constraint_commitment);
+        let _ = coin.draw::<BaseElement>().unwrap();
+        coin.reseed(*ood_digest);
+        let _ = air
+            .get_deep_composition_coefficients::<BaseElement, _>(coin)
+            .unwrap();
+        for (i, fri_root) in fri_commitments.iter().enumerate() {
+            coin.reseed(*fri_root);
+            if i < actual_fri_layers {
+                let _ = coin.draw::<BaseElement>().unwrap();
+            }
+        }
+    }
+
+    let mut coin_queries = DefaultRandomCoin::<Rp64_256>::new(&public_coin_seed);
+    prime_coin(
+        &mut coin_queries,
+        &air,
+        &trace_commitments,
+        &constraint_commitment,
+        &fri_commitments,
+        &ood_digest,
+        actual_fri_layers,
+    );
+    let mut query_positions = coin_queries
+        .draw_integers(
+            air.options().num_queries(),
+            air.lde_domain_size(),
+            proof.pow_nonce,
+        )
+        .unwrap();
+    query_positions.sort_unstable();
+    query_positions.dedup();
+
+    let mut coin_pow = DefaultRandomCoin::<Rp64_256>::new(&public_coin_seed);
+    prime_coin(
+        &mut coin_pow,
+        &air,
+        &trace_commitments,
+        &constraint_commitment,
+        &fri_commitments,
+        &ood_digest,
+        actual_fri_layers,
+    );
+    let grinding_factor = proof.options().grinding_factor();
+    let mut bad_nonce = proof.pow_nonce;
+    loop {
+        bad_nonce = bad_nonce.wrapping_add(1);
+        if coin_pow.check_leading_zeros(bad_nonce) < grinding_factor {
+            break;
+        }
+    }
+
+    let mut circuit = parse_proof_for_circuit_with_query_positions::<
+        Rp64_256,
+        winter_crypto::MerkleTree<Rp64_256>,
+    >(&proof, pub_inputs_u64, air_params, query_positions);
+    circuit.pow_nonce = bad_nonce;
+
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
     assert!(res.is_ok());

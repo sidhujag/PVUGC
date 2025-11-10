@@ -61,6 +61,7 @@ pub struct AirParams {
     pub combiner_kind: CombinerKind,
     pub fri_terminal: super::gadgets::fri::FriTerminalKind,
     pub num_constraint_coeffs: usize,
+    pub grinding_factor: u32,
 }
 
 /// Full STARK verifier circuit
@@ -763,7 +764,11 @@ fn derive_fs_challenges_in_circuit(
     }
 
     // 5) Derive query positions in-circuit (mirrors Winterfell verifier)
-    coin.reseed_with_nonce(pow_nonce)?;
+    let grinding_factor = air_params.grinding_factor as usize;
+    if grinding_factor > 64 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    coin.reseed_with_nonce(pow_nonce, grinding_factor)?;
     let lde_domain_size = air_params.trace_len * air_params.lde_blowup;
     if lde_domain_size == 0 || !lde_domain_size.is_power_of_two() {
         return Err(SynthesisError::Unsatisfiable);

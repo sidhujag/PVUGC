@@ -1,10 +1,10 @@
+use crate::outer_compressed::InnerE;
+use crate::stark::inner_stark_full::AirParams;
+use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
 use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
-use crate::stark::inner_stark_full::AirParams;
-use crate::outer_compressed::InnerE;
-use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
 use winter_crypto::hashers::Rp64_256; // RPO-256 hasher
 use winter_crypto::{ElementHasher, RandomCoin};
 use winter_math::fields::f64::BaseElement;
@@ -161,6 +161,7 @@ fn full_stark_verifier_smoke() {
         combiner_kind: crate::stark::gadgets::utils::CombinerKind::RandomRho,
         fri_terminal,
         num_constraint_coeffs: proof.context.num_constraints(),
+        grinding_factor: proof.options().grinding_factor(),
     };
 
     // 3) Derive query positions using Winterfell's verifier logic

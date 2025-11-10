@@ -488,9 +488,40 @@ impl RandomCoinGL {
         Ok(())
     }
 
-    /// Reseed the coin with a public nonce (matches merge_with_int)
-    pub fn reseed_with_nonce(&mut self, nonce: u64) -> Result<(), SynthesisError> {
-        self.seed = rpo_merge_with_int_light(self.cs.clone(), &self.seed, nonce, &self.params)?;
+    /// Reseed the coin with a public nonce (matches merge_with_int) and enforce grinding factor.
+    pub fn reseed_with_nonce(
+        &mut self,
+        nonce: u64,
+        grinding_factor: usize,
+    ) -> Result<(), SynthesisError> {
+        if grinding_factor > 64 {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+
+        let new_seed = rpo_merge_with_int_light(self.cs.clone(), &self.seed, nonce, &self.params)?;
+        let digest_bytes = canonicalize_to_bytes(self.cs.clone(), &new_seed)?;
+
+        if grinding_factor > 0 {
+            let mut bits_consumed = 0usize;
+            for byte in digest_bytes.iter().take(8) {
+                let bits = byte.to_bits_le()?;
+                for bit in bits {
+                    if bits_consumed >= grinding_factor {
+                        break;
+                    }
+                    bit.enforce_equal(&Boolean::constant(false))?;
+                    bits_consumed += 1;
+                }
+                if bits_consumed >= grinding_factor {
+                    break;
+                }
+            }
+            if bits_consumed < grinding_factor {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+        }
+
+        self.seed = new_seed;
         self.counter = 0;
         Ok(())
     }
