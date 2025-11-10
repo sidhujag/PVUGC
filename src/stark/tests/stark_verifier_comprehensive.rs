@@ -724,3 +724,17 @@ fn test_adversarial_tamper_fri_root_bytes() {
         assert!(!cs.is_satisfied().unwrap_or(true));
     }
 }
+
+#[test]
+#[serial]
+fn test_adversarial_missing_fri_layers() {
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
+    // Expect at least 1 FRI layer
+    let mut circuit = build_circuit(64, 1);
+    // Remove FRI layers from witness to attempt bypass
+    circuit.fri_layers.clear();
+    let cs = ConstraintSystem::new_ref();
+    let res = circuit.generate_constraints(cs.clone());
+    // With enforced layer count, this should error out during synthesis
+    assert!(res.is_err(), "Missing FRI layers should be rejected");
+}

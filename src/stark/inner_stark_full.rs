@@ -487,21 +487,32 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             lde_domain_size: self.air_params.trace_len * self.air_params.lde_blowup,
         };
 
-        // Convert layers to FriLayerQueryGL format
-        // Note: FRI has n layers but only n-1 betas (last layer doesn't need folding)
-        // Only create FriLayerQueryGL for layers that have corresponding betas
-        let fri_layer_queries: Vec<FriLayerQueryGL> = if self.fri_layers.is_empty() {
-            vec![]
+        // Convert layers to FriLayerQueryGL format and enforce witness layer count
+        let expected_fri_layers = self.air_params.fri_num_layers;
+        let mut fri_layer_queries: Vec<FriLayerQueryGL> = Vec::new();
+
+        if expected_fri_layers == 0 {
+            // When no folding layers are expected, the witness must not provide any
+            if !self.fri_layers.is_empty() || !fri_betas.is_empty() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
         } else {
-            // Take all but the last layer (or all layers if we have enough betas)
-            // Map FRI layers to their commitments
-            let num_layers_with_betas = fri_betas.len().min(self.fri_layers.len());
-            self.fri_layers
-                .iter()
-                .take(num_layers_with_betas)
-                .zip(fri_roots_bytes.iter()) // Try without skip for testing
-                .zip(fri_betas.iter())
-                .map(|((layer, root_bytes), beta)| FriLayerQueryGL {
+            if self.fri_layers.len() != expected_fri_layers {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            if fri_betas.len() != expected_fri_layers {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            if fri_roots_bytes.len() < expected_fri_layers {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+
+            fri_layer_queries.reserve(expected_fri_layers);
+            for layer_idx in 0..expected_fri_layers {
+                let layer = &self.fri_layers[layer_idx];
+                let root_bytes = &fri_roots_bytes[layer_idx];
+                let beta = &fri_betas[layer_idx];
+                fri_layer_queries.push(FriLayerQueryGL {
                     queries: &layer.queries,
                     root_bytes,
                     beta,
@@ -509,9 +520,9 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                     unique_values: &layer.unique_values,
                     batch_nodes: &layer.batch_nodes,
                     batch_depth: layer.batch_depth,
-                })
-                .collect()
-        };
+                });
+            }
+        }
 
         // Pass deep_evaluations as starting values
         // Note: if remainder coeffs are provided, pass them
@@ -521,17 +532,15 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             Some(self.fri_remainder_coeffs.as_slice())
         };
 
-        // Only verify FRI if we have layers to verify or remainder to check
-        if !fri_layer_queries.is_empty() || remainder_coeffs_opt.is_some() {
-            verify_fri_layers_gl(
-                cs.clone(),
-                &fri_config,
-                &self.query_positions,
-                deep_evaluations,
-                &fri_layer_queries,
-                remainder_coeffs_opt,
-            )?;
-        }
+        // Always verify FRI (including terminal) according to expected configuration
+        verify_fri_layers_gl(
+            cs.clone(),
+            &fri_config,
+            &self.query_positions,
+            deep_evaluations,
+            &fri_layer_queries,
+            remainder_coeffs_opt,
+        )?;
 
         Ok(())
     }
