@@ -35,7 +35,7 @@ fn create_test_context(
         .with_path_tag("compute")
         .finalize(None, None);
 
-    // Create AD_core for DEM-SHA256 binding
+    // Create AD_core for DEM-Poseidon binding
     let ad_core = AdCore::new(
         vk_hash,
         x_hash,
@@ -169,32 +169,40 @@ fn test_one_sided_pvugc_proof_agnostic() {
         create_test_context(vk_hash, x_hash, y_cols_digest, epoch_nonce, tapleaf_hash);
 
     // Create a deposit-time ciphertext and tag bound to expected K = R^ρ
-    let plaintext = b"simulated_ciphertext";
+    let plaintext = vec![42u8; 32];
     let dem = ct::DemP2::new(&serialize_gt::<E>(&k_expected.0), &ad_core_bytes);
-    let ct = dem.encrypt(plaintext);
+    let ct = dem.encrypt(&plaintext);
     let tau =
         ct::compute_key_commitment_tag(&serialize_gt::<E>(&k_expected.0), &ad_core_bytes, &ct);
 
-    // Create PoCE-A proof (bind arming to ciphertext and tag)
-    let poce_proof = OneSidedPvugc::attest_column_arming(
+    // Create PoCE-A + VE attestation (bind arming to ciphertext and tag)
+    let column_attestation = OneSidedPvugc::attest_column_arming(
         &_bases_cols,
         &col_arms,
         &t_i,
         &rho,
         &s_i,
+        &k_expected,
+        &ad_core_bytes,
         &ctx_hash,
         &gs_digest,
         &ct,
         &tau,
         &mut rng,
+    )
+    .expect("column attestation");
+    assert!(
+        arkworks_groth16::verify_adaptor_ve(&column_attestation.ve, &ad_core_bytes, &ct, &tau),
+        "column VE should verify"
     );
 
-    // Verify PoCE-A proof
+    // Verify attestation
     assert!(OneSidedPvugc::verify_column_arming(
         &_bases_cols,
         &col_arms,
         &t_i,
-        &poce_proof,
+        &column_attestation,
+        &ad_core_bytes,
         &ctx_hash,
         &gs_digest,
         &ct,
@@ -259,7 +267,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // Decrypt with derived key from proof 2 (same statement) → should succeed
     let dem2 = ct::DemP2::new(&serialize_gt::<E>(&k2.0), &ad_core_bytes);
     let opened2 = dem2.decrypt(&ct);
-    assert_eq!(opened2.as_slice(), plaintext);
+    assert_eq!(opened2, plaintext);
 
     // === PROOF-AGNOSTIC PROPERTY ===
 
@@ -336,8 +344,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let dem_vault2 = ct::DemP2::new(&serialize_gt::<E>(&k_vault2_decap.0), &ad_core_bytes);
     let opened_vault2 = dem_vault2.decrypt(&ct);
     assert_ne!(
-        opened_vault2.as_slice(),
-        plaintext,
+        opened_vault2, plaintext,
         "Different statement key must not decrypt correctly"
     );
 }

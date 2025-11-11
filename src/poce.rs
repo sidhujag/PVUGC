@@ -14,7 +14,7 @@ use ark_std::rand::RngCore;
 use sha2::{Digest, Sha256};
 
 /// PoCE-A proof for column arming
-/// Proves: ∀j, D_j = Y_j^ρ AND D_δ = δ^ρ AND ciphertext is key-committed to a K derived from R^ρ and context (see DEM-SHA256)
+/// Proves: ∀j, D_j = Y_j^ρ AND D_δ = δ^ρ AND ciphertext is key-committed to a K derived from R^ρ and context (see DEM-Poseidon)
 #[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PoceColumnProof<E: Pairing> {
     /// Per-column commitments: k_ρ · Y_j for each column

@@ -76,12 +76,13 @@ ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || pre
 
 **Hash functions (normative).**
 
-Let `H_bytes = SHA-256` for byte-level context hashes (`ctx_*`) and tags like `H(x)`. Let `H_p2 = Poseidon2` for in-circuit PoCE. For KDF/DEM/tag, use the single normative profile `DEM_PROFILE = "PVUGC/DEM-SHA256-v1"`:
+Let `H_bytes = SHA-256` for byte-level context hashes (`ctx_*`) and tags like `H(x)`. Let `H_p2 = Poseidon2` for in-circuit PoCE. For KDF/DEM/tag, use the single normative profile `DEM_PROFILE = "PVUGC/DEM-Poseidon-v1"`:
 
 - `KDF(M) = SHA-256( ser_GT(M) || H_bytes(ctx_hash) || GS_instance_digest )`
-- `keystream = SHA-256( "PVUGC/DEM-SHA256/keystream" || K_i || AD_core )` with counter-based expansion as needed
+- `ad_digest = Poseidon2( "PVUGC/AD_COREv2" || len(AD_core)_le || AD_core )`
+- `keystream_block = Poseidon2( "PVUGC/DEM/keystream" || K_i || ad_digest || counter_le )`
 - `ct = pt ⊕ keystream`
-- `τ = SHA-256( "PVUGC/DEM-SHA256/tag" || K_i || AD_core || ct )`
+- `τ = Poseidon2( "PVUGC/DEM/tag" || K_i || ad_digest || ct )`
 
 All hashes MUST be domain‑separated with ASCII tags. Mixing profiles within a `ctx_hash` is forbidden (there is only one DEM profile in this document).
 
@@ -91,7 +92,7 @@ All hashes MUST be domain‑separated with ASCII tags. Mixing profiles within a 
 
 * `"PVUGC/CTX_CORE"`, `"PVUGC/ARM"`, `"PVUGC/PRESIG"`, `"PVUGC/CTX"` (inputs to H_bytes)
 * `"PVUGC/KEM/v1"` (profile tag)
-* `"PVUGC/AEAD-NONCE"` (reserved; not used in DEM-SHA256 profile)
+* `"PVUGC/AD_COREv2"`, `"PVUGC/DEM/keystream"`, `"PVUGC/DEM/tag"`, `"PVUGC/DEM-Poseidon-v1"`
 * `"BIP0340/challenge"` (BIP‑340 tagged hash)
 
 **MUST (Span independence in $\mathbb{G}_T$).** The target $R(\mathsf{vk},x) \in \mathbb{G}_T$ MUST be derived deterministically from ($\mathsf{vk}$,$x$) alone. Implementations MUST freeze ($\mathsf{vk}$,$x$) before arming and pin their digests in `GS_instance_digest`. Arming participants MUST have no influence over these derivations. Intuitively, $R(\mathsf{vk},x)$ MUST NOT lie in the public pairing span of $\{Y_j, [\delta]_2\}$ without the committed G₁ variables.
@@ -99,7 +100,7 @@ All hashes MUST be domain‑separated with ASCII tags. Mixing profiles within a 
 **Production Profile (MUST/SHOULD).**
 
 * **MUST:** BLS12‑381 as the pairing curve family.
-* **MUST:** DEM_PROFILE = "PVUGC/DEM-SHA256-v1". Mixing profiles within a `ctx_hash` is forbidden.
+* **MUST:** DEM_PROFILE = "PVUGC/DEM-Poseidon-v1". Mixing profiles within a `ctx_hash` is forbidden.
 * **SHOULD:** For enhanced security, implementations MAY verify multiple independent PPE formulations (logical AND). For AND‑of‑2, define $M_i^{\text{AND}} := \mathrm{ser}_{\mathbb{G}_T}(M_i^{(1)}) || \mathrm{ser}_{\mathbb{G}_T}(M_i^{(2)})$ and derive $K_i = \mathrm{SHA\text{-}256}( M_i^{\text{AND}} || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest} )$.
 * **SHOULD:** Enable Timeout/Abort with $\Delta$ chosen to cover proving+network latency.
 
@@ -277,7 +278,7 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 **PoCE-A (Arm-time verifiable encryption & mask-link, SNARK-friendly).** A NIZK proving, for share $i$:
 * Knowledge of $(\rho_i,s_i,h_i)$ s.t. (i) $D_j=Y_j^{\rho_i}$ for all $j \in [0,n_B-1]$, $D_\delta=[\delta]_2^{\rho_i}$; (ii) $T_i=s_iG$; (iii) $\rho\_\text{link}=H_\text{tag}(\rho_i)$.
 * Key derivation (in-circuit): If implemented inside a circuit, use a SNARK-friendly hash to bind $\mathrm{ser}_{\mathbb{G}_T}(R(\mathsf{vk},x)^{\rho_i})$, $H_\text{bytes}(\texttt{ctx\_hash})$, and $\texttt{GS\_instance\_digest}$. Out of circuit, this specification mandates SHA-256 as defined above.
-* DEM correctness (external): $\texttt{ct}_i = (s_i\|h_i) \oplus \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/keystream"} || K_i, \text{AD\_core})$ and $\tau_i = \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/tag"} || K_i, \text{AD\_core}, \texttt{ct}_i)$.
+* DEM correctness (external): $\texttt{ct}_i = (s_i\|h_i) \oplus \mathrm{Poseidon2}(\text{"PVUGC/DEM/keystream"} || K_i, \texttt{ad\_digest}, \text{ctr}_\text{le})$ and $\tau_i = \mathrm{Poseidon2}(\text{"PVUGC/DEM/tag"} || K_i, \texttt{ad\_digest}, \texttt{ct}_i)$ where $\texttt{ad\_digest} = \mathrm{Poseidon2}(\text{"PVUGC/AD\_COREv2"} || \text{len(AD\_core)}_\text{le} || \text{AD\_core})$.
 * $\rho_i\neq 0$ (via auxiliary $\rho_i\cdot u_i=1$)
 
 **MUST NOT aggregate exponents (per-share invariant).** Implementations MUST NOT combine multiple parties’ exponents into a single effective $\rho$ for any arming set or address computation. Each share $i$ carries its own $\rho_i$, its own arms $\{D_j\}$, $D_\delta$, and its own KEM header; the adaptor secret $\alpha = \sum s_i$ is independent of any $\sum\rho_i$.
@@ -294,7 +295,7 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 * Recompute $K_i' = \mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$
 * (P2) No AEAD nonce is used by the DEM; omit nonce.
 * Decrypt $\texttt{ct}_i$ with $K_i'$ and verify $T_i = s_iG$ and $H(s_i \| T_i \| i) = h_i$
-* Verify key-commit tag: $\tau_i = \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/tag"} || K_i', \text{AD\_core}, \texttt{ct}_i)$
+* Verify key-commit tag: $\tau_i = \mathrm{Poseidon2}(\text{"PVUGC/DEM/tag"} || K_i', \texttt{ad\_digest}, \texttt{ct}_i)$
 * **Note:** This is a decapper-local check (not publicly verifiable unless plaintext revealed)
 * **Shape check (MUST):** Before decryption, verify the lengths and ordering of $\{D_j\}$ and $D_\delta$ match `header_meta` exactly; mismatch ⇒ reject.
 
@@ -307,7 +308,7 @@ Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify fo
 
 **DEM (key‑committing):**
 
-* **Hash‑only DEM (SHA‑256)**: $\texttt{ct}_i=(s_i \| h_i)\oplus \mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/keystream"} || K_i,\text{AD\_core})$, $\tau_i=\mathrm{SHA\text{-}256}(\text{"PVUGC/DEM-SHA256/tag"} || K_i,\text{AD\_core},\texttt{ct}_i)$.
+* **Hash‑only DEM (Poseidon2)**: $\texttt{ct}_i=(s_i \| h_i)\oplus \mathrm{Poseidon2}(\text{"PVUGC/DEM/keystream"} || K_i,\texttt{ad\_digest},\text{ctr}_\text{le})$, $\tau_i=\mathrm{Poseidon2}(\text{"PVUGC/DEM/tag"} || K_i,\texttt{ad\_digest},\texttt{ct}_i)$ with $\texttt{ad\_digest} = \mathrm{Poseidon2}(\text{"PVUGC/AD\_COREv2"} || \text{len(AD\_core)}_\text{le} || \text{AD\_core})$.
 **Mandatory hygiene:** subgroup checks ($\mathbb{G}_1$, $\mathbb{G}_2$, $\mathbb{G}_T$), cofactor clearing, constant‑time pairings, constant‑time DEM decryption, strict encodings (reject non‑canonical), strict BIP‑340 canonical encodings for $R$ and $s$ (reject non‑canonical signatures), rejection sampling for derived scalars, fresh $\rho_i$, fresh $T$, fresh MuSig2 $R$.
 **Why PoCE is needed:** Without PoCE-A, a malicious armer could publish masks/ciphertexts not derived from the same $\rho_i$, breaking decrypt-on-proof soundness.
 

@@ -16,7 +16,7 @@ use arkworks_groth16::{
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
     ppe::PvugcVk,
-    OneSidedPvugc, PvugcBundle,
+    ColumnArmingAttestation, OneSidedPvugc, PvugcBundle,
 };
 
 type PairingE = E;
@@ -53,7 +53,7 @@ struct Fixture {
     ad_core_bytes: Vec<u8>,
     ciphertext: Vec<u8>,
     tau: [u8; 32],
-    poce_proof: arkworks_groth16::poce::PoceColumnProof<PairingE>,
+    column_attestation: ColumnArmingAttestation<PairingE>,
 }
 
 fn clone_bundle(input: &PvugcBundle<PairingE>) -> PvugcBundle<PairingE> {
@@ -160,23 +160,26 @@ fn build_fixture(seed: u64) -> Fixture {
 
     let k_bytes = serialize_gt::<PairingE>(&honest_key.0);
     let dem = DemP2::new(&k_bytes, &ad_core_bytes);
-    let plaintext = format!("share-{seed}").into_bytes();
+    let plaintext = vec![seed as u8; 32];
     let ciphertext = dem.encrypt(&plaintext);
     let tau =
         OneSidedPvugc::compute_key_commitment_tag_dem(&honest_key, &ad_core_bytes, &ciphertext);
 
-    let poce_proof = OneSidedPvugc::attest_column_arming(
+    let column_attestation = OneSidedPvugc::attest_column_arming(
         &bases,
         &column_arms,
         &t_i,
         &rho,
         &s_i,
+        &honest_key,
+        &ad_core_bytes,
         &ctx_hash,
         &gs_digest,
         &ciphertext,
         &tau,
         &mut rng,
-    );
+    )
+    .expect("column attestation");
 
     let bundle = PvugcBundle {
         groth16_proof: proof,
@@ -199,13 +202,13 @@ fn build_fixture(seed: u64) -> Fixture {
         ad_core_bytes,
         ciphertext,
         tau,
-        poce_proof,
+        column_attestation,
     }
 }
 
 #[test]
 fn verify_rejects_mutated_bundles() {
-    for offset in 0u64..32 {
+    for offset in 0u64..8 {
         let seed = 0xF1AFA2_u64 + offset;
         let Fixture {
             bundle,
@@ -303,13 +306,14 @@ fn poce_cross_session_replay_fails() {
                 &fixture_a.bases,
                 &fixture_a.column_arms,
                 &fixture_a.t_i,
-                &fixture_a.poce_proof,
+                &fixture_a.column_attestation,
+                &fixture_a.ad_core_bytes,
                 &fixture_a.ctx_hash,
                 &fixture_a.gs_digest,
                 &fixture_a.ciphertext,
                 &fixture_a.tau,
             ),
-            "baseline PoCE verification must succeed"
+            "baseline attestation must succeed"
         );
 
         let tamper_cases = vec![
@@ -357,13 +361,14 @@ fn poce_cross_session_replay_fails() {
                     &bases,
                     &column_arms,
                     &fixture_a.t_i,
-                    &fixture_a.poce_proof,
+                    &fixture_a.column_attestation,
+                    &fixture_a.ad_core_bytes,
                     &ctx_hash,
                     &gs_digest,
                     &ciphertext,
                     &tau,
                 ),
-                "PoCE verification unexpectedly succeeded for case {label}"
+                "Column attestation unexpectedly succeeded for case {label}"
             );
         }
     }

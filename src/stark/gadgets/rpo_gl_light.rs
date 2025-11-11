@@ -246,8 +246,8 @@ pub fn canonicalize_gl_to_u64_light(
     gl_val: &GlVar,
 ) -> Result<UInt64GLVar, SynthesisError> {
     use super::gl_range::gl_alloc_u64;
-    use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
     use crate::stark::gl_u64::fr_to_gl_u64;
+    use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
     let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
     let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
     enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;

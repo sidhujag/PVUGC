@@ -590,7 +590,9 @@ fn test_adversarial_low_pow_nonce() {
     );
     let mut target_gf = proof.options().grinding_factor();
     // If GF is zero in options, force a non-zero target for this adversarial test
-    if target_gf == 0 { target_gf = 4; }
+    if target_gf == 0 {
+        target_gf = 4;
+    }
     // Find a violating nonce with a hard cap to avoid long loops.
     let mut bad_nonce = proof.pow_nonce;
     let mut found = false;

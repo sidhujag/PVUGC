@@ -5,13 +5,16 @@ use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::One;
 use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
 
+use crate::adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
 use crate::arming::{arm_columns, ColumnArms, ColumnBases};
+use crate::ct::{serialize_gt, DemP2};
 use crate::dlrep::{verify_b_msm, verify_ties_per_column};
 use crate::error::{Error, Result as PvugcResult};
 use crate::poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
 use crate::ppe::validate_groth16_vk_subgroups;
 pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
 use crate::{compute_groth16_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 
 /// Complete PVUGC bundle
@@ -20,6 +23,18 @@ pub struct PvugcBundle<E: Pairing> {
     pub dlrep_b: DlrepBProof<E>,
     pub dlrep_ties: DlrepPerColumnTies<E>,
     pub gs_commitments: OneSidedCommitments<E>,
+}
+
+#[derive(Clone, Debug, CanonicalSerialize, CanonicalDeserialize)]
+pub struct ColumnArmingAttestation<E: Pairing> {
+    pub poce: PoceColumnProof<E>,
+    pub ve: AdaptorVeProof,
+}
+
+impl<E: Pairing> ColumnArmingAttestation<E> {
+    fn new(poce: PoceColumnProof<E>, ve: AdaptorVeProof) -> Self {
+        Self { poce, ve }
+    }
 }
 
 /// Optional verification limits
@@ -83,20 +98,22 @@ impl OneSidedPvugc {
     /// Produce PoCE-A attestation for column arming (arm-time)
     ///
     /// Proves that all column arms share the same ρ and ciphertext is key-committed
-    /// to K derived from R^ρ via DEM-SHA256 KDF binding ctx_hash and GS digest
+    /// to K derived from R^ρ via Poseidon-based DEM binding ctx_hash and GS digest
     pub fn attest_column_arming<E: Pairing, R: RngCore + rand_core::CryptoRng>(
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
-        t_i: &E::G1Affine,    // T_i = s_i G
-        rho: &E::ScalarField, // ρ_i (secret)
-        s_i: &E::ScalarField, // s_i (secret)
-        ctx_hash: &[u8],      // Context hash
-        gs_digest: &[u8],     // GS instance digest
-        ct_i: &[u8],          // Ciphertext bytes (published)
-        tau_i: &[u8],         // Key-commitment tag bytes (published)
+        t_i: &E::G1Affine,               // T_i = s_i G
+        rho: &E::ScalarField,            // ρ_i (secret)
+        s_i: &E::ScalarField,            // s_i (secret)
+        expected_key: &PairingOutput<E>, // R^ρ derived during setup
+        ad_core: &[u8],                  // Serialized AD_core (for digest)
+        ctx_hash: &[u8],                 // Context hash
+        gs_digest: &[u8],                // GS instance digest
+        ct_i: &[u8],                     // Ciphertext bytes (published)
+        tau_i: &[u8],                    // Key-commitment tag bytes (published)
         rng: &mut R,
-    ) -> PoceColumnProof<E> {
-        prove_poce_column::<E, R>(
+    ) -> PvugcResult<ColumnArmingAttestation<E>> {
+        let poce = prove_poce_column::<E, R>(
             &bases.y_cols,
             &bases.delta,
             &col_arms.y_cols_rho,
@@ -109,7 +126,14 @@ impl OneSidedPvugc {
             ct_i,
             tau_i,
             rng,
-        )
+        );
+
+        let key_bytes = serialize_gt::<E>(&expected_key.0);
+        let dem = DemP2::new(&key_bytes, ad_core);
+        let plaintext = dem.decrypt(ct_i);
+        let ve = prove_adaptor_ve(&key_bytes, ad_core, ct_i, tau_i, &plaintext)?;
+
+        Ok(ColumnArmingAttestation::new(poce, ve))
     }
 
     /// Verify PoCE-A attestation for column arming (arm-time)
@@ -117,7 +141,8 @@ impl OneSidedPvugc {
         bases: &ColumnBases<E>,
         col_arms: &ColumnArms<E>,
         t_i: &E::G1Affine, // T_i = s_i G
-        proof: &PoceColumnProof<E>,
+        attestation: &ColumnArmingAttestation<E>,
+        ad_core: &[u8],
         ctx_hash: &[u8],  // Context hash
         gs_digest: &[u8], // GS instance digest
         ct_i: &[u8],      // Ciphertext bytes (published)
@@ -160,23 +185,28 @@ impl OneSidedPvugc {
             }
         }
 
-        verify_poce_column::<E>(
+        let poce_ok = verify_poce_column::<E>(
             &bases.y_cols,
             &bases.delta,
             &col_arms.y_cols_rho,
             &col_arms.delta_rho,
             t_i,
-            proof,
+            &attestation.poce,
             ctx_hash,
             gs_digest,
             ct_i,
             tau_i,
-        )
+        );
+        if !poce_ok {
+            return false;
+        }
+
+        verify_adaptor_ve(&attestation.ve, ad_core, ct_i, tau_i)
     }
 
     /// Verify PoCE-B key-commitment (decap-time, decapper-local)
     ///
-    /// Verifies that ciphertext is key-committed to the derived key using DEM-SHA256
+    /// Verifies that ciphertext is key-committed to the derived key using DEM-Poseidon
     pub fn verify_key_commitment<E: Pairing>(
         derived_m: &PairingOutput<E>, // R^ρ derived from attestation
         ctx_hash: &[u8],              // Context hash
@@ -185,7 +215,7 @@ impl OneSidedPvugc {
         tau_i: &[u8],                 // Key-commitment tag
     ) -> bool {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
-        // Combine ctx_hash and gs_digest to form AD_core for DEM-SHA256
+        // Combine ctx_hash and gs_digest to form AD_core for DEM-Poseidon
         let mut ad_core = Vec::new();
         ad_core.extend_from_slice(ctx_hash);
         ad_core.extend_from_slice(gs_digest);
@@ -202,7 +232,7 @@ impl OneSidedPvugc {
 
     /// Compute PoCE-B key-commitment tag for a ciphertext (deposit-time helper)
     ///
-    /// τ = SHA-256("PVUGC/DEM-SHA256/tag" || K || AD_core || ct), where K is derived from R^ρ
+    /// τ = Poseidon("PVUGC/DEM/tag" || K || ad_digest || ct), where K is derived from R^ρ
     pub fn compute_key_commitment_tag_for_ciphertext<E: Pairing>(
         derived_m: &PairingOutput<E>,
         ctx_hash: &[u8],
@@ -210,7 +240,7 @@ impl OneSidedPvugc {
         ciphertext: &[u8],
     ) -> Vec<u8> {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
-        // Combine ctx_hash and gs_digest to form AD_core for DEM-SHA256
+        // Combine ctx_hash and gs_digest to form AD_core for DEM-Poseidon
         let mut ad_core = Vec::new();
         ad_core.extend_from_slice(ctx_hash);
         ad_core.extend_from_slice(gs_digest);
@@ -436,8 +466,8 @@ impl OneSidedPvugc {
         PairingOutput(r_to_rho)
     }
 
-    /// Encrypt using derived key K (PairingOutput) with DEM-SHA256
-    /// Per spec §8: ct_i = (s_i || h_i) ⊕ SHA-256("PVUGC/DEM-SHA256/keystream" || K_i || AD_core)
+    /// Encrypt using derived key K (PairingOutput) with DEM-Poseidon.
+    /// Per spec §8: keystream = Poseidon("PVUGC/DEM/keystream" || K_i || ad_digest || counter_le)
     ///
     /// Returns: (ciphertext) encrypted plaintext
     pub fn encrypt_with_key_dem<E: Pairing>(
@@ -450,8 +480,8 @@ impl OneSidedPvugc {
         Ok(dem.encrypt(plaintext))
     }
 
-    /// Decrypt using derived key K (PairingOutput) with DEM-SHA256
-    /// Per spec §8: pt = ct ⊕ SHA-256("PVUGC/DEM-SHA256/keystream" || K_i || AD_core)
+    /// Decrypt using derived key K (PairingOutput) with DEM-Poseidon
+    /// Per spec §8: pt = ct ⊕ Poseidon("PVUGC/DEM/keystream" || K_i || ad_digest || counter_le)
     pub fn decrypt_with_key_dem<E: Pairing>(
         derived_m: &PairingOutput<E>,
         ad_core: &[u8],
@@ -462,7 +492,7 @@ impl OneSidedPvugc {
         Ok(dem.decrypt(ciphertext))
     }
 
-    /// Compute key-commitment tag τ_i per spec §8:286 (DEM-SHA256)
+    /// Compute key-commitment tag τ_i per spec §8:286 (DEM-Poseidon)
     pub fn compute_key_commitment_tag_dem<E: Pairing>(
         derived_m: &PairingOutput<E>,
         ad_core: &[u8],

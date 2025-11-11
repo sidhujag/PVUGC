@@ -35,7 +35,7 @@ use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
-use arkworks_groth16::ct::AdCore;
+use arkworks_groth16::ct::{serialize_gt, AdCore, DemP2};
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::{OneSidedCommitments, OneSidedPvugc, PvugcBundle};
 
@@ -557,7 +557,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     let ctx_hash = bridge_context.context_hash();
     let gs_digest = bridge_context.gs_digest(&encoded_x(&adaptor_point), adaptor_y_is_even);
 
-    // Context binding per spec §3 (DEM-SHA256 AD_core requires vk_hash and x_hash)
+    // Context binding per spec §3 (DEM-Poseidon AD_core requires vk_hash and x_hash)
     let mut vk_bytes = Vec::new();
     vk.serialize_compressed(&mut vk_bytes)
         .expect("serialize vk");
@@ -826,7 +826,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         let ad_bytes = ad_core.serialize();
         let ciphertext =
             OneSidedPvugc::encrypt_with_key_dem(&operator.expected_key, &ad_bytes, &share_bytes)
-                .expect("encrypt share (DEM-SHA256)");
+                .expect("encrypt share (DEM-Poseidon)");
         let tau = OneSidedPvugc::compute_key_commitment_tag_dem(
             &operator.expected_key,
             &ad_bytes,
@@ -836,23 +836,27 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         // Use pairing-curve (s_i, T_i) for PoCE-A; Bitcoin's secp256k1 PoK is orthogonal
         let s_i_pairing = Fr::rand(&mut rng);
         let t_i_pairing = (<E as Pairing>::G1::generator() * s_i_pairing).into_affine();
-        let poce_proof = OneSidedPvugc::attest_column_arming(
+        let column_attestation = OneSidedPvugc::attest_column_arming(
             &bases,
             &operator.column_arms,
             &t_i_pairing,
             &rhos[idx],
             &s_i_pairing,
+            &operator.expected_key,
+            &ad_bytes,
             &ctx_hash_final,
             &gs_digest,
             &ciphertext,
             &tau,
             &mut rng,
-        );
+        )
+        .expect("column attestation");
         assert!(OneSidedPvugc::verify_column_arming(
             &bases,
             &operator.column_arms,
             &t_i_pairing,
-            &poce_proof,
+            &column_attestation,
+            &ad_bytes,
             &ctx_hash_final,
             &gs_digest,
             &ciphertext,
@@ -1352,6 +1356,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
 
     // Arming
     let mut operator_armings = Vec::new();
+    let mut expected_keys = Vec::new();
     let mut rhos: Vec<Fr> = Vec::new();
     for _ in &participants {
         let share = loop {
@@ -1364,16 +1369,31 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         let commitment = AffinePoint::from(ProjectivePoint::GENERATOR * share);
         let rho = Fr::rand(&mut rng);
         rhos.push(rho);
-        let (_bases, col_arms, _r, _k) =
+        let (_bases, col_arms, _r, k) =
             OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho).unwrap();
         operator_armings.push((share, commitment, col_arms));
+        expected_keys.push(k);
     }
 
     // Minimal bindings for challenge inputs
     let ctx_hash = [0u8; 32];
     let gs_digest = [1u8; 32];
-    let ciphertext = vec![2u8; 16];
-    let tau = [3u8; 32];
+    let ad_core = AdCore::new(
+        [0u8; 32],
+        [0u8; 32],
+        ctx_hash,
+        [9u8; 32],
+        0xc0,
+        Vec::new(),
+        "compute",
+        0,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        gs_digest,
+    );
+    let ad_bytes = ad_core.serialize();
 
     // Evaluate PoK and PoCE-A for all operators; gate pre-sign on all passing
     let mut pok_ok = vec![false; participants.len()];
@@ -1403,23 +1423,33 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         } else {
             rhos[i]
         };
-        let poce_proof = OneSidedPvugc::attest_column_arming(
+        let key = &expected_keys[i];
+        let key_bytes = serialize_gt::<E>(&key.0);
+        let plaintext = scalar_to_bytes(share);
+        let dem = DemP2::new(&key_bytes, &ad_bytes);
+        let ciphertext = dem.encrypt(&plaintext);
+        let tau = OneSidedPvugc::compute_key_commitment_tag_dem(key, &ad_bytes, &ciphertext);
+        let column_attestation = OneSidedPvugc::attest_column_arming(
             &bases,
             col_arms,
             &t_i_pairing,
             &rho_use,
             &s_i_pairing,
+            key,
+            &ad_bytes,
             &ctx_hash,
             &gs_digest,
             &ciphertext,
             &tau,
             &mut rng,
-        );
+        )
+        .expect("column attestation");
         poce_ok[i] = OneSidedPvugc::verify_column_arming(
             &bases,
             col_arms,
             &t_i_pairing,
-            &poce_proof,
+            &column_attestation,
+            &ad_bytes,
             &ctx_hash,
             &gs_digest,
             &ciphertext,

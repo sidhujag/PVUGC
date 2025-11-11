@@ -14,6 +14,7 @@
 //! architectures that could provide constant-size scalability. See the
 //! test_recursive_demo test for details.
 
+pub mod adaptor_ve;
 pub mod api;
 pub mod arming;
 pub mod bitcoin;
@@ -25,6 +26,7 @@ pub mod dlrep;
 pub mod error;
 pub mod io;
 pub mod poce;
+mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
 
 // Recursive demonstration modules (not for production use)
@@ -44,7 +46,8 @@ pub mod stark;
 pub use stark::{AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness};
 
 // Re-exports - Public API
-pub use api::{OneSidedPvugc, PvugcBundle};
+pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
+pub use api::{ColumnArmingAttestation, OneSidedPvugc, PvugcBundle};
 pub use arming::{arm_columns, ColumnArms, ColumnBases};
 pub use coeff_recorder::{BCoefficients, CoefficientRecorder, SimpleCoeffRecorder};
 pub use decap::OneSidedCommitments;
