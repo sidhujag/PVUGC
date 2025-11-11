@@ -5,7 +5,7 @@
 //! `K = R^ρ`, without revealing either `K` or the decrypted adaptor scalar.
 //! Public inputs exposed by the proof are:
 //!   * `h_k = Poseidon("PVUGC/VE/hk" || K_bytes)`
-//!   * `ad_digest = Poseidon("PVUGC/AD_COREv2" || len || ad_core_bytes)`
+//!   * `ad_digest = Poseidon("PVUGC/AD_CORE" || len || ad_core_bytes)`
 //!   * `ciphertext` bytes
 //!   * `tau` (DEM tag)
 //!   * `h_m = Poseidon("PVUGC/VE/hm" || plaintext)`

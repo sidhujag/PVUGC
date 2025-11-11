@@ -23,7 +23,7 @@ use core::convert::TryInto;
 use subtle::ConstantTimeEq;
 
 const DEM_PROFILE_ID: &[u8] = b"PVUGC/DEM-Poseidon-v1";
-const AD_CORE_HASH_DOMAIN: &[u8] = b"PVUGC/AD_COREv2";
+const AD_CORE_HASH_DOMAIN: &[u8] = b"PVUGC/AD_CORE";
 const DEM_KEYSTREAM_DOMAIN: &[u8] = b"PVUGC/DEM/keystream";
 const DEM_TAG_DOMAIN: &[u8] = b"PVUGC/DEM/tag";
 
@@ -220,7 +220,7 @@ pub fn verify_key_commitment(
 
 /// Domain-separated digest of `ad_core`.
 ///
-/// ad_digest = Poseidon2("PVUGC/AD_COREv2" || len(ad_core)_le || ad_core)
+/// ad_digest = Poseidon2("PVUGC/AD_CORE" || len(ad_core)_le || ad_core)
 pub fn ad_core_digest(ad_core: &[u8]) -> [u8; 32] {
     let mut sponge = PoseidonSponge::<Fr>::new(&POSEIDON381_PARAMS_T3_V1);
     absorb_bytes_native_fr(&mut sponge, AD_CORE_HASH_DOMAIN);
