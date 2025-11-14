@@ -57,15 +57,17 @@ fuzz_target!(|data: &[u8]| {
     let circuit = SqCircuit { x: Some(x), y: Some(y) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+    let statement = vec![x];
 
     let mut rec = SimpleCoeffRecorder::<E>::new();
+    rec.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec).unwrap();
     let mut commitments = rec.build_commitments();
-    let dlrep_b = rec.create_dlrep_b(&pvugc_vk, &mut rng);
+    let dlrep_b = rec.create_dlrep_b(&pvugc_vk, &vk, &statement, &mut rng);
     let dlrep_ties = rec.create_dlrep_ties(&mut rng);
 
     let bundle = PvugcBundle { groth16_proof: proof, dlrep_b, dlrep_ties, gs_commitments: commitments.clone() };
-    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x]));
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement));
 
     // Linear recombination of two rows (if available): C'_0 = a*C_0 + b*C_1
     if commitments.x_b_cols.len() < 2 { return; }
@@ -101,7 +103,7 @@ fuzz_target!(|data: &[u8]| {
     let forged_ties = DlrepPerColumnTies { commitments_g1, responses };
 
     let bundle_forged = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_ties: forged_ties, gs_commitments: commitments };
-    if OneSidedPvugc::verify(&bundle_forged, &pvugc_vk, &vk, &[x]) {
+    if OneSidedPvugc::verify(&bundle_forged, &pvugc_vk, &vk, &statement) {
         panic!("Linear recombination with forged tie accepted");
     }
 });

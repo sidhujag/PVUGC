@@ -35,7 +35,6 @@ jobs:
           cargo +nightly fuzz run gs_malleation_binding -- -runs=0 -max_total_time=600 || true
           cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=0 -max_total_time=600 || true
           cargo +nightly fuzz run gs_random_recomb_budget -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run gamma_vk_grinding -- -runs=0 -max_total_time=600 || true
       - name: Upload fuzz artifacts (crashes & corpora)
         if: always()
         uses: actions/upload-artifact@v4

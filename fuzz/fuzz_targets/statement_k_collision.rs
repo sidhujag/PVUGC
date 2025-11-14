@@ -77,11 +77,13 @@ fuzz_target!(|data: &[u8]| {
     let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
 
 
-    // Canonical column setup once (arms independent of x)
-    let (_bases_cols, col_arms, _r, _k) = OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &[x1], &rho)
-        .expect("setup_and_arm");
-    let r1 = compute_groth16_target::<E>(&vk, &[x1]).expect("compute_groth16_target");
-    let r2 = compute_groth16_target::<E>(&vk, &[x2]).expect("compute_groth16_target");
+    // Canonical column setup for statement 1
+    let statement1 = vec![x1];
+    let statement2 = vec![x2];
+    let (_bases_cols, col_arms, _r, _k) =
+        OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &statement1, &rho).expect("setup_and_arm");
+    let r1 = compute_groth16_target::<E>(&vk, &statement1).expect("compute_groth16_target");
+    let r2 = compute_groth16_target::<E>(&vk, &statement2).expect("compute_groth16_target");
 
     // Take k1 = r1^rho and k2 = r2^rho; then assert k1 != k2 for x1 != x2.
     let k1 = OneSidedPvugc::compute_r_to_rho::<E>(&r1, &rho);
@@ -98,6 +100,7 @@ fuzz_target!(|data: &[u8]| {
         let mut rng2 = ark_std::rand::rngs::StdRng::seed_from_u64(u64::from_le_bytes(s2b));
         // Proof 1 for x1
         let mut rec1 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
+        rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
         let proof1 = Groth16::<E>::create_random_proof_with_hook(
             SqCircuit { x: Some(x1), y: Some(y1) },
             &pk,
@@ -105,8 +108,16 @@ fuzz_target!(|data: &[u8]| {
             &mut rec1,
         ).unwrap();
         let commitments1: OneSidedCommitments<E> = rec1.build_commitments();
-        // Proof 2 for x2
+        let kd1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
+        if kd1 != k1 {
+            panic!("Decap mismatch for statement 1");
+        }
+        // Setup and proof for statement 2 with its own arms
+        let (_bases_cols2, col_arms2, _r2, _k2_setup) =
+            OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &statement2, &rho)
+                .expect("setup_and_arm for stmt2");
         let mut rec2 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
+        rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
         let proof2 = Groth16::<E>::create_random_proof_with_hook(
             SqCircuit { x: Some(x2), y: Some(y2) },
             &pk,
@@ -114,9 +125,13 @@ fuzz_target!(|data: &[u8]| {
             &mut rec2,
         ).unwrap();
         let commitments2: OneSidedCommitments<E> = rec2.build_commitments();
-        let kd1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
-        let kd2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms).expect("decapsulate");
-        if kd1 == kd2 { panic!("Decap collision across different statements"); }
+        let kd2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms2).expect("decapsulate");
+        if kd2 != k2 {
+            panic!("Decap mismatch for statement 2");
+        }
+        if kd1 == kd2 {
+            panic!("Decap collision across different statements");
+        }
         let _ = (proof1, proof2);
     }
 });

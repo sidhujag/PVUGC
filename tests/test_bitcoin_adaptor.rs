@@ -471,6 +471,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
 
     // === Proving system setup ===
     let public_input = Fr::from(25u64);
+    let statement_x = vec![public_input];
     let witness = Fr::from(5u64);
     let circuit = SquareCircuit {
         x: Some(public_input),
@@ -485,14 +486,8 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     };
 
     // Shared column bases for PoCE-A attest/verify
-    let bases = {
-        let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        arkworks_groth16::arming::ColumnBases::<E> {
-            y_cols,
-            delta: pvugc_vk.delta_g2,
-        }
-    };
+    let bases =
+        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
 
     // === Phase A: pre-arming and registration ===
     let bridge_context = BridgeContext {
@@ -535,7 +530,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         let rho = Fr::rand(&mut rng);
         rhos.push(rho);
         let (_bases, col_arms, _r, expected_key) =
-            OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho).unwrap();
+            OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &statement_x, &rho).unwrap();
 
         operator_armings.push(OperatorArming {
             participant: participant.clone(),
@@ -955,13 +950,14 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
 
     // === Phase C: proof, decapsulation and spend ===
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
             .unwrap();
     let commitments = commitments_from_recorder(&recorder);
     let bundle = PvugcBundle {
         groth16_proof: proof.clone(),
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement_x, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
@@ -969,7 +965,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         &bundle,
         &pvugc_vk,
         &vk,
-        &[public_input]
+        &statement_x
     ));
 
     let mut recovered_shares = Vec::new();
@@ -1214,6 +1210,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         y: Some(wrong_witness),
     };
     let mut wrong_recorder = SimpleCoeffRecorder::<E>::new();
+    wrong_recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _wrong_proof = Groth16::<E>::create_random_proof_with_hook(
         wrong_circuit,
         &pk,
@@ -1337,14 +1334,9 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
     };
 
     // Shared column bases for PoCE-A
-    let bases = {
-        let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        arkworks_groth16::arming::ColumnBases::<E> {
-            y_cols,
-            delta: pvugc_vk.delta_g2,
-        }
-    };
+    let statement_x = vec![public_input];
+    let bases =
+        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("build_column_bases");
 
     // Participants
     let mut participants = vec![
@@ -1370,7 +1362,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         let rho = Fr::rand(&mut rng);
         rhos.push(rho);
         let (_bases, col_arms, _r, k) =
-            OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho).unwrap();
+            OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &statement_x, &rho).unwrap();
         operator_armings.push((share, commitment, col_arms));
         expected_keys.push(k);
     }
@@ -1486,26 +1478,22 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
 
     // Build bases and a valid commitments bundle for the statement
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _proof =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
             .unwrap();
     let commitments = commitments_from_recorder(&recorder);
-    let mut y_cols = vec![pvugc_vk.beta_g2];
-    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-    assert_eq!(commitments.x_b_cols.len(), y_cols.len());
-
-    // Shared bases
-    let bases = arkworks_groth16::arming::ColumnBases::<E> {
-        y_cols,
-        delta: pvugc_vk.delta_g2,
-    };
+    let statement_x = vec![public_input];
+    let bases =
+        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
+    assert_eq!(commitments.x_b_cols.len(), bases.y_cols.len());
 
     // Construct a malicious operator with mismatched (arms rho) vs (encryption key rho)
     let rho_right = Fr::rand(&mut rng);
     let rho_wrong = rho_right + Fr::from(1u64);
     // Use API to get R and the correct key K_right = R^{rho_right}
     let (_bases_tmp, _col_arms_right, _r_target, k_right) =
-        OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &[public_input], &rho_right).unwrap();
+        OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &statement_x, &rho_right).unwrap();
     // Publish wrong arms using rho_wrong
     let col_arms_wrong =
         arkworks_groth16::arming::arm_columns(&bases, &rho_wrong).expect("arm_columns");

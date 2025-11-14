@@ -3,7 +3,7 @@
 //! to ensure the verifier rejects manipulated artifacts.
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
-use ark_ec::{pairing::Pairing, CurveGroup, PrimeGroup};
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::CanonicalSerialize;
@@ -12,7 +12,7 @@ use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
-    coeff_recorder::SimpleCoeffRecorder,
+    coeff_recorder::{BCoefficients, SimpleCoeffRecorder},
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
     ppe::PvugcVk,
@@ -44,6 +44,7 @@ struct Fixture {
     pvugc_vk: PvugcVk<PairingE>,
     vk: ark_groth16::VerifyingKey<PairingE>,
     public_inputs: Vec<Fr>,
+    coeffs: BCoefficients<Fr>,
     column_arms: arkworks_groth16::arming::ColumnArms<PairingE>,
     honest_key: ark_ec::pairing::PairingOutput<PairingE>,
     bases: arkworks_groth16::arming::ColumnBases<PairingE>,
@@ -111,6 +112,7 @@ fn build_fixture(seed: u64) -> Fixture {
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho).unwrap();
 
     let mut recorder = SimpleCoeffRecorder::<PairingE>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<PairingE>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
             .unwrap();
@@ -121,7 +123,14 @@ fn build_fixture(seed: u64) -> Fixture {
 
     let vk_hash = derive_label(seed, b"vk_hash");
     let x_hash = derive_label(seed, b"x_hash");
-    let y_cols_digest = derive_label(seed, b"y_cols_digest");
+    let mut y_cols_hasher = Sha256::new();
+    y_cols_hasher.update(b"PVUGC/YCOLS");
+    for col in &bases.y_cols {
+        let mut buf = Vec::new();
+        col.serialize_compressed(&mut buf).unwrap();
+        y_cols_hasher.update(&buf);
+    }
+    let y_cols_digest: [u8; 32] = y_cols_hasher.finalize().into();
     let epoch_nonce = derive_label(seed, b"epoch_nonce");
     let tapleaf_hash = derive_label(seed, b"tapleaf_hash");
     let gs_digest = derive_label(seed, b"gs_digest");
@@ -181,12 +190,44 @@ fn build_fixture(seed: u64) -> Fixture {
     )
     .expect("column attestation");
 
+    let coeffs = recorder
+        .get_coefficients()
+        .expect("coefficients must be recorded");
+
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_inputs, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
+    let mut actual_public_leg = pvugc_vk.beta_g2.into_group();
+    actual_public_leg += pvugc_vk.b_g2_query[0].into_group();
+    for (idx, coeff) in coeffs.b.iter().take(public_inputs.len()).enumerate() {
+        let base = pvugc_vk.b_g2_query[1 + idx];
+        actual_public_leg += base.into_group() * coeff;
+    }
+    assert_eq!(
+        actual_public_leg.into_affine(),
+        bases.y_cols[0],
+        "column bases public leg mismatch"
+    );
+
+    // Sanity: reconstruct B directly from recorded coefficients
+    let mut reconstructed_b = pvugc_vk.beta_g2.into_group();
+    reconstructed_b += pvugc_vk.b_g2_query[0].into_group(); // implicit 1-wire
+    for (coeff, base) in coeffs
+        .b
+        .iter()
+        .zip(pvugc_vk.b_g2_query.iter().skip(1))
+    {
+        reconstructed_b += base.into_group() * coeff;
+    }
+    reconstructed_b += pvugc_vk.delta_g2.into_group() * coeffs.s;
+    assert_eq!(
+        reconstructed_b.into_affine(),
+        bundle.groth16_proof.b,
+        "hooked coefficients failed to reassemble B"
+    );
 
     Fixture {
         bundle,
@@ -203,6 +244,7 @@ fn build_fixture(seed: u64) -> Fixture {
         ciphertext,
         tau,
         column_attestation,
+        coeffs,
     }
 }
 
@@ -217,12 +259,67 @@ fn verify_rejects_mutated_bundles() {
             public_inputs,
             column_arms,
             honest_key,
+            bases,
+            coeffs,
             ..
         } = build_fixture(seed);
 
         assert!(
-            OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs),
-            "baseline bundle must verify"
+            Groth16::<PairingE>::verify(&vk, &public_inputs, &bundle.groth16_proof).unwrap(),
+            "baseline Groth16 proof must verify"
+        );
+        let public_leg = bases
+            .y_cols
+            .first()
+            .expect("column bases must include public leg");
+        let witness_cols = &bases.y_cols[1..];
+        let b_prime = (bundle.groth16_proof.b.into_group() - public_leg.into_group()).into_affine();
+        let mut reconstructed = pvugc_vk.delta_g2.into_group() * coeffs.s;
+        let public_count = vk.gamma_abc_g1.len().saturating_sub(1);
+        for (coeff, base) in coeffs.b.iter().skip(public_count).zip(witness_cols.iter()) {
+            reconstructed += base.into_group() * coeff;
+        }
+        assert_eq!(
+            reconstructed.into_affine(),
+            b_prime,
+            "reconstructed B' mismatch"
+        );
+        assert_eq!(
+            bundle.dlrep_b.responses.len(),
+            witness_cols.len() + 1,
+            "dlrep response length mismatch"
+        );
+        assert!(
+            arkworks_groth16::dlrep::verify_b_msm::<PairingE>(
+                b_prime,
+                witness_cols,
+                pvugc_vk.delta_g2,
+                &bundle.dlrep_b
+            ),
+            "baseline DLREP_B must verify"
+        );
+        let mut x_cols = Vec::new();
+        for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            x_cols.push(*x0);
+        }
+        assert!(
+            arkworks_groth16::dlrep::verify_ties_per_column::<PairingE>(
+                bundle.groth16_proof.a,
+                &x_cols,
+                &bundle.dlrep_ties,
+                bundle.dlrep_b.commitment
+            ),
+            "baseline tie proof must verify"
+        );
+        let baseline_ok = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs);
+        assert!(
+            baseline_ok,
+            "baseline bundle must verify (|X|={}, |Y|={})",
+            bundle.gs_commitments.x_b_cols.len(),
+            column_arms.y_cols_rho.len(),
         );
         let expected_key =
             OneSidedPvugc::decapsulate(&bundle.gs_commitments, &column_arms).expect("decap");

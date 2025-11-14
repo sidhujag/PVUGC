@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 ///
 /// Architecture:
 /// ```text
-/// y_cols_digest = H_bytes("PVUGC/YCOLS" || ser([β]_2) || ser(b_g2_query[..]))
+/// y_cols_digest = H_bytes("PVUGC/YCOLS" || ser(B_pub(vk,x)) || ser(b_g2_query[witness-only]))
 /// epoch_nonce = CSPRNG(32 bytes)  // unique per instance, MUST NOT reuse
 ///
 /// ctx_core = H_bytes("PVUGC/CTX_CORE" || vk_hash || H(x) || tapleaf_hash

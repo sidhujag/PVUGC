@@ -10,6 +10,7 @@ use ark_ec::pairing::Pairing;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::Field;
 use ark_groth16::pvugc_hook::PvugcCoefficientHook;
+use ark_groth16::VerifyingKey as Groth16VK;
 
 /// Coefficients extracted from Groth16 prover
 pub struct BCoefficients<F: Field> {
@@ -29,6 +30,7 @@ pub struct SimpleCoeffRecorder<E: Pairing> {
     s: Option<E::ScalarField>,
     c: Option<E::G1Affine>,            // For C-side (will be negated)
     b_commitment: Option<E::G2Affine>, // DLREP_B commitment for joint binding
+    num_instance_variables: Option<usize>,
 }
 
 impl<E: Pairing> SimpleCoeffRecorder<E> {
@@ -39,7 +41,18 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             s: None,
             c: None,
             b_commitment: None,
+            num_instance_variables: None,
         }
+    }
+
+    /// Record number of instance (public) variables (including 1-wire)
+    pub fn set_num_instance_variables(&mut self, num: usize) {
+        self.num_instance_variables = Some(num);
+    }
+
+    fn instance_variable_count(&self) -> usize {
+        self.num_instance_variables
+            .expect("num_instance_variables must be set before use")
     }
 
     /// Check if A was recorded
@@ -55,14 +68,24 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         use crate::dlrep::prove_ties_per_column;
         let a = self.a.expect("A not recorded");
         let a_g = a.into_group();
-        // x_cols correspond to variable columns only (aligned with b_g2_query[1..])
-        let x_cols: Vec<E::G1Affine> = self
-            .b_coeffs
+        let num_instance = self.instance_variable_count();
+        let public_count = num_instance.saturating_sub(1);
+        assert!(
+            public_count <= self.b_coeffs.len(),
+            "num_instance_variables exceeds coefficient count"
+        );
+        let x_cols: Vec<E::G1Affine> = self.b_coeffs[public_count..]
             .iter()
             .map(|b| (a_g * b).into_affine())
             .collect();
         let b_commitment = self.b_commitment.expect("DLREP_B commitment not recorded");
-        prove_ties_per_column(a, &x_cols, &self.b_coeffs, b_commitment, rng)
+        prove_ties_per_column(
+            a,
+            &x_cols,
+            &self.b_coeffs[public_count..],
+            b_commitment,
+            rng,
+        )
     }
 
     /// Check if C was recorded
@@ -125,36 +148,51 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
     pub fn create_dlrep_b<R: ark_std::rand::RngCore + rand_core::CryptoRng>(
         &mut self,
         pvugc_vk: &crate::api::PvugcVk<E>,
+        vk: &Groth16VK<E>,
+        public_inputs: &[E::ScalarField],
         rng: &mut R,
     ) -> crate::dlrep::DlrepBProof<E> {
         use crate::dlrep::prove_b_msm;
         use ark_ec::CurveGroup;
 
-        let b_coeffs = &self.b_coeffs; // These correspond to b_g2_query[1..]
+        let b_coeffs = &self.b_coeffs; // Full assignment coeffs
         let s = self.s.expect("s not recorded");
-
-        let b_query: &[E::G2Affine] = &pvugc_vk.b_g2_query;
-        let (_, variable_b_cols) = b_query
-            .split_first()
-            .expect("pvugc_vk.b_g2_query must contain at least one column");
-        assert_eq!(
-            variable_b_cols.len(),
-            b_coeffs.len(),
-            "mismatched DLREP coefficients vs. Groth16 B query columns",
+        let num_instance = self.instance_variable_count();
+        let public_count = num_instance.saturating_sub(1);
+        assert!(
+            public_count <= b_coeffs.len(),
+            "num_instance_variables exceeds coefficient count"
         );
 
-        // Variable part: s·δ + Σ b_j·query[1..] (β and query[0] handled separately)
+        let bases = crate::api::OneSidedPvugc::build_column_bases(pvugc_vk, vk, public_inputs)
+            .expect("column bases must build successfully for create_dlrep_b");
+        assert!(
+            bases.y_cols.len() >= 1,
+            "column bases must contain aggregated public column"
+        );
+        let witness_b_cols = &bases.y_cols[1..];
+        assert_eq!(
+            witness_b_cols.len(),
+            b_coeffs.len().saturating_sub(public_count),
+            "witness column count mismatch"
+        );
+
+        // Variable part: s·δ + Σ b_j·query[witness_indices]
         let mut b_var = pvugc_vk.delta_g2.into_group() * s;
-        for (b_j, y_j) in b_coeffs.iter().zip(variable_b_cols) {
+        for (b_j, y_j) in b_coeffs
+            .iter()
+            .skip(public_count)
+            .zip(witness_b_cols.iter())
+        {
             b_var += y_j.into_group() * b_j;
         }
 
-        // Prove over query[1..] only
+        // Prove over witness-only columns
         let proof = prove_b_msm(
             b_var.into_affine(),
-            variable_b_cols,
+            witness_b_cols,
             pvugc_vk.delta_g2,
-            b_coeffs,
+            &b_coeffs[public_count..],
             s,
             rng,
         );
@@ -165,18 +203,23 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
 
     /// Build GS commitments from recorded coefficients (column-wise)
     pub fn build_commitments(&self) -> crate::decap::OneSidedCommitments<E> {
-        // Build per-column X_B_j limbs to mirror [β₂, b_g2_query[0], b_g2_query[1..], δ₂]
+        // Build per-column X_B_j limbs to mirror [B_pub, witness-only columns, δ₂]
         let a = self.a.expect("A not recorded");
         let a_g = a.into_group();
-        // Columns: [A (β), A (b_g2_query[0]), b1·A, ..., b_{n-1}·A]
+        // Columns: [A (B_pub), witness columns...]
+        let num_instance = self.instance_variable_count();
+        let public_count = num_instance.saturating_sub(1);
+        assert!(
+            public_count <= self.b_coeffs.len(),
+            "num_instance_variables exceeds coefficient count"
+        );
+        let witness_count = self.b_coeffs.len().saturating_sub(public_count);
         let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> =
-            Vec::with_capacity(2 + self.b_coeffs.len());
-        // Column 0: β column = 1·A
+            Vec::with_capacity(1 + witness_count);
+        // Column 0: aggregated public column = 1·A
         x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
-        // Column 1: b_g2_query[0] constant row = 1·A (hook b_coeffs covers query[1..] only)
-        x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
-        // Columns 2.. = b_j · A aligned to b_g2_query[1..]
-        for b in self.b_coeffs.iter() {
+        // Witness columns: b_j · A aligned to witness b_g2_query entries
+        for b in self.b_coeffs.iter().skip(public_count) {
             x_b_cols.push(((a_g * b).into_affine(), <E as Pairing>::G1Affine::zero()));
         }
         // No explicit δ column on B-side; δ-side provides e(C,
@@ -241,3 +284,4 @@ mod tests {
         assert!(recorder.get_coefficients().is_none());
     }
 }
+

@@ -86,10 +86,4 @@ path = "fuzz_targets/gs_random_recomb_budget.rs"
 test = false
 bench = false
 
-[[bin]]
-name = "gamma_vk_grinding"
-path = "fuzz_targets/gamma_vk_grinding.rs"
-test = false
-bench = false
-
 

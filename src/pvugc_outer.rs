@@ -33,15 +33,46 @@ pub fn build_pvugc_vk_outer_from_pk(pk_outer: &ark_groth16::ProvingKey<OuterE>) 
     build_pvugc_vk_outer_from_pk_for::<DefaultCycle>(pk_outer)
 }
 
-/// Build column bases from outer PVUGC VK
+/// Build column bases from outer PVUGC VK for the specific statement
 ///
-/// Y_cols = [β₂_outer] ++ b_g2_query_outer
-/// These are CONSTANT SIZE (dozens, not millions)
+/// Column 0 aggregates the public Groth16 inputs; remaining columns correspond
+/// to witness-only rows.
 pub fn build_column_bases_outer_for<C: RecursionCycle>(
     pvugc_vk: &PvugcVk<C::OuterE>,
+    vk_outer: &Groth16VK<C::OuterE>,
+    public_inputs_outer: &[OuterScalar<C>],
 ) -> ColumnBases<C::OuterE> {
-    let mut y_cols = vec![pvugc_vk.beta_g2];
-    y_cols.extend_from_slice(&**pvugc_vk.b_g2_query);
+    use ark_ec::CurveGroup;
+
+    let total_instance = vk_outer.gamma_abc_g1.len();
+    assert!(total_instance > 0, "Groth16 VK must expose inputs");
+    let expected_inputs = total_instance - 1;
+    assert!(
+        public_inputs_outer.len() == expected_inputs,
+        "public input length mismatch"
+    );
+
+    let mut aggregate = pvugc_vk.beta_g2.into_group();
+    aggregate += pvugc_vk.b_g2_query[0].into_group();
+
+    for (idx, coeff) in public_inputs_outer.iter().enumerate() {
+        let base = pvugc_vk
+            .b_g2_query
+            .get(1 + idx)
+            .expect("pvugc_vk missing public columns");
+        aggregate += base.into_group() * coeff;
+    }
+
+    let witness_cols: Vec<_> = pvugc_vk
+        .b_g2_query
+        .iter()
+        .skip(total_instance)
+        .cloned()
+        .collect();
+
+    let mut y_cols = Vec::with_capacity(1 + witness_cols.len());
+    y_cols.push(aggregate.into_affine());
+    y_cols.extend(witness_cols);
 
     ColumnBases {
         y_cols,
@@ -50,8 +81,12 @@ pub fn build_column_bases_outer_for<C: RecursionCycle>(
 }
 
 /// Default-cycle convenience wrapper around [`build_column_bases_outer_for`].
-pub fn build_column_bases_outer(pvugc_vk: &PvugcVk<OuterE>) -> ColumnBases<OuterE> {
-    build_column_bases_outer_for::<DefaultCycle>(pvugc_vk)
+pub fn build_column_bases_outer(
+    pvugc_vk: &PvugcVk<OuterE>,
+    vk_outer: &Groth16VK<OuterE>,
+    public_inputs_outer: &[OuterFr],
+) -> ColumnBases<OuterE> {
+    build_column_bases_outer_for::<DefaultCycle>(pvugc_vk, vk_outer, public_inputs_outer)
 }
 
 /// Arm column bases with ρ (outer curve)

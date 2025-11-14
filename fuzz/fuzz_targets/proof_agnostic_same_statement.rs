@@ -84,6 +84,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Build two independent proofs with hook to record coefficients
     let mut rec1 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
+    rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _proof1 = Groth16::<E>::create_random_proof_with_hook(
         SqCircuit { x: Some(x), y: Some(y) },
         &pk,
@@ -93,6 +94,7 @@ fuzz_target!(|data: &[u8]| {
     let commitments1: arkworks_groth16::decap::OneSidedCommitments<E> = rec1.build_commitments();
 
     let mut rec2 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
+    rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _proof2 = Groth16::<E>::create_random_proof_with_hook(
         SqCircuit { x: Some(x), y: Some(y) },
         &pk,

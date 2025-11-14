@@ -56,7 +56,7 @@ internal_key = xonly_even_y(Q_nums)
 Use layered hashes to bind the environment without cycles. Transcripts bind to `ctx_hash`, but are not included in these package hashes:
 
 ```
-y_cols_digest   = H_bytes("PVUGC/YCOLS" || ser([β]_2) || ser(b_g2_query[0]) || ...)
+y_cols_digest   = H_bytes("PVUGC/YCOLS" || ser(B_pub(vk,x)) || ser(b_g2_query[witness-only]))
 epoch_nonce     = CSPRNG(32 bytes)  // unique per instance
 ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || y_cols_digest || epoch_nonce)
 arming_pkg_hash = H_bytes("PVUGC/ARM"      || {D_j} || D_δ || header_meta)
@@ -65,6 +65,7 @@ ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || pre
 ```
 
 - `path_tag ∈ {compute, abort}` (or others if you add more paths).
+- `B_pub(vk,x) = [\beta]_2 + [b_0]_2 + \sum_{i=0}^{\ell} x_i \cdot [b_{i+1}]_2` is the aggregated public B-leg (constant wire + all public inputs).
 - Include exact output ordering, CPFP hook position, and any deployment/epoch identifiers you need.
 - Bind PoK/PoCE and `AdaptorVerify(m,T,R,s′)` to `ctx_hash`. Do not include those transcripts inside the package hashes above.
 
@@ -153,15 +154,21 @@ The prover forms G₁ variables from its internal coefficients:
   - $X^{(B)}_\delta = s \cdot A$ (the randomness $s$ from B)
   - $C$ (the Groth16 proof element, paired with $[\delta]_2$)
 
-**Y-basis content (normative):** The $Y_j$ list for B includes:
-- $Y_0 = [\beta]_2$ (first element, constant column)
-- $Y_{j+1} = \text{b\_g2\_query}[j]$ for all $j$ the prover uses in B
+**Statement-dependent public column.** Let $\ell$ denote the number of public inputs. Define the aggregated public B-leg
+$$
+B_{\mathrm{pub}}(\mathsf{vk},x) := [\beta]_2 + [b_0]_2 + \sum_{i=0}^{\ell} x_i \cdot [b_{i+1}]_2
+$$
+where $[b_j]_2$ are the entries of $\text{b\_g2\_query}$.
 
-Do not deduplicate - $e(A, [\beta]_2)$ must be reconstructed on the B side of the PPE.
+**Y-basis content (normative):** The $Y_j$ list for B includes:
+- $Y_0 = B_{\mathrm{pub}}(\mathsf{vk},x)$ (aggregated public column)
+- $Y_{j+1} = \text{b\_g2\_query}[1 + \ell + j]$ for every witness-only row used in $B$
+
+The $Y_j$ ordering MUST match the ordering of the corresponding G₁ limbs so the verifier can zip the limbs without ambiguity.
 
 **Column-based arming:** Directly arm each statement-only column:
 $$
-\{D_j = Y_j^\rho\}_{j=0}^{n_B-1}, \quad D_\delta = [\delta]_2^\rho
+D_0 = B_{\mathrm{pub}}(\mathsf{vk},x)^\rho,\quad \{D_{j} = \text{b\_g2\_query}[1+\ell+(j-1)]^\rho\}_{j=1}^{n_B-1}, \quad D_\delta = [\delta]_2^\rho
 $$
 Column mode directly arms each base without aggregation matrices.
 
@@ -179,8 +186,12 @@ where:
 **Critical property**: The $Y_j$ and $[\delta]_2$ are **statement‑only** (depend only on VK and $x$, not on the proof). For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
 
 **Binding to Groth16 Proof (DLREP proofs - MUST).** The prover MUST include succinct Schnorr-style proofs demonstrating:
-- **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that $B = \beta_2 + \sum_{j=0}^{m-1} b_j \cdot \text{b\_g2\_query}[j] + s \cdot [\delta]_2$ with:
-  - Same-scalar ties: $X^{(B)}_0 = 1 \cdot A$, $X^{(B)}_{j+1} = b_j \cdot A$ for all $j$
+- **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that the witness portion of $B$ satisfies
+  $$
+  B - B_{\mathrm{pub}}(\mathsf{vk},x) = s \cdot [\delta]_2 + \sum_{j=0}^{m_{\text{w}}-1} b_j \cdot \text{b\_g2\_query}[1+\ell+j]
+  $$
+  where $m_{\text{w}}$ is the number of witness-only rows. Requirements:
+  - Same-scalar ties: $X^{(B)}_{j+1} = b_j \cdot A$ for all witness columns (and $X^{(B)}_0 = 1 \cdot A$ for the aggregated public column)
   - $X^{(B)}_\delta = s \cdot A$ uses the same $s$ from B's $\delta_2$ term
 - **DLREP_C (MUST)**: Proof in $\mathbb{G}_1$ that the committed $C$ is the actual Groth16 proof element
 
@@ -195,7 +206,7 @@ These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts eith
 **Independence (MUST).** The statement-only bases $\{Y_j\}$ and $[\delta]_2$, along with the target $R(\mathsf{vk},x)$, are fixed by ($\mathsf{vk}$, $x$) before any armer chooses randomness. The bases are derived directly from the verifying key components. Armers cannot choose or influence these bases.
 **Implementation MUST NOT** allow armers to influence $\mathsf{vk}$ or $x$ once arming begins; these are fixed before any $\rho_i$ is chosen.
 
-**γ₂ exclusion enforcement (MUST).** The armed G₂ bases $\{Y_j = [\beta]_2, \text{b\_g2\_query}\}$ and $[\delta]_2$ deliberately exclude $[\gamma]_2$. Implementations MUST derive $Y_j$ from the verifying key's $\{\beta_2, \text{b\_g2\_query}\}$ components only. $[\gamma]_2$ MUST NOT be included in any armed base. This structural exclusion ensures:
+**γ₂ exclusion enforcement (MUST).** The armed G₂ bases $\{B_{\mathrm{pub}}(\mathsf{vk},x)\} \cup \{\text{b\_g2\_query}[1+\ell+ j]\}$ and $[\delta]_2$ deliberately exclude $[\gamma]_2$. Implementations MUST derive all $Y_j$ from the verifying key's $\{\beta_2, \text{b\_g2\_query}\}$ components only. $[\gamma]_2$ MUST NOT be included in any armed base. This structural exclusion ensures:
 - **Algebraic independence:** $R(\mathsf{vk},x) = e(\alpha_1,\beta_2) \cdot e(L(x),\gamma_2)$ cannot be computed from armed bases alone, as the second factor requires $[\gamma]_2^\rho$ (never published).
 - **Standard hardness:** Computing $R(\mathsf{vk},x)^\rho$ from $\{Y_j^\rho, [\delta]_2^\rho\}$ reduces to discrete logarithm in $\mathbb{G}_2$ or $\mathbb{G}_T$, not a novel assumption.
 
@@ -208,7 +219,7 @@ K_i=\mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(M_i) || H_\text{bytes}(\
 $$
 Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) to get $(\texttt{ct}_i,\tau_i)$.
 
-**Publish only:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $\texttt{ct}_i$, $\tau_i$, $T_i$, $h_i$, plus PoK and **PoCE-A** (algebraic proof).
+**Publish only:** $\{D_j\}_{j=0}^{n_B-1}$ (with $D_0 = B_{\mathrm{pub}}(\mathsf{vk},x)^\rho$ and $D_{j\ge 1}$ covering witness-only bases), $D_\delta$, $\texttt{ct}_i$, $\tau_i$, $T_i$, $h_i$, plus PoK and **PoCE-A** (algebraic proof).
 **Keep secret (MUST):** $\rho_i$ (revealing it makes $M_i = R(\mathsf{vk},x)^{\rho_i}$ publicly computable, breaking No-Proof-Spend) and $M_i$ (derivable only with valid attestation).
 
 **Degenerate & subgroup guards:** Abort arming if $R(\mathsf{vk}, x) = 1$ (identity in $\mathbb{G}_T$) or if it lies in any proper subgroup of $\mathbb{G}_T$. While negligible for honest setups, these checks prevent trivial keys. PoCE MUST also assert $R(\mathsf{vk},x) \neq 1$ via a public input bit tied to `GS_instance_digest`.

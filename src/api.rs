@@ -37,6 +37,56 @@ impl<E: Pairing> ColumnArmingAttestation<E> {
     }
 }
 
+fn num_instance_variables<E: Pairing>(vk: &Groth16VK<E>) -> usize {
+    vk.gamma_abc_g1.len()
+}
+
+fn split_statement_only_bases<E: Pairing>(
+    pvugc_vk: &PvugcVk<E>,
+    vk: &Groth16VK<E>,
+    public_inputs: &[E::ScalarField],
+) -> PvugcResult<(E::G2Affine, Vec<E::G2Affine>)> {
+    use ark_ec::CurveGroup;
+
+    let total_instance = num_instance_variables(vk);
+    if total_instance == 0 {
+        return Err(Error::MismatchedSizes);
+    }
+    let expected_inputs = total_instance.saturating_sub(1);
+    if public_inputs.len() != expected_inputs {
+        return Err(Error::PublicInputLength {
+            expected: expected_inputs,
+            actual: public_inputs.len(),
+        });
+    }
+
+    // Need: b_g2_query[0] + one entry per assignment variable.
+    let required_bases = 1 + total_instance;
+    if pvugc_vk.b_g2_query.len() < required_bases {
+        return Err(Error::MismatchedSizes);
+    }
+
+    let mut aggregate = pvugc_vk.beta_g2.into_group();
+    aggregate += pvugc_vk.b_g2_query[0].into_group();
+
+    for (idx, public_val) in public_inputs.iter().enumerate() {
+        let base = pvugc_vk
+            .b_g2_query
+            .get(1 + idx)
+            .ok_or(Error::MismatchedSizes)?;
+        aggregate += base.into_group() * public_val;
+    }
+
+    let witness_bases: Vec<E::G2Affine> = pvugc_vk
+        .b_g2_query
+        .iter()
+        .skip(total_instance)
+        .cloned()
+        .collect();
+
+    Ok((aggregate.into_affine(), witness_bases))
+}
+
 /// Optional verification limits
 pub struct VerifyLimits {
     /// Maximum allowed number of B-columns (length of b_g2_query)
@@ -59,6 +109,23 @@ pub const DEFAULT_MAX_THETA_ROWS: usize = 22;
 pub struct OneSidedPvugc;
 
 impl OneSidedPvugc {
+    /// Construct statement-only column bases with aggregated public leg.
+    pub fn build_column_bases<E: Pairing>(
+        pvugc_vk: &PvugcVk<E>,
+        vk: &Groth16VK<E>,
+        public_inputs: &[E::ScalarField],
+    ) -> PvugcResult<ColumnBases<E>> {
+        let (public_leg, witness_cols) =
+            split_statement_only_bases(pvugc_vk, vk, public_inputs)?;
+        let mut y_cols = Vec::with_capacity(1 + witness_cols.len());
+        y_cols.push(public_leg);
+        y_cols.extend(witness_cols);
+        Ok(ColumnBases {
+            y_cols,
+            delta: pvugc_vk.delta_g2,
+        })
+    }
+
     /// Canonical setup and arming (formerly setup_and_arm_columns)
     /// Returns: (ColumnBases, ColumnArms, R, K=R^ρ)
     pub fn setup_and_arm<E: Pairing>(
@@ -84,12 +151,7 @@ impl OneSidedPvugc {
         if crate::ct::gt_eq_ct::<E>(&r, &PairingOutput::<E>(One::one())) {
             return Err(Error::Crypto("R_is_identity".to_string()));
         }
-        let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-        let bases = ColumnBases {
-            y_cols,
-            delta: pvugc_vk.delta_g2,
-        };
+        let bases = Self::build_column_bases(pvugc_vk, vk, public_inputs)?;
         let col_arms = arm_columns(&bases, rho)?;
         let k = Self::compute_r_to_rho(&r, rho);
         Ok((bases, col_arms, r, k))
@@ -302,34 +364,30 @@ impl OneSidedPvugc {
             return false;
         }
 
-        // 2. Verify DLREP_B against B' = B - β₂ - Y_0, variables are b_g2_query[1..]
-        let b_query: &[E::G2Affine] = &pvugc_vk.b_g2_query;
-        let (first_b_col, variable_b_cols) = match b_query.split_first() {
-            Some(split) => split,
-            None => return false,
+        let (public_b_leg, witness_bases) =
+            match split_statement_only_bases(pvugc_vk, vk, public_inputs) {
+                Ok(split) => split,
+                Err(_) => return false,
         };
+        let b_prime = (bundle.groth16_proof.b.into_group() - public_b_leg.into_group()).into_affine();
 
-        let b_prime = (bundle.groth16_proof.b.into_group()
-            - pvugc_vk.beta_g2.into_group()
-            - first_b_col.into_group())
-        .into_affine();
-
-        // Verify over b_g2_query[1..] only (variable part)
+        // Verify over witness columns only
         let dlrep_b_ok =
-            verify_b_msm::<E>(b_prime, variable_b_cols, pvugc_vk.delta_g2, &bundle.dlrep_b);
+            verify_b_msm::<E>(b_prime, &witness_bases, pvugc_vk.delta_g2, &bundle.dlrep_b);
         if !dlrep_b_ok {
             return false;
         }
 
         // 3. Verify per-column same-scalar ties over G1 for variable columns only
         let a = bundle.groth16_proof.a;
-        // x_cols for variable B-columns align with b_g2_query[1..] → start from index 2
+        // x_cols for variable B-columns align with witness bases → skip aggregated column 0
         let mut x_cols: Vec<E::G1Affine> =
-            Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(2));
+            Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(1));
         for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
-            if i >= 2 {
-                x_cols.push(*x0);
+            if i == 0 {
+                continue;
             }
+            x_cols.push(*x0);
         }
         let ties_ok =
             verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
@@ -374,10 +432,10 @@ impl OneSidedPvugc {
             return false;
         }
 
-        // Columns: [β₂, b_g2_query[0], b_g2_query[1..]] (δ supplied via Θ = C + sA)
-        let mut y_cols = vec![pvugc_vk.beta_g2];
-        y_cols.push(*first_b_col);
-        y_cols.extend_from_slice(variable_b_cols);
+        // Columns: [B_pub(vk,x), witness-only Y_j] (δ supplied via Θ = C + sA)
+        let mut y_cols = Vec::with_capacity(1 + witness_bases.len());
+        y_cols.push(public_b_leg);
+        y_cols.extend_from_slice(&witness_bases);
         if bundle.gs_commitments.x_b_cols.len() != y_cols.len() {
             return false;
         }

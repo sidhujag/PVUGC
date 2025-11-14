@@ -62,12 +62,7 @@ fn test_cannot_compute_k_from_arms_alone() {
         delta_g2: vk.delta_g2,
         b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
-    let mut y_cols = vec![pvugc_vk.beta_g2];
-    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-    let cols: ColumnBases<E> = ColumnBases {
-        y_cols,
-        delta: pvugc_vk.delta_g2,
-    };
+    let cols = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &vault_utxo).unwrap();
     let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
 
     // Expected K = R^ρ
@@ -203,13 +198,14 @@ fn test_verify_rejects_mismatched_statement() {
     // Canonical Γ required by verifier
 
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
 
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
@@ -240,14 +236,9 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         delta_g2: vk.delta_g2,
         b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
-
+    let statement_x = vec![Fr::from(25u64)];
     // Arming bases
-    let mut y_cols = vec![pvugc_vk.beta_g2];
-    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-    let bases: ColumnBases<E> = ColumnBases {
-        y_cols,
-        delta: pvugc_vk.delta_g2,
-    };
+    let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).unwrap();
 
     // Honest arms
     let rho = Fr::from(7u64);
@@ -392,8 +383,11 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
         b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
 
+    let vault_utxo = vec![Fr::from(25u64)];
+
     // Make a valid proof and commitments
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let mut commitments = recorder.build_commitments();
@@ -401,13 +395,12 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
     // Build bundle with per-column ties
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
 
     // Baseline should verify with the matching statement
-    let vault_utxo = vec![Fr::from(25u64)];
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo));
 
     // Duplicate one G2 column logically by perturbing two X columns equally/oppositely,
@@ -490,12 +483,14 @@ fn test_r_independence_from_rho() {
 
     // Build two valid proofs and commitments (proof randomness differs)
     let mut rec1 = SimpleCoeffRecorder::<E>::new();
+    rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _proof1 =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut rec1)
             .unwrap();
     let comm1: OneSidedCommitments<E> = rec1.build_commitments();
 
     let mut rec2 = SimpleCoeffRecorder::<E>::new();
+    rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
     let _proof2 =
         Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec2).unwrap();
     let comm2: OneSidedCommitments<E> = rec2.build_commitments();
@@ -532,19 +527,19 @@ fn test_rejects_gamma2_in_statement_bases() {
         b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
 
+    let public_x = vec![Fr::from(25u64)];
     // Produce a valid bundle for the honest pvugc_vk
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
-
-    let public_x = vec![Fr::from(25u64)];
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_x));
 
     // Tamper pvugc_vk so that β₂ is replaced with γ₂ → must be rejected
@@ -590,29 +585,29 @@ fn test_size_caps_enforced_in_verify() {
         delta_g2: vk.delta_g2,
         b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
     };
+    let public_x = vec![Fr::from(25u64)];
 
     // Build a valid bundle via recorder
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
 
-    let public_x = &[Fr::from(25u64)];
-
     // Passing path: defaults via verify()
-    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, public_x));
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_x));
     // Passing path: explicit defaults via VerifyLimits and constants
     let ok_defaults = OneSidedPvugc::verify_with_limits(
         &bundle,
         &pvugc_vk,
         &vk,
-        public_x,
+        &public_x,
         &VerifyLimits {
             max_b_columns: Some(DEFAULT_MAX_B_COLUMNS),
             max_theta_rows: Some(DEFAULT_MAX_THETA_ROWS),
@@ -629,7 +624,7 @@ fn test_size_caps_enforced_in_verify() {
         &bundle,
         &pvugc_vk,
         &vk,
-        public_x,
+        &public_x,
         &VerifyLimits {
             max_b_columns: None,
             max_theta_rows: Some(0),
@@ -646,7 +641,7 @@ fn test_size_caps_enforced_in_verify() {
         &bundle,
         &pvugc_vk,
         &vk,
-        public_x,
+        &public_x,
         &VerifyLimits {
             max_b_columns: None,
             max_theta_rows: None,

@@ -56,16 +56,27 @@ fuzz_target!(|data: &[u8]| {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
     let circuit = SqCircuit { x: Some(x), y: Some(y) };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+    let pvugc_vk = PvugcVk::<E> {
+        beta_g2: vk.beta_g2,
+        delta_g2: vk.delta_g2,
+        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
+    };
+    let statement = vec![x];
 
     // Make one valid proof and commitments
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
     let commitments = recorder.build_commitments();
 
     // Baseline must verify true
-    let bundle = PvugcBundle { groth16_proof: proof, dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng), dlrep_ties: recorder.create_dlrep_ties(&mut rng), gs_commitments: commitments.clone() };
-    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &[x]));
+    let bundle = PvugcBundle {
+        groth16_proof: proof,
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement, &mut rng),
+        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
+        gs_commitments: commitments.clone(),
+    };
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement));
 
     // Apply a single malleation
     let mut mal = commitments.clone();
@@ -103,8 +114,20 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Reuse same proofs (dlrep proofs bind to original structure). Verifier should reject.
-    let bundle_bad = PvugcBundle { groth16_proof: bundle.groth16_proof, dlrep_b: bundle.dlrep_b, dlrep_ties: bundle.dlrep_ties, gs_commitments: mal };
-    if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &[x]) {
+    let bundle_bad = PvugcBundle {
+        groth16_proof: bundle.groth16_proof,
+        dlrep_b: bundle.dlrep_b,
+        dlrep_ties: bundle.dlrep_ties,
+        gs_commitments: mal,
+    };
+    if bundle_bad.gs_commitments.x_b_cols == commitments.x_b_cols
+        && bundle_bad.gs_commitments.theta == commitments.theta
+        && bundle_bad.gs_commitments.theta_delta_cancel == commitments.theta_delta_cancel
+    {
+        // Malleation didn't actually change anything (e.g. swapping identical rows); skip.
+        return;
+    }
+    if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &statement) {
         panic!("Malleation accepted by verifier");
     }
 });

@@ -385,7 +385,10 @@ mod tests {
 
         let rho = OuterScalar::<C>::rand(&mut rng);
         let pvugc_vk = fixture.pvugc_vk_outer_recursive.clone();
-        let bases = crate::pvugc_outer::build_column_bases_outer_for::<C>(&pvugc_vk);
+        let public_x_outer: Vec<OuterScalar<C>> =
+            public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
+        let bases =
+            crate::pvugc_outer::build_column_bases_outer_for::<C>(&pvugc_vk, &vk_outer, &public_x_outer);
         let col_arms = crate::pvugc_outer::arm_columns_outer_for::<C>(&bases, &rho);
 
         let outer_circuit = OuterCircuit::<C>::new(
@@ -395,6 +398,7 @@ mod tests {
         );
 
         let mut recorder = SimpleCoeffRecorder::<C::OuterE>::new();
+        recorder.set_num_instance_variables(vk_outer.gamma_abc_g1.len());
         let outer_start = Instant::now();
         let proof_outer = ark_groth16::Groth16::<C::OuterE>::create_random_proof_with_hook(
             outer_circuit,
@@ -409,9 +413,6 @@ mod tests {
             outer_start.elapsed()
         );
 
-        // Convert public_x from inner to outer field elements (1 element, no compression)
-        let public_x_outer: Vec<OuterScalar<C>> =
-            public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
         assert!(verify_outer_for::<C>(&*vk_outer, &public_x_outer, &proof_outer).unwrap());
 
         let run_decap = std::env::var("PVUGC_RUN_DECAP")

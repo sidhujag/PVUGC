@@ -111,12 +111,7 @@ cargo test test_one_sided_security -- --nocapture
 ### 6.1 Setup and Arming
 
 ```rust
-use arkworks_groth16::{OneSidedPvugc, ColumnBases, arm_columns};
-
-// Build column bases directly from Groth16 VK
-let mut y_cols = vec![pvugc_vk.beta_g2];
-y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
-let bases = ColumnBases { y_cols, delta: pvugc_vk.delta_g2 };
+use arkworks_groth16::OneSidedPvugc;
 
 // Arm bases at deposit time (one-time)
 let rho = Fr::rand(&mut rng);

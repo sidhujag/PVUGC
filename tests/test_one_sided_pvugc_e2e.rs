@@ -3,6 +3,7 @@
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
+use ark_serialize::CanonicalSerialize;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
@@ -13,6 +14,7 @@ use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::*;
+use arkworks_groth16::arming::ColumnBases;
 use rand_core::RngCore;
 
 type E = Bls12_381;
@@ -57,20 +59,17 @@ fn create_test_context(
 
 fn ppe_unarmed_assert_full<Ep: ark_ec::pairing::Pairing>(
     x_b_cols: &[(Ep::G1Affine, Ep::G1Affine)],
-    pvugc_vk: &arkworks_groth16::ppe::PvugcVk<Ep>,
+    bases: &ColumnBases<Ep>,
     theta: &[(Ep::G1Affine, Ep::G1Affine)],
     theta_delta_cancel: &Option<(Ep::G1Affine, Ep::G1Affine)>,
     r_target: ark_ec::pairing::PairingOutput<Ep>,
 ) {
     use ark_std::One;
-    // Y_cols = [beta2] ++ b_g2_query[..]
-    let mut y_cols = Vec::with_capacity(1 + pvugc_vk.b_g2_query.len());
-    y_cols.push(pvugc_vk.beta_g2);
-    y_cols.extend_from_slice(&pvugc_vk.b_g2_query);
+    let y_cols = &bases.y_cols;
     assert_eq!(x_b_cols.len(), y_cols.len(), "|X_B| != |Y|");
 
     let mut lhs_b = ark_ec::pairing::PairingOutput::<Ep>(One::one());
-    for ((x0, x1), y) in x_b_cols.iter().zip(&y_cols) {
+    for ((x0, x1), y) in x_b_cols.iter().zip(y_cols.iter()) {
         lhs_b += Ep::pairing(*x0, *y);
         if !x1.is_zero() {
             lhs_b += Ep::pairing(*x1, *y);
@@ -79,15 +78,15 @@ fn ppe_unarmed_assert_full<Ep: ark_ec::pairing::Pairing>(
     let mut lhs_delta = ark_ec::pairing::PairingOutput::<Ep>(One::one());
     for (t0, t1) in theta {
         // Expect θ = -C + sA
-        lhs_delta += Ep::pairing(*t0, pvugc_vk.delta_g2);
+        lhs_delta += Ep::pairing(*t0, bases.delta);
         if !t1.is_zero() {
-            lhs_delta += Ep::pairing(*t1, pvugc_vk.delta_g2);
+            lhs_delta += Ep::pairing(*t1, bases.delta);
         }
     }
     if let Some((c0, c1)) = theta_delta_cancel {
-        lhs_delta += Ep::pairing(*c0, pvugc_vk.delta_g2);
+        lhs_delta += Ep::pairing(*c0, bases.delta);
         if !c1.is_zero() {
-            lhs_delta += Ep::pairing(*c1, pvugc_vk.delta_g2);
+            lhs_delta += Ep::pairing(*c1, bases.delta);
         }
     }
     let mut lhs = lhs_b;
@@ -149,7 +148,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // Use the API for setup and arming
     // Column-wise arming
-    let (_bases_cols, col_arms, _r, k_expected) =
+    let (bases_cols, col_arms, _r, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &vault_utxo, &rho).expect("setup_and_arm");
 
     // === PoCE-A VALIDATION (ARM-TIME) ===
@@ -177,7 +176,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // Create PoCE-A + VE attestation (bind arming to ciphertext and tag)
     let column_attestation = OneSidedPvugc::attest_column_arming(
-        &_bases_cols,
+        &bases_cols,
         &col_arms,
         &t_i,
         &rho,
@@ -198,7 +197,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // Verify attestation
     assert!(OneSidedPvugc::verify_column_arming(
-        &_bases_cols,
+        &bases_cols,
         &col_arms,
         &t_i,
         &column_attestation,
@@ -213,6 +212,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // Use coefficient recorder to capture real b_j via HOOKED prover
     let mut recorder1 = SimpleCoeffRecorder::<E>::new();
+    recorder1.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof1 =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder1)
             .unwrap();
@@ -221,7 +221,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let commitments1 = recorder1.build_commitments();
     let bundle1 = PvugcBundle {
         groth16_proof: proof1.clone(),
-        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
         dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
@@ -231,7 +231,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let r_target = compute_groth16_target(&vk, &vault_utxo).expect("compute_groth16_target");
     ppe_unarmed_assert_full::<E>(
         &commitments1.x_b_cols,
-        &pvugc_vk,
+        &bases_cols,
         &commitments1.theta,
         &Some(commitments1.theta_delta_cancel),
         r_target,
@@ -245,6 +245,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // === SPEND TIME - PROOF 2 ===
 
     let mut recorder2 = SimpleCoeffRecorder::<E>::new();
+    recorder2.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof2 =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder2)
             .unwrap();
@@ -253,7 +254,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let commitments2 = recorder2.build_commitments();
     let bundle2 = PvugcBundle {
         groth16_proof: proof2.clone(),
-        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
         dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
@@ -294,6 +295,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // Generate proof for vault 2
     let mut recorder_vault2 = SimpleCoeffRecorder::<E>::new();
+    recorder_vault2.set_num_instance_variables(vk2.gamma_abc_g1.len());
     let proof_vault2 =
         Groth16::<E>::create_random_proof_with_hook(circuit2, &pk2, &mut rng, &mut recorder_vault2)
             .unwrap();
@@ -302,7 +304,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let commitments_vault2 = recorder_vault2.build_commitments();
     let bundle_vault2 = PvugcBundle {
         groth16_proof: proof_vault2.clone(),
-        dlrep_b: recorder_vault2.create_dlrep_b(&pvugc_vk2, &mut rng),
+        dlrep_b: recorder_vault2.create_dlrep_b(&pvugc_vk2, &vk2, &vault2_utxo, &mut rng),
         dlrep_ties: recorder_vault2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments_vault2.clone(),
     };
@@ -371,6 +373,7 @@ fn test_delta_sign_sanity() {
 
     // Hooked proof and commitments
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
             .unwrap();
@@ -487,6 +490,7 @@ fn test_witness_independence() {
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_x, &rho).expect("setup_and_arm");
 
     let mut recorder1 = SimpleCoeffRecorder::<E>::new();
+    recorder1.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof1 =
         Groth16::<E>::create_random_proof_with_hook(circuit1, &pk, &mut rng, &mut recorder1)
             .unwrap();
@@ -494,7 +498,7 @@ fn test_witness_independence() {
     let commitments1 = recorder1.build_commitments();
     let bundle1 = PvugcBundle {
         groth16_proof: proof1,
-        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
         dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
@@ -503,6 +507,7 @@ fn test_witness_independence() {
     let k1 = OneSidedPvugc::decapsulate(&commitments1, &col_arms).expect("decapsulate");
 
     let mut recorder2 = SimpleCoeffRecorder::<E>::new();
+    recorder2.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof2 =
         Groth16::<E>::create_random_proof_with_hook(circuit2, &pk, &mut rng, &mut recorder2)
             .unwrap();
@@ -510,7 +515,7 @@ fn test_witness_independence() {
     let commitments2 = recorder2.build_commitments();
     let bundle2 = PvugcBundle {
         groth16_proof: proof2,
-        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
         dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
@@ -554,7 +559,7 @@ fn test_phase1_integration() {
     };
 
     let rho = Fr::rand(&mut rng);
-    let (_bases_cols, col_arms, _r, k_expected) =
+    let (bases_cols, col_arms, _r, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &statement_x, &rho).expect("setup_and_arm");
 
     // PART B: Context Binding Setup (New)
@@ -574,9 +579,10 @@ fn test_phase1_integration() {
 
     let mut y_cols_hasher = Sha256::new();
     y_cols_hasher.update(b"PVUGC/YCOLS");
-    y_cols_hasher.update(format!("{:?}", vk.beta_g2).as_bytes());
-    for col in pk.b_g2_query.iter() {
-        y_cols_hasher.update(format!("{:?}", col).as_bytes());
+    for col in &bases_cols.y_cols {
+        let mut buf = Vec::new();
+        col.serialize_compressed(&mut buf).unwrap();
+        y_cols_hasher.update(&buf);
     }
     let y_cols_digest: [u8; 32] = y_cols_hasher.finalize().into();
 
@@ -687,6 +693,7 @@ fn test_phase1_integration() {
     // ==============================================================================
 
     let mut recorder = SimpleCoeffRecorder::<E>::new();
+    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
     let proof =
         Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
             .unwrap();
@@ -694,7 +701,7 @@ fn test_phase1_integration() {
     let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof.clone(),
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &mut rng),
+        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement_x, &mut rng),
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
