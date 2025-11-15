@@ -15,6 +15,7 @@
 
 use crate::error::Error;
 use crate::{
+    api::enforce_public_inputs_are_outputs,
     ct::{ad_core_digest, compute_key_commitment_tag, DemP2},
     poseidon_fr381_t3::{absorb_bytes_native_fr, absorb_bytes_var_fr, POSEIDON381_PARAMS_T3_V1},
 };
@@ -204,6 +205,7 @@ impl ConstraintSynthesizer<Fr> for AdaptorVeCircuit {
         let computed_h_m = hm_sponge.squeeze_bytes(32)?;
         enforce_bytes_equal(&computed_h_m, &h_m_input)?;
 
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

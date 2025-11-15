@@ -16,7 +16,7 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use ark_std::rand::SeedableRng;
 
-use arkworks_groth16::api::OneSidedPvugc;
+use arkworks_groth16::api::{enforce_public_inputs_are_outputs, OneSidedPvugc};
 use arkworks_groth16::ppe::{PvugcVk};
 
 // Circuit: enforce x = y^2
@@ -30,6 +30,7 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
         let y = FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         let y2 = &y * &y;
         x.enforce_equal(&y2)?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

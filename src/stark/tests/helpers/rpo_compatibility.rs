@@ -3,13 +3,13 @@
 //! Verifies that our light GL-native RPO gadget produces identical output to Winterfell's Rp64_256
 //! This validates that light RPO is a drop-in replacement for heavy RPO
 
-use crate::outer_compressed::InnerFr;
 use crate::stark::gadgets::gl_fast::GlVar;
 use crate::stark::gadgets::gl_range::gl_alloc_u64_vec;
 use crate::stark::gadgets::rpo_gl_light::{
     rpo_hash_elements_light, rpo_merge_light, RpoParamsGLLight,
 };
 use crate::stark::inner_stark_full::enforce_gl_eq;
+use crate::{api::enforce_public_inputs_are_outputs, outer_compressed::InnerFr};
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::R1CSVar;
@@ -125,6 +125,7 @@ fn rpo_matches_winterfell_on_small_vectors() {
                     enforce_gl_eq(&got[i].0, &FpVar::constant(InnerFr::from(expect[i])))?;
                 }
             }
+            enforce_public_inputs_are_outputs(cs)?;
             Ok(())
         }
     }

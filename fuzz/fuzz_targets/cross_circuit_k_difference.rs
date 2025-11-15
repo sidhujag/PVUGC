@@ -15,6 +15,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_r1cs_std::alloc::AllocVar;
 use ark_snark::SNARK;
 
+use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::ppe::compute_groth16_target;
 
 // Circuit: enforce x = y^2
@@ -29,6 +30,7 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
         let y = FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         let y2 = &y * &y;
         x.enforce_equal(&y2)?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

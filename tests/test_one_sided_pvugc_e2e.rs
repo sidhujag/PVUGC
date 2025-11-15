@@ -3,18 +3,19 @@
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
-use ark_serialize::CanonicalSerialize;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
+use arkworks_groth16::api::enforce_public_inputs_are_outputs;
+use arkworks_groth16::arming::ColumnBases;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::*;
-use arkworks_groth16::arming::ColumnBases;
 use rand_core::RngCore;
 
 type E = Bls12_381;
@@ -115,6 +116,7 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
 
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -452,6 +454,7 @@ fn test_witness_independence() {
             })?;
             let sum = &y_var + &z_var;
             x_var.enforce_equal(&sum)?;
+            enforce_public_inputs_are_outputs(cs)?;
             Ok(())
         }
     }

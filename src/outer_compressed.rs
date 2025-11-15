@@ -11,6 +11,7 @@
 
 use core::marker::PhantomData;
 
+use crate::api::enforce_public_inputs_are_outputs;
 use ark_crypto_primitives::snark::constraints::SNARKGadget;
 use ark_ec::pairing::Pairing;
 use ark_ff::{BigInteger, PrimeField};
@@ -180,6 +181,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;
 
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -387,8 +389,11 @@ mod tests {
         let pvugc_vk = fixture.pvugc_vk_outer_recursive.clone();
         let public_x_outer: Vec<OuterScalar<C>> =
             public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
-        let bases =
-            crate::pvugc_outer::build_column_bases_outer_for::<C>(&pvugc_vk, &vk_outer, &public_x_outer);
+        let bases = crate::pvugc_outer::build_column_bases_outer_for::<C>(
+            &pvugc_vk,
+            &vk_outer,
+            &public_x_outer,
+        );
         let col_arms = crate::pvugc_outer::arm_columns_outer_for::<C>(&bases, &rho);
 
         let outer_circuit = OuterCircuit::<C>::new(

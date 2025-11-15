@@ -214,8 +214,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             "num_instance_variables exceeds coefficient count"
         );
         let witness_count = self.b_coeffs.len().saturating_sub(public_count);
-        let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> =
-            Vec::with_capacity(1 + witness_count);
+        let mut x_b_cols: Vec<(E::G1Affine, E::G1Affine)> = Vec::with_capacity(1 + witness_count);
         // Column 0: aggregated public column = 1·A
         x_b_cols.push((a, <E as Pairing>::G1Affine::zero()));
         // Witness columns: b_j · A aligned to witness b_g2_query entries
@@ -284,4 +283,3 @@ mod tests {
         assert!(recorder.get_coefficients().is_none());
     }
 }
-

@@ -16,6 +16,7 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_snark::SNARK;
 
+use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::arming::ColumnBases;
 use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, compute_groth16_target};
 
@@ -29,6 +30,7 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
         let y = FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         let y2 = &y * &y;
         x.enforce_equal(&y2)?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

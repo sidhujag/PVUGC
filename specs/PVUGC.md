@@ -172,6 +172,8 @@ D_0 = B_{\mathrm{pub}}(\mathsf{vk},x)^\rho,\quad \{D_{j} = \text{b\_g2\_query}[1
 $$
 Column mode directly arms each base without aggregation matrices.
 
+**Public-output constraint (normative).** Every public input wire, **including the implicit 1-wire**, MUST appear as the output of at least one multiplication constraint so that the corresponding $C_i(X)$ column is non-zero. Implementations enforce this by inserting trivial “copy-to-output” gadgets (e.g. constrain $x_i \cdot 1 = x_i$ with an explicit $C$ column entry) for each public input and for the constant wire. This removes the bilinear factorization that powered the GT mix-and-match attack: an adversary can no longer express the public $\gamma$-leg using only $\beta_2$ and B-query masks, because every public term now also carries a $[\delta]_2$ (or raw $g_2$) contribution hidden from the ciphertext. Deployments **must** reject circuits that omit these dummy outputs; the helper is applied automatically inside every `ConstraintSynthesizer` so developers cannot accidentally ship a vulnerable circuit.
+
 The GS verifier checks the **one-sided product‑of‑pairings equation**:
 $$
 \prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j) \cdot e(X^{(B)}_\delta, [\delta]_2) \cdot e(C, [\delta]_2) = R(\mathsf{vk},x) \tag{GS-PPE}

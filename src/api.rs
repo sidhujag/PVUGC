@@ -2,8 +2,12 @@
 
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::One;
+use ark_ff::{One, PrimeField};
 use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
+use ark_relations::{
+    lc,
+    r1cs::{ConstraintSystemRef, LinearCombination, SynthesisError, Variable},
+};
 
 use crate::adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
 use crate::arming::{arm_columns, ColumnArms, ColumnBases};
@@ -115,8 +119,7 @@ impl OneSidedPvugc {
         vk: &Groth16VK<E>,
         public_inputs: &[E::ScalarField],
     ) -> PvugcResult<ColumnBases<E>> {
-        let (public_leg, witness_cols) =
-            split_statement_only_bases(pvugc_vk, vk, public_inputs)?;
+        let (public_leg, witness_cols) = split_statement_only_bases(pvugc_vk, vk, public_inputs)?;
         let mut y_cols = Vec::with_capacity(1 + witness_cols.len());
         y_cols.push(public_leg);
         y_cols.extend(witness_cols);
@@ -368,8 +371,9 @@ impl OneSidedPvugc {
             match split_statement_only_bases(pvugc_vk, vk, public_inputs) {
                 Ok(split) => split,
                 Err(_) => return false,
-        };
-        let b_prime = (bundle.groth16_proof.b.into_group() - public_b_leg.into_group()).into_affine();
+            };
+        let b_prime =
+            (bundle.groth16_proof.b.into_group() - public_b_leg.into_group()).into_affine();
 
         // Verify over witness columns only
         let dlrep_b_ok =
@@ -570,4 +574,30 @@ impl OneSidedPvugc {
         let k_bytes = crate::ct::serialize_gt::<E>(&derived_m.0);
         crate::ct::verify_key_commitment(&k_bytes, ad_core, ciphertext, tau_i)
     }
+}
+
+/// Ensure that every public input (including the implicit 1-wire)
+/// participates in at least one C-column entry.
+pub fn enforce_public_inputs_are_outputs<F: PrimeField>(
+    cs: ConstraintSystemRef<F>,
+) -> Result<(), SynthesisError> {
+    if cs.is_none() {
+        return Ok(());
+    }
+
+    let one_lc: LinearCombination<F> = lc!() + (F::one(), Variable::One);
+    cs.enforce_constraint(one_lc.clone(), one_lc.clone(), one_lc.clone())?;
+
+    let num_instance = cs.num_instance_variables();
+    if num_instance <= 1 {
+        return Ok(());
+    }
+
+    for idx in 1..num_instance {
+        let var = Variable::Instance(idx);
+        let lc_var: LinearCombination<F> = lc!() + var;
+        cs.enforce_constraint(lc_var.clone(), one_lc.clone(), lc_var)?;
+    }
+
+    Ok(())
 }

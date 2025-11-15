@@ -34,6 +34,7 @@ use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 
+use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ct::{serialize_gt, AdCore, DemP2};
 use arkworks_groth16::ppe::PvugcVk;
@@ -81,6 +82,7 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         })?;
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -486,8 +488,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     };
 
     // Shared column bases for PoCE-A attest/verify
-    let bases =
-        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
+    let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
 
     // === Phase A: pre-arming and registration ===
     let bridge_context = BridgeContext {
@@ -961,12 +962,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
-    assert!(OneSidedPvugc::verify(
-        &bundle,
-        &pvugc_vk,
-        &vk,
-        &statement_x
-    ));
+    assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement_x));
 
     let mut recovered_shares = Vec::new();
     for (idx, operator) in operator_armings.iter().enumerate() {
@@ -1335,8 +1331,8 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
 
     // Shared column bases for PoCE-A
     let statement_x = vec![public_input];
-    let bases =
-        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("build_column_bases");
+    let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x)
+        .expect("build_column_bases");
 
     // Participants
     let mut participants = vec![
@@ -1484,8 +1480,7 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
             .unwrap();
     let commitments = commitments_from_recorder(&recorder);
     let statement_x = vec![public_input];
-    let bases =
-        OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
+    let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
     assert_eq!(commitments.x_b_cols.len(), bases.y_cols.len());
 
     // Construct a malicious operator with mismatched (arms rho) vs (encryption key rho)

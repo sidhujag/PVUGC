@@ -10,6 +10,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
+use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 
 type E = Bls12_381;
@@ -30,6 +31,7 @@ impl ConstraintSynthesizer<Fr> for TestCircuit {
         })?;
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

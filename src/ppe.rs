@@ -157,6 +157,7 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::enforce_public_inputs_are_outputs;
     use ark_bls12_381::{Bls12_381, Fr};
     use ark_groth16::Groth16;
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
@@ -190,6 +191,7 @@ mod tests {
             let y_squared = &y_var * &y_var;
             x_var.enforce_equal(&y_squared)?;
 
+            enforce_public_inputs_are_outputs(cs)?;
             Ok(())
         }
     }

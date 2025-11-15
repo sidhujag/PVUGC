@@ -12,6 +12,7 @@ use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
+    api::enforce_public_inputs_are_outputs,
     coeff_recorder::{BCoefficients, SimpleCoeffRecorder},
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
@@ -35,6 +36,7 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         })?;
         let y_var = FpVar::new_witness(cs, || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         x_var.enforce_equal(&(y_var.clone() * y_var))?;
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -215,11 +217,7 @@ fn build_fixture(seed: u64) -> Fixture {
     // Sanity: reconstruct B directly from recorded coefficients
     let mut reconstructed_b = pvugc_vk.beta_g2.into_group();
     reconstructed_b += pvugc_vk.b_g2_query[0].into_group(); // implicit 1-wire
-    for (coeff, base) in coeffs
-        .b
-        .iter()
-        .zip(pvugc_vk.b_g2_query.iter().skip(1))
-    {
+    for (coeff, base) in coeffs.b.iter().zip(pvugc_vk.b_g2_query.iter().skip(1)) {
         reconstructed_b += base.into_group() * coeff;
     }
     reconstructed_b += pvugc_vk.delta_g2.into_group() * coeffs.s;
