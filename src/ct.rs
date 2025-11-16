@@ -22,7 +22,7 @@ use ark_ec::pairing::{Pairing, PairingOutput};
 use core::convert::TryInto;
 use subtle::ConstantTimeEq;
 
-const DEM_PROFILE_ID: &[u8] = b"PVUGC/DEM-Poseidon-v1";
+pub const DEM_PROFILE_ID: &[u8] = b"PVUGC/DEM-Poseidon-v1";
 const AD_CORE_HASH_DOMAIN: &[u8] = b"PVUGC/AD_CORE";
 const DEM_KEYSTREAM_DOMAIN: &[u8] = b"PVUGC/DEM/keystream";
 const DEM_TAG_DOMAIN: &[u8] = b"PVUGC/DEM/tag";

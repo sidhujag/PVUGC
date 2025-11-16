@@ -16,8 +16,9 @@
 use crate::error::Error;
 use crate::{
     api::enforce_public_inputs_are_outputs,
-    ct::{ad_core_digest, compute_key_commitment_tag, DemP2},
+    ct::{ad_core_digest, compute_key_commitment_tag, DemP2, DEM_PROFILE_ID},
     poseidon_fr381_t3::{absorb_bytes_native_fr, absorb_bytes_var_fr, POSEIDON381_PARAMS_T3_V1},
+    secp256k1::{decompress_secp_point, enforce_secp_fixed_base_mul, point_to_field_elements},
 };
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_crypto_primitives::sponge::{
@@ -29,6 +30,7 @@ use ark_ff::ToConstraintField;
 use ark_groth16::{prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, ProvingKey};
 use ark_r1cs_std::{eq::EqGadget, uint8::UInt8};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_secp256k1::Affine as SecpAffine;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::One;
 use core::convert::TryInto;
@@ -101,6 +103,7 @@ struct AdaptorVeCircuit {
     h_m: Option<[u8; 32]>,
     key_len: usize,
     ct_len: usize,
+    t_point: SecpAffine,
 }
 
 impl AdaptorVeCircuit {
@@ -114,6 +117,7 @@ impl AdaptorVeCircuit {
             h_m: None,
             key_len,
             ct_len,
+            t_point: SecpAffine::identity(),
         }
     }
 
@@ -126,6 +130,7 @@ impl AdaptorVeCircuit {
         h_m: [u8; 32],
         key_len: usize,
         ct_len: usize,
+        t_point: SecpAffine,
     ) -> Self {
         Self {
             key_bytes: Some(key_bytes),
@@ -136,6 +141,7 @@ impl AdaptorVeCircuit {
             h_m: Some(h_m),
             key_len,
             ct_len,
+            t_point,
         }
     }
 }
@@ -205,6 +211,12 @@ impl ConstraintSynthesizer<Fr> for AdaptorVeCircuit {
         let computed_h_m = hm_sponge.squeeze_bytes(32)?;
         enforce_bytes_equal(&computed_h_m, &h_m_input)?;
 
+        let adaptor_scalar: [UInt8<Fr>; 32] = plaintext
+            .clone()
+            .try_into()
+            .map_err(|_| SynthesisError::Unsatisfiable)?;
+        enforce_secp_fixed_base_mul(cs.clone(), &adaptor_scalar, &self.t_point, None)?;
+
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
@@ -266,6 +278,7 @@ pub fn prove_adaptor_ve(
     }
 
     let ad_digest = ad_core_digest(ad_core);
+    let t_point = extract_t_from_ad_core(ad_core)?;
     let dem = DemP2::new(k_bytes, ad_core);
     if dem.encrypt(plaintext) != ciphertext {
         return Err(Error::Crypto(
@@ -288,6 +301,7 @@ pub fn prove_adaptor_ve(
         h_m,
         keys.key_len,
         keys.ct_len,
+        t_point,
     );
 
     let proof = Groth16::<Bls12_381>::create_random_proof_with_reduction(
@@ -312,8 +326,14 @@ pub fn verify_adaptor_ve(
     if ciphertext.len() != keys.ct_len || tau.len() != 32 {
         return false;
     }
+    let t_point = match extract_t_from_ad_core(ad_core) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
     let ad_digest = ad_core_digest(ad_core);
-    let public_inputs = assemble_public_inputs(&proof.h_k, &ad_digest, ciphertext, tau, &proof.h_m);
+    let public_inputs = assemble_public_inputs(
+        &proof.h_k, &ad_digest, ciphertext, tau, &proof.h_m, &t_point,
+    );
     debug_assert_eq!(
         public_inputs.len() + 1,
         keys.prepared_vk.vk.gamma_abc_g1.len(),
@@ -344,6 +364,7 @@ fn assemble_public_inputs(
     ciphertext: &[u8],
     tau: &[u8],
     h_m: &[u8; 32],
+    t_point: &SecpAffine,
 ) -> Vec<Fr> {
     let mut inputs = Vec::new();
     inputs.extend(bytes_to_field_elements(h_k));
@@ -351,6 +372,7 @@ fn assemble_public_inputs(
     inputs.extend(bytes_to_field_elements(ciphertext));
     inputs.extend(bytes_to_field_elements(tau));
     inputs.extend(bytes_to_field_elements(h_m));
+    inputs.extend(point_to_field_elements::<Fr>(t_point));
     inputs
 }
 
@@ -358,16 +380,99 @@ fn bytes_to_field_elements(bytes: &[u8]) -> Vec<Fr> {
     ToConstraintField::<Fr>::to_field_elements(bytes).expect("to_field_elements failed")
 }
 
+fn extract_t_from_ad_core(ad_core: &[u8]) -> Result<SecpAffine, Error> {
+    fn read_slice<'a>(
+        ad_core: &'a [u8],
+        cursor: &mut usize,
+        len: usize,
+        label: &str,
+    ) -> Result<&'a [u8], Error> {
+        if *cursor + len > ad_core.len() {
+            return Err(Error::Crypto(format!(
+                "AD_core too short reading {}",
+                label
+            )));
+        }
+        let slice = &ad_core[*cursor..*cursor + len];
+        *cursor += len;
+        Ok(slice)
+    }
+
+    fn read_len(ad_core: &[u8], cursor: &mut usize, label: &str) -> Result<usize, Error> {
+        let bytes = read_slice(ad_core, cursor, 4, label)?;
+        let arr: [u8; 4] = bytes.try_into().expect("len slice");
+        let len = u32::from_le_bytes(arr) as usize;
+        if *cursor + len > ad_core.len() {
+            return Err(Error::Crypto(format!("AD_core {} length overflow", label)));
+        }
+        Ok(len)
+    }
+
+    let mut cursor = 0usize;
+    let profile = read_slice(ad_core, &mut cursor, DEM_PROFILE_ID.len(), "profile")?;
+    if profile != DEM_PROFILE_ID {
+        return Err(Error::Crypto("AD_core profile mismatch".into()));
+    }
+
+    read_slice(ad_core, &mut cursor, 32, "vk_hash")?;
+    read_slice(ad_core, &mut cursor, 32, "x_hash")?;
+    read_slice(ad_core, &mut cursor, 32, "ctx_hash")?;
+    read_slice(ad_core, &mut cursor, 32, "tapleaf_hash")?;
+    read_slice(ad_core, &mut cursor, 1, "tapleaf_version")?;
+    let txid_len = read_len(ad_core, &mut cursor, "txid_template")?;
+    read_slice(ad_core, &mut cursor, txid_len, "txid_template_bytes")?;
+    let path_len = read_len(ad_core, &mut cursor, "path_tag")?;
+    read_slice(ad_core, &mut cursor, path_len, "path_tag_bytes")?;
+    read_slice(ad_core, &mut cursor, 4, "share_index")?;
+    let t_i_len = read_len(ad_core, &mut cursor, "t_i")?;
+    let t_i_bytes = read_slice(ad_core, &mut cursor, t_i_len, "t_i_bytes")?.to_vec();
+    let t_agg_len = read_len(ad_core, &mut cursor, "t_aggregate")?;
+    read_slice(ad_core, &mut cursor, t_agg_len, "t_aggregate_bytes")?;
+    let armed_bases_len = read_len(ad_core, &mut cursor, "armed_bases")?;
+    read_slice(ad_core, &mut cursor, armed_bases_len, "armed_bases_bytes")?;
+    let armed_delta_len = read_len(ad_core, &mut cursor, "armed_delta")?;
+    read_slice(ad_core, &mut cursor, armed_delta_len, "armed_delta_bytes")?;
+    read_slice(ad_core, &mut cursor, 32, "gs_instance_digest")?;
+
+    if cursor != ad_core.len() {
+        return Err(Error::Crypto("AD_core trailing bytes".into()));
+    }
+
+    decompress_secp_point(&t_i_bytes)
+        .ok_or_else(|| Error::Crypto("invalid secp adaptor commitment in AD_core".into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AdaptorVeCircuit, *};
+    use crate::ct::AdCore;
+    use crate::secp256k1::{compress_secp_point, scalar_bytes_to_point};
     use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
     fn adaptor_ve_roundtrip() {
         let key_bytes = vec![1u8; super::gt_serialized_len()];
-        let ad_core = vec![2u8; 64];
         let plaintext = vec![3u8; 32];
+        let mut scalar_array = [0u8; 32];
+        scalar_array.copy_from_slice(&plaintext);
+        let t_point = scalar_bytes_to_point(&scalar_array);
+        let t_bytes = compress_secp_point(&t_point);
+        let ad_core = AdCore::new(
+            [2u8; 32],
+            [3u8; 32],
+            [4u8; 32],
+            [5u8; 32],
+            0xc0,
+            vec![6u8; 10],
+            "compute",
+            0,
+            t_bytes.clone(),
+            t_bytes.clone(),
+            vec![7u8; 33],
+            vec![8u8; 33],
+            [9u8; 32],
+        )
+        .serialize();
         let dem = DemP2::new(&key_bytes, &ad_core);
         let ciphertext = dem.encrypt(&plaintext);
         let tau = compute_key_commitment_tag(&key_bytes, &ad_core, &ciphertext);

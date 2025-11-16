@@ -1,5 +1,5 @@
-use crate::{r1cs_to_qap::R1CSToQAP, Groth16, Proof, ProvingKey, VerifyingKey};
 use crate::pvugc_hook::PvugcCoefficientHook;
+use crate::{r1cs_to_qap::R1CSToQAP, Groth16, Proof, ProvingKey, VerifyingKey};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, PrimeField, UniformRand, Zero};
 use ark_poly::GeneralEvaluationDomain;
@@ -21,7 +21,9 @@ type D<F> = GeneralEvaluationDomain<F>;
 
 impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
     /// Version with PVUGC hook
-    pub fn create_proof_with_reduction_and_matrices_and_hook<H: crate::pvugc_hook::PvugcCoefficientHook<E>>(
+    pub fn create_proof_with_reduction_and_matrices_and_hook<
+        H: crate::pvugc_hook::PvugcCoefficientHook<E>,
+    >(
         pk: &ProvingKey<E>,
         r: E::ScalarField,
         s: E::ScalarField,
@@ -42,13 +44,20 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         end_timer!(witness_map_time);
         let input_assignment = &full_assignment[1..num_inputs];
         let aux_assignment = &full_assignment[num_inputs..];
-        let proof =
-            Self::create_proof_with_assignment_and_hook(pk, r, s, &h, input_assignment, aux_assignment, hook)?;
+        let proof = Self::create_proof_with_assignment_and_hook(
+            pk,
+            r,
+            s,
+            &h,
+            input_assignment,
+            aux_assignment,
+            hook,
+        )?;
         end_timer!(prover_time);
 
         Ok(proof)
     }
-    
+
     /// Create a Groth16 proof using randomness `r` and `s` and
     /// the provided R1CS-to-QAP reduction, using the provided
     /// R1CS constraint matrices.
@@ -90,9 +99,17 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         aux_assignment: &[E::ScalarField],
         hook: &mut H,
     ) -> R1CSResult<Proof<E>> {
-        Self::create_proof_with_assignment_internal(pk, r, s, h, input_assignment, aux_assignment, Some(hook))
+        Self::create_proof_with_assignment_internal(
+            pk,
+            r,
+            s,
+            h,
+            input_assignment,
+            aux_assignment,
+            Some(hook),
+        )
     }
-    
+
     #[inline]
     fn create_proof_with_assignment(
         pk: &ProvingKey<E>,
@@ -102,9 +119,17 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         input_assignment: &[E::ScalarField],
         aux_assignment: &[E::ScalarField],
     ) -> R1CSResult<Proof<E>> {
-        Self::create_proof_with_assignment_internal(pk, r, s, h, input_assignment, aux_assignment, None)
+        Self::create_proof_with_assignment_internal(
+            pk,
+            r,
+            s,
+            h,
+            input_assignment,
+            aux_assignment,
+            None,
+        )
     }
-    
+
     #[inline]
     fn create_proof_with_assignment_internal(
         pk: &ProvingKey<E>,
@@ -119,7 +144,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let scalar_input: Vec<E::ScalarField> = input_assignment.to_vec();
         let scalar_aux: Vec<E::ScalarField> = aux_assignment.to_vec();
         let scalar_assignment = [scalar_input, scalar_aux].concat();
-        
+
         let c_acc_time = start_timer!(|| "Compute C");
         let h_assignment = cfg_into_iter!(h)
             .map(|s| s.into_bigint())
@@ -137,7 +162,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let r_s_delta_g1 = pk.delta_g1 * (r * s);
 
         end_timer!(c_acc_time);
-        
+
         let input_assignment = input_assignment
             .iter()
             .map(|s| s.into_bigint())
@@ -171,22 +196,21 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         // Compute B in G2
         let b_g2_acc_time = start_timer!(|| "Compute B in G2");
         let s_g2 = pk.vk.delta_g2.mul(s);
-        
-        
+
         let g2_b = Self::calculate_coeff(s_g2, &pk.b_g2_query, pk.vk.beta_g2, &assignment);
         let r_g1_b = g1_b * &r;
-        
+
         // PVUGC HOOK: Record B coefficients (BEFORE BigInt conversion!)
         if let Some(ref mut h) = hook {
             h.on_b_computed(
-                &scalar_assignment,  // Use scalar version, not BigInt
+                &scalar_assignment, // Use scalar version, not BigInt
                 &g_a.into_affine(),
                 &pk.vk.beta_g2,
                 &pk.b_g2_query,
                 &s,
             );
         }
-        
+
         drop(assignment);
 
         end_timer!(b_g2_acc_time);
@@ -198,11 +222,11 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         g_c += &l_aux_acc;
         g_c += &h_acc;
         end_timer!(c_time);
-        
+
         let proof_a = g_a.into_affine();
         let proof_b = g2_b.into_affine();
         let proof_c = g_c.into_affine();
-        
+
         // PVUGC HOOK: Record C
         if let Some(ref mut h) = hook {
             h.on_c_computed(&proof_c, &pk.vk.delta_g2);
@@ -232,7 +256,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
 
         Self::create_proof_with_reduction(circuit, pk, r, s)
     }
-    
+
     /// Create proof with PVUGC hook (samples r, s internally)
     #[inline]
     pub fn create_random_proof_with_hook<C, H>(
@@ -247,10 +271,10 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
     {
         let r = E::ScalarField::rand(rng);
         let s = E::ScalarField::rand(rng);
-        
+
         Self::create_proof_with_reduction_and_hook(circuit, pk, r, s, hook)
     }
-    
+
     /// Create proof with reduction and PVUGC hook
     #[inline]
     pub fn create_proof_with_reduction_and_hook<C, H>(
@@ -285,17 +309,18 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let matrices = cs.to_matrices().expect("should not be `None`");
         let num_inputs = cs.num_instance_variables();
         let num_constraints = cs.num_constraints();
-        
+
         // Get full assignment using the standard path
         let witness_map_time = start_timer!(|| "R1CS to QAP witness map");
         end_timer!(witness_map_time);
-        
+
         let prover = cs.borrow().unwrap();
         let full_assignment = [
             prover.instance_assignment.as_slice(),
             prover.witness_assignment.as_slice(),
-        ].concat();
-        
+        ]
+        .concat();
+
         let proof = Self::create_proof_with_reduction_and_matrices_and_hook(
             pk,
             r,
@@ -306,7 +331,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
             &full_assignment,
             hook,
         )?;
-        
+
         end_timer!(prover_time);
 
         Ok(proof)

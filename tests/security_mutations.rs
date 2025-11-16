@@ -34,8 +34,9 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         let x_var = FpVar::new_input(cs.clone(), || {
             self.x.ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let y_var =
-            FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
+        let y_var = FpVar::new_witness(cs.clone(), || {
+            self.y.ok_or(SynthesisError::AssignmentMissing)
+        })?;
         x_var.enforce_equal(&(y_var.clone() * y_var))?;
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())

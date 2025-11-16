@@ -323,6 +323,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-secp256k1"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8bd211c48debd3037b48873a7aa22c3aba034e83388aa4124795c9f220b88c7"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-r1cs-std",
+ "ark-std",
+]
+
+[[package]]
 name = "ark-serialize"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -387,9 +399,11 @@ dependencies = [
  "ark-mnt6-298",
  "ark-r1cs-std",
  "ark-relations",
+ "ark-secp256k1",
  "ark-serialize",
  "ark-snark",
  "ark-std",
+ "array-init",
  "bincode",
  "bitcoin",
  "k256",
@@ -410,6 +424,12 @@ dependencies = [
  "winter-verifier",
  "winterfell",
 ]
+
+[[package]]
+name = "array-init"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 
 [[package]]
 name = "arrayref"

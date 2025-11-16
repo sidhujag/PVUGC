@@ -60,7 +60,7 @@ pub struct Groth16<E: Pairing, QAP: R1CSToQAP = LibsnarkReduction> {
 }
 
 // Re-export pvugc_hook for users
-pub use pvugc_hook::{PvugcCoefficientHook, NoOpHook};
+pub use pvugc_hook::{NoOpHook, PvugcCoefficientHook};
 
 impl<E: Pairing, QAP: R1CSToQAP> SNARK<E::ScalarField> for Groth16<E, QAP> {
     type ProvingKey = ProvingKey<E>;
