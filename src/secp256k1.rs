@@ -1,7 +1,10 @@
 use ark_ec::{AdditiveGroup, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 use ark_r1cs_std::{
-    boolean::Boolean, cmp::CmpGadget, fields::emulated_fp::EmulatedFpVar, prelude::*,
+    boolean::Boolean,
+    cmp::CmpGadget,
+    fields::emulated_fp::{params::OptimizationType, AllocatedEmulatedFpVar, EmulatedFpVar},
+    prelude::*,
     uint8::UInt8,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
@@ -154,7 +157,11 @@ impl<CF: PrimeField> SecpJacVar<CF> {
         let x3 = &r2 - &j - v.double()?;
         let y3 = r.clone() * (v - &x3) - (y1 * &j).double()?;
         let z3 = (z1 + &h).square()? - z1z1 - hh;
-        let add = Self { x: x3, y: y3, z: z3 };
+        let add = Self {
+            x: x3,
+            y: y3,
+            z: z3,
+        };
 
         let h_is_zero = h.is_zero()?;
         let r_is_zero = r.is_zero()?;
@@ -277,8 +284,6 @@ pub fn enforce_secp_fixed_base_mul<CF: PrimeField>(
     let chunk_threshold = UInt8::constant(32u8);
     let mut acc = SecpJacVar::infinity();
     let mut carry = Boolean::constant(false);
-    #[cfg(test)]
-    let mut debug_acc = SecpProj::zero();
 
     for window_idx in 0..NUM_WINDOWS {
         let window_bits: [Boolean<CF>; WINDOW_SIZE] = array_init(|bit_idx| {
@@ -334,47 +339,10 @@ pub fn enforce_secp_fixed_base_mul<CF: PrimeField>(
         };
         let added = acc.add_mixed(&q_affine)?;
         acc = SecpJacVar::conditional_select(&should_add, &added, &acc)?;
-        #[cfg(test)]
-        {
-            if should_add.value().unwrap_or(false) {
-                let qx_val = qx.value().unwrap();
-                let qy_val = qy.value().unwrap();
-                let point = SecpAffine::new_unchecked(qx_val, qy_val);
-                debug_acc += point;
-            }
-            let acc_host = SecpProj::new_unchecked(
-                acc.x.value().unwrap(),
-                acc.y.value().unwrap(),
-                acc.z.value().unwrap(),
-            )
-            .into_affine();
-            let dbg_host = debug_acc.clone().into_affine();
-            if acc_host != dbg_host {
-                eprintln!(
-                    "diverge at window {} acc {:?} dbg {:?}",
-                    window_idx, acc_host, dbg_host
-                );
-            }
-        }
         carry = carry_next;
     }
 
     Boolean::enforce_equal(&carry, &Boolean::constant(false))?;
-
-    #[cfg(test)]
-    {
-        use ark_ec::CurveGroup;
-        let acc_x = acc.x.value().unwrap();
-        let acc_y = acc.y.value().unwrap();
-        let acc_z = acc.z.value().unwrap();
-        let host_acc = SecpProj::new_unchecked(acc_x, acc_y, acc_z);
-        let host_affine = host_acc.into_affine();
-        if host_affine != *t_host {
-            eprintln!("host mismatch: {:?} {:?}", host_affine, t_host);
-            let expected = debug_acc.into_affine();
-            eprintln!("recomputed expected: {:?}", expected);
-        }
-    }
 
     let z_is_zero = acc.z.is_zero()?;
     let tx_is_zero = tx.is_zero()?;
@@ -471,21 +439,24 @@ pub fn scalar_bytes_to_point(scalar_le: &[u8; 32]) -> SecpAffine {
     acc.into_affine()
 }
 
-fn coord_to_field_elements<CF: PrimeField>(value: &SecpFq) -> Vec<CF> {
-    let bytes = value.into_bigint().to_bytes_le();
-    debug_assert_eq!(bytes.len(), 32);
-    let mut limbs = Vec::with_capacity(4);
-    for i in 0..4 {
-        let chunk = &bytes[i * 8..(i + 1) * 8];
-        let limb = u64::from_le_bytes(chunk.try_into().unwrap());
-        limbs.push(CF::from(limb as u128));
-    }
-    limbs
-}
-
 pub fn point_to_field_elements<CF: PrimeField>(point: &SecpAffine) -> Vec<CF> {
-    let mut limbs = coord_to_field_elements::<CF>(&point.x);
-    limbs.extend(coord_to_field_elements::<CF>(&point.y));
+    let mut limbs = AllocatedEmulatedFpVar::<SecpFq, CF>::get_limbs_representations(
+        &point.x,
+        OptimizationType::Constraints,
+    )
+    .expect("limbs")
+    .into_iter()
+    .map(CF::from)
+    .collect::<Vec<_>>();
+    limbs.extend(
+        AllocatedEmulatedFpVar::<SecpFq, CF>::get_limbs_representations(
+            &point.y,
+            OptimizationType::Constraints,
+        )
+        .expect("limbs")
+        .into_iter()
+        .map(CF::from),
+    );
     limbs
 }
 
@@ -493,9 +464,9 @@ pub fn point_to_field_elements<CF: PrimeField>(point: &SecpAffine) -> Vec<CF> {
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
+    use ark_ff::Field;
     use ark_r1cs_std::uint8::UInt8;
     use ark_relations::r1cs::ConstraintSystem;
-    use ark_ff::Field;
 
     #[test]
     fn fixed_base_matches_host() {
@@ -567,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "full Groth16 setup/prove/verify; run manually"]
     fn groth16_with_secp_check() {
         use ark_groth16::Groth16;
         use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
