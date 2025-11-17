@@ -278,7 +278,7 @@ fn poseidon_var_digest(
 /// Validate GT element bytes for security
 fn validate_gt_element(k_bytes: &[u8]) -> Result<(), Error> {
     use ark_bls12_381::{Fq12, Fr};
-    use ark_ff::{Field, One, PrimeField, Zero};
+    use ark_ff::{BigInt, Field, One, PrimeField, Zero};
     use ark_serialize::CanonicalDeserialize;
 
     // 1. Deserialize to ensure valid Fq12 element
@@ -298,7 +298,8 @@ fn validate_gt_element(k_bytes: &[u8]) -> Result<(), Error> {
     // 4. Subgroup check: verify element^r == 1 where r is the scalar field order
     // Note: Technically redundant since keys from honest pairings are guaranteed
     // in-subgroup, but provides fail-fast for honest operators detecting bugs
-    let subgroup_check = element.pow(Fr::MODULUS.into());
+    let exponent: BigInt<4> = Fr::MODULUS.into();
+    let subgroup_check = element.pow(exponent);
     if subgroup_check != Fq12::one() {
         return Err(Error::Crypto(
             "GT element must be in the prime-order subgroup".into(),
