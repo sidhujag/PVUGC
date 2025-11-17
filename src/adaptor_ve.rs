@@ -97,7 +97,7 @@ pub struct AdaptorVeProof {
 impl AdaptorVeProof {
     /// Create a dummy proof for testing (skips expensive VE circuit)
     pub fn dummy() -> Self {
-        use ark_ec::{AffineRepr, CurveGroup};
+        use ark_ec::AffineRepr;
         Self {
             proof: Proof {
                 a: <Bls12_381 as ark_ec::pairing::Pairing>::G1Affine::generator(),
