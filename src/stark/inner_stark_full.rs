@@ -289,7 +289,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             return Err(SynthesisError::Unsatisfiable);
         }
         let expected_queries = self.query_positions.len();
-        if expected_queries > self.air_params.num_queries {
+        if expected_queries != self.air_params.num_queries {
             return Err(SynthesisError::Unsatisfiable);
         }
         // Prepare holders for query values reused across Merkle + DEEP.
