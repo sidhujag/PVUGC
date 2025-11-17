@@ -27,17 +27,13 @@ pub trait PvugcCoefficientHook<E: Pairing> {
         b_g2_query: &[E::G2Affine],
         s: &E::ScalarField,
     );
-    
+
     /// Called after C is computed
     ///
     /// Parameters:
     /// - c: The proof's C element
     /// - delta_g2: δ from VK (base for C-side)
-    fn on_c_computed(
-        &mut self,
-        c: &E::G1Affine,
-        delta_g2: &E::G2Affine,
-    );
+    fn on_c_computed(&mut self, c: &E::G1Affine, delta_g2: &E::G2Affine);
 }
 
 /// No-op hook (default)
@@ -51,8 +47,8 @@ impl<E: Pairing> PvugcCoefficientHook<E> for NoOpHook {
         _beta_g2: &E::G2Affine,
         _b_g2_query: &[E::G2Affine],
         _s: &E::ScalarField,
-    ) {}
-    
+    ) {
+    }
+
     fn on_c_computed(&mut self, _c: &E::G1Affine, _delta_g2: &E::G2Affine) {}
 }
-

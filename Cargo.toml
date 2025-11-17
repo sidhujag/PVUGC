@@ -38,6 +38,8 @@ ark-std = "0.5"
 ark-crypto-primitives = { version = "0.5", features = ["crh"] }
 # Use released Winterfell without modifications
 winterfell = "0.13.1"
+ark-secp256k1 = { version = "0.5", features = ["r1cs"] }
+array-init = "2.1"
 winter-crypto = "0.13.1"
 winter-math = "0.13.1"
 winter-air = "0.13.1"

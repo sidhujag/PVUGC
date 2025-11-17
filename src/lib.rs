@@ -28,6 +28,7 @@ pub mod io;
 pub mod poce;
 mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
+pub mod secp256k1;
 
 // Recursive demonstration modules (not for production use)
 // These modules demonstrate how PVUGC could work with proof-of-proof recursion

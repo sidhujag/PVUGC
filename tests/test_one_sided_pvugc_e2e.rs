@@ -15,6 +15,7 @@ use arkworks_groth16::arming::ColumnBases;
 use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;
+use arkworks_groth16::secp256k1::{compress_secp_point, scalar_bytes_to_point};
 use arkworks_groth16::*;
 use rand_core::RngCore;
 
@@ -28,6 +29,7 @@ fn create_test_context(
     y_cols_digest: [u8; 32],
     epoch_nonce: [u8; 32],
     tapleaf_hash: [u8; 32],
+    adaptor_bytes: &[u8],
 ) -> ([u8; 32], [u8; 32], Vec<u8>) {
     use arkworks_groth16::ct::AdCore;
     use arkworks_groth16::ctx::PvugcContextBuilder;
@@ -47,9 +49,9 @@ fn create_test_context(
         0xc0,
         vec![], // empty txid_template for testing
         "compute",
-        0,             // share_index
-        vec![0u8; 33], // t_i
-        vec![0u8; 33], // t_aggregate
+        0, // share_index
+        adaptor_bytes.to_vec(),
+        adaptor_bytes.to_vec(),
         vec![0u8; 64], // armed_bases
         vec![0u8; 64], // armed_delta
         ctx.ctx_core,  // gs_instance_digest
@@ -166,11 +168,21 @@ fn test_one_sided_pvugc_proof_agnostic() {
     let epoch_nonce = [4u8; 32];
     let tapleaf_hash = [5u8; 32];
 
-    let (ctx_hash, gs_digest, ad_core_bytes) =
-        create_test_context(vk_hash, x_hash, y_cols_digest, epoch_nonce, tapleaf_hash);
+    let mut adaptor_scalar = [0u8; 32];
+    rng.fill_bytes(&mut adaptor_scalar);
+    let adaptor_point = scalar_bytes_to_point(&adaptor_scalar);
+    let adaptor_bytes = compress_secp_point(&adaptor_point);
+    let (ctx_hash, gs_digest, ad_core_bytes) = create_test_context(
+        vk_hash,
+        x_hash,
+        y_cols_digest,
+        epoch_nonce,
+        tapleaf_hash,
+        &adaptor_bytes,
+    );
 
     // Create a deposit-time ciphertext and tag bound to expected K = R^ρ
-    let plaintext = vec![42u8; 32];
+    let plaintext = adaptor_scalar.to_vec();
     let dem = ct::DemP2::new(&serialize_gt::<E>(&k_expected.0), &ad_core_bytes);
     let ct = dem.encrypt(&plaintext);
     let tau =
@@ -190,6 +202,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &ct,
         &tau,
         &mut rng,
+        false, // skip_ve: E2E tests need full VE circuit
     )
     .expect("column attestation");
     assert!(
@@ -208,6 +221,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &gs_digest,
         &ct,
         &tau,
+        false, // skip_ve: E2E tests need full VE verification
     ));
 
     // === SPEND TIME - PROOF 1 ===

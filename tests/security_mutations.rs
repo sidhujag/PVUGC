@@ -8,7 +8,11 @@ use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
-use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
+use ark_std::{
+    rand::rngs::StdRng,
+    rand::{RngCore, SeedableRng},
+    UniformRand,
+};
 use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
@@ -17,6 +21,7 @@ use arkworks_groth16::{
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
     ppe::PvugcVk,
+    secp256k1::{compress_secp_point, scalar_bytes_to_point},
     ColumnArmingAttestation, OneSidedPvugc, PvugcBundle,
 };
 
@@ -34,8 +39,9 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         let x_var = FpVar::new_input(cs.clone(), || {
             self.x.ok_or(SynthesisError::AssignmentMissing)
         })?;
-        let y_var =
-            FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
+        let y_var = FpVar::new_witness(cs.clone(), || {
+            self.y.ok_or(SynthesisError::AssignmentMissing)
+        })?;
         x_var.enforce_equal(&(y_var.clone() * y_var))?;
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
@@ -83,12 +89,6 @@ fn derive_label(seed: u64, label: &[u8]) -> [u8; 32] {
     out
 }
 
-fn serialize_g1(point: &<PairingE as Pairing>::G1Affine) -> Vec<u8> {
-    let mut buf = Vec::new();
-    point.serialize_compressed(&mut buf).unwrap();
-    buf
-}
-
 fn serialize_column_arms(arms: &arkworks_groth16::arming::ColumnArms<PairingE>) -> Vec<u8> {
     let mut buf = Vec::new();
     arms.serialize_compressed(&mut buf).unwrap();
@@ -123,6 +123,11 @@ fn build_fixture(seed: u64) -> Fixture {
     let commitments = recorder.build_commitments();
     let s_i = Fr::rand(&mut rng);
     let t_i = (<PairingE as Pairing>::G1::generator() * s_i).into_affine();
+    let mut secp_scalar = [0u8; 32];
+    rng.fill_bytes(&mut secp_scalar);
+    let secp_point = scalar_bytes_to_point(&secp_scalar);
+    let secp_bytes = compress_secp_point(&secp_point);
+    let secp_agg_bytes = secp_bytes.clone();
 
     let vk_hash = derive_label(seed, b"vk_hash");
     let x_hash = derive_label(seed, b"x_hash");
@@ -144,8 +149,6 @@ fn build_fixture(seed: u64) -> Fixture {
         .finalize(None, None);
     let ctx_hash = ctx.ctx_hash;
 
-    let t_i_bytes = serialize_g1(&t_i);
-    let t_agg_bytes = t_i_bytes.clone();
     let bases_bytes = serialize_column_arms(&column_arms);
     let mut delta_bytes = Vec::new();
     column_arms
@@ -162,8 +165,8 @@ fn build_fixture(seed: u64) -> Fixture {
         bases_bytes.clone(), // reuse as tx template placeholder
         "compute",
         0,
-        t_i_bytes.clone(),
-        t_agg_bytes.clone(),
+        secp_bytes.clone(),
+        secp_agg_bytes.clone(),
         bases_bytes.clone(),
         delta_bytes.clone(),
         gs_digest,
@@ -172,7 +175,7 @@ fn build_fixture(seed: u64) -> Fixture {
 
     let k_bytes = serialize_gt::<PairingE>(&honest_key.0);
     let dem = DemP2::new(&k_bytes, &ad_core_bytes);
-    let plaintext = vec![seed as u8; 32];
+    let plaintext = secp_scalar.to_vec();
     let ciphertext = dem.encrypt(&plaintext);
     let tau =
         OneSidedPvugc::compute_key_commitment_tag_dem(&honest_key, &ad_core_bytes, &ciphertext);
@@ -190,6 +193,7 @@ fn build_fixture(seed: u64) -> Fixture {
         &ciphertext,
         &tau,
         &mut rng,
+        true, // skip_ve: security tests don't need expensive VE circuit
     )
     .expect("column attestation");
 
@@ -408,6 +412,7 @@ fn poce_cross_session_replay_fails() {
                 &fixture_a.gs_digest,
                 &fixture_a.ciphertext,
                 &fixture_a.tau,
+                true, // skip_ve: security tests don't need VE verification
             ),
             "baseline attestation must succeed"
         );
@@ -463,6 +468,7 @@ fn poce_cross_session_replay_fails() {
                     &gs_digest,
                     &ciphertext,
                     &tau,
+                    true, // skip_ve: security tests don't need VE verification
                 ),
                 "Column attestation unexpectedly succeeded for case {label}"
             );
