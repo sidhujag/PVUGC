@@ -504,6 +504,7 @@ mod tests {
     use crate::ct::{serialize_gt, AdCore};
     use crate::secp256k1::{compress_secp_point, scalar_bytes_to_point};
     use ark_ec::{pairing::Pairing, PrimeGroup};
+    use ark_ff::Zero;
     use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
@@ -513,6 +514,8 @@ mod tests {
             <Bls12_381 as Pairing>::G2::generator(),
         );
         let key_bytes = serialize_gt::<Bls12_381>(&gt_elem.0);
+        assert_eq!(key_bytes.len(), super::gt_serialized_len());
+        assert!(!gt_elem.0.is_zero(), "pairing output must be non-identity");
         let plaintext = vec![3u8; 32];
         let mut scalar_array = [0u8; 32];
         scalar_array.copy_from_slice(&plaintext);
