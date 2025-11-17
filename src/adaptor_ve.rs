@@ -94,6 +94,22 @@ pub struct AdaptorVeProof {
     pub h_m: [u8; 32],
 }
 
+impl AdaptorVeProof {
+    /// Create a dummy proof for testing (skips expensive VE circuit)
+    pub fn dummy() -> Self {
+        use ark_ec::{AffineRepr, CurveGroup};
+        Self {
+            proof: Proof {
+                a: <Bls12_381 as ark_ec::pairing::Pairing>::G1Affine::generator(),
+                b: <Bls12_381 as ark_ec::pairing::Pairing>::G2Affine::generator(),
+                c: <Bls12_381 as ark_ec::pairing::Pairing>::G1Affine::generator(),
+            },
+            h_k: [0u8; 32],
+            h_m: [0u8; 32],
+        }
+    }
+}
+
 struct AdaptorVeCircuit {
     key_bytes: Option<Vec<u8>>,
     ciphertext: Option<Vec<u8>>,

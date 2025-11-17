@@ -202,6 +202,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &ct,
         &tau,
         &mut rng,
+        false, // skip_ve: E2E tests need full VE circuit
     )
     .expect("column attestation");
     assert!(

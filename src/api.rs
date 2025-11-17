@@ -177,6 +177,7 @@ impl OneSidedPvugc {
         ct_i: &[u8],                     // Ciphertext bytes (published)
         tau_i: &[u8],                    // Key-commitment tag bytes (published)
         rng: &mut R,
+        skip_ve: bool,                   // Skip expensive VE circuit for isolated testing
     ) -> PvugcResult<ColumnArmingAttestation<E>> {
         let poce = prove_poce_column::<E, R>(
             &bases.y_cols,
@@ -193,10 +194,16 @@ impl OneSidedPvugc {
             rng,
         );
 
-        let key_bytes = serialize_gt::<E>(&expected_key.0);
-        let dem = DemP2::new(&key_bytes, ad_core);
-        let plaintext = dem.decrypt(ct_i);
-        let ve = prove_adaptor_ve(&key_bytes, ad_core, ct_i, tau_i, &plaintext)?;
+        let ve = if skip_ve {
+            // For security tests: skip expensive VE circuit, use dummy proof
+            AdaptorVeProof::dummy()
+        } else {
+            // For E2E tests: run full VE circuit
+            let key_bytes = serialize_gt::<E>(&expected_key.0);
+            let dem = DemP2::new(&key_bytes, ad_core);
+            let plaintext = dem.decrypt(ct_i);
+            prove_adaptor_ve(&key_bytes, ad_core, ct_i, tau_i, &plaintext)?
+        };
 
         Ok(ColumnArmingAttestation::new(poce, ve))
     }

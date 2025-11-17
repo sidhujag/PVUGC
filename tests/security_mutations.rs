@@ -193,6 +193,7 @@ fn build_fixture(seed: u64) -> Fixture {
         &ciphertext,
         &tau,
         &mut rng,
+        true, // skip_ve: security tests don't need expensive VE circuit
     )
     .expect("column attestation");
 
