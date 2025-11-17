@@ -58,6 +58,10 @@ pub fn verify_batch_merkle_root_gl(
         set.insert(index - (index & 1));
     }
     let normalized: Vec<usize> = set.into_iter().collect();
+    // Each normalized index should have a corresponding sibling path.
+    if nodes_bytes.len() < normalized.len() {
+        return Err(SynthesisError::Unsatisfiable);
+    }
     // Build map index -> position in leaves
     let mut index_map = BTreeMap::new();
     for (i, &index) in indexes.iter().enumerate() {
@@ -81,22 +85,20 @@ pub fn verify_batch_merkle_root_gl(
                 right = leaves[i2].clone();
                 proof_pointers.push(0);
             } else {
-                let sib_arr = if nodes_bytes[i].is_empty() {
-                    [0u8; 32]
-                } else {
-                    nodes_bytes[i][0]
-                };
-                right = digest_from_bytes(sib_arr)?;
+                let node_vec = nodes_bytes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
+                if node_vec.is_empty() {
+                    return Err(SynthesisError::Unsatisfiable);
+                }
+                right = digest_from_bytes(node_vec[0])?;
                 proof_pointers.push(1);
             }
         } else {
             // left from nodes[i][0]
-            let sib_arr = if nodes_bytes[i].is_empty() {
-                [0u8; 32]
-            } else {
-                nodes_bytes[i][0]
-            };
-            left = digest_from_bytes(sib_arr)?;
+            let node_vec = nodes_bytes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
+            if node_vec.is_empty() {
+                return Err(SynthesisError::Unsatisfiable);
+            }
+            left = digest_from_bytes(node_vec[0])?;
             if let Some(&i2) = index_map.get(&(index + 1)) {
                 right = leaves[i2].clone();
             } else {
@@ -135,12 +137,9 @@ pub fn verify_batch_merkle_root_gl(
                 sibling = [s[0].clone(), s[1].clone(), s[2].clone(), s[3].clone()];
                 i += 1;
             } else {
-                let ptr = proof_pointers.get(i).copied().unwrap_or(0);
-                let node_vec = nodes_bytes.get(i).cloned().unwrap_or_default();
-                if ptr >= node_vec.len() {
-                    return Err(SynthesisError::Unsatisfiable);
-                }
-                let sib_arr = node_vec[ptr];
+                let ptr = *proof_pointers.get(i).ok_or(SynthesisError::Unsatisfiable)?;
+                let node_vec = nodes_bytes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
+                let sib_arr = *node_vec.get(ptr).ok_or(SynthesisError::Unsatisfiable)?;
                 sibling = digest_from_bytes(sib_arr)?;
                 if i < proof_pointers.len() {
                     proof_pointers[i] += 1;
