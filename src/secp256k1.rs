@@ -273,6 +273,16 @@ pub fn enforce_secp_fixed_base_mul<CF: PrimeField>(
     t_host: &SecpAffine,
     _scalar_hint: Option<&[u8; 32]>,
 ) -> Result<(), SynthesisError> {
+    // SECURITY: Enforce that T is in the prime-order subgroup of secp256k1
+    // This prevents small-subgroup attacks where attacker provides T' = T + P
+    // where P is a low-order point, causing scalar extraction to fail or leak info
+    if t_host.is_zero() {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    // Note: secp256k1 has cofactor=1, so every non-identity point is in the prime subgroup
+    // We just need to verify T is on the curve and non-identity
+    // The curve equation check is done in alloc_point_public_inputs
+    
     let (tx, ty) = alloc_point_public_inputs(cs.clone(), t_host)?;
 
     let mut scalar_bits = Vec::with_capacity(8 * m_bytes.len());

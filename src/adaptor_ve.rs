@@ -21,6 +21,7 @@ use crate::{
     secp256k1::{decompress_secp_point, enforce_secp_fixed_base_mul, point_to_field_elements},
 };
 use ark_bls12_381::{Bls12_381, Fr};
+use ark_ec::AffineRepr;
 use ark_crypto_primitives::sponge::{
     constraints::CryptographicSpongeVar,
     poseidon::{constraints::PoseidonSpongeVar, PoseidonSponge as PoseidonSpongeNative},
@@ -124,6 +125,7 @@ struct AdaptorVeCircuit {
 
 impl AdaptorVeCircuit {
     fn blank(key_len: usize, ct_len: usize) -> Self {
+        // Use generator instead of identity for blank circuit to avoid subgroup check failure
         Self {
             key_bytes: None,
             ciphertext: None,
@@ -133,7 +135,7 @@ impl AdaptorVeCircuit {
             h_m: None,
             key_len,
             ct_len,
-            t_point: SecpAffine::identity(),
+            t_point: SecpAffine::generator(),
         }
     }
 
@@ -273,6 +275,39 @@ fn poseidon_var_digest(
     sponge.squeeze_bytes(32)
 }
 
+/// Validate GT element bytes for security
+fn validate_gt_element(k_bytes: &[u8]) -> Result<(), Error> {
+    use ark_bls12_381::{Fq12, Fr};
+    use ark_ff::{Field, One, PrimeField, Zero};
+    use ark_serialize::CanonicalDeserialize;
+
+    // 1. Deserialize to ensure valid Fq12 element
+    let element = Fq12::deserialize_compressed(k_bytes)
+        .map_err(|_| Error::Crypto("Invalid GT element: deserialization failed".into()))?;
+
+    // 2. Reject additive zero (not a valid GT element for encryption)
+    if element.is_zero() {
+        return Err(Error::Crypto("GT element cannot be zero".into()));
+    }
+
+    // 3. Reject multiplicative identity (encryption would become public)
+    if element.is_one() {
+        return Err(Error::Crypto("GT element cannot be identity".into()));
+    }
+
+    // 4. Subgroup check: verify element^r == 1 where r is the scalar field order
+    // Note: Technically redundant since keys from honest pairings are guaranteed
+    // in-subgroup, but provides fail-fast for honest operators detecting bugs
+    let subgroup_check = element.pow(Fr::MODULUS.into());
+    if subgroup_check != Fq12::one() {
+        return Err(Error::Crypto(
+            "GT element must be in the prime-order subgroup".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Produce an adaptor VE proof.
 pub fn prove_adaptor_ve(
     k_bytes: &[u8],
@@ -292,6 +327,10 @@ pub fn prove_adaptor_ve(
             "invalid ciphertext or tag length for adaptor VE proof".into(),
         ));
     }
+
+    // Validate GT element for honest-operator fail-fast (NOT a security boundary)
+    // Real security: tag verification at decapsulation time prevents wrong-key attacks
+    validate_gt_element(k_bytes)?;
 
     let ad_digest = ad_core_digest(ad_core);
     let t_point = extract_t_from_ad_core(ad_core)?;
