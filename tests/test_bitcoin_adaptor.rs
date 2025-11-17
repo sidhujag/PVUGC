@@ -47,6 +47,7 @@ use arkworks_groth16::bitcoin::{
     bip340_challenge, encoded_x, signature_bytes, tagged_hash, verify_schnorr_signature, y_is_even,
     ToEncodedPoint,
 };
+use arkworks_groth16::secp256k1::{compress_secp_point, scalar_bytes_to_point};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::amount::Amount;
@@ -186,6 +187,7 @@ struct OperatorArming<Ep: Pairing> {
     participant: Participant,
     adaptor_share: Scalar,
     adaptor_commitment: AffinePoint,
+    adaptor_commitment_arkworks: Vec<u8>, // Compressed arkworks point for VE circuit
     column_arms: arkworks_groth16::arming::ColumnArms<Ep>,
     encrypted_share: EncryptedShare,
     expected_key: ark_ec::pairing::PairingOutput<Ep>,
@@ -323,10 +325,12 @@ fn scalar_from_bytes(bytes: &[u8; 32]) -> Scalar {
 }
 
 fn scalar_from_bytes_strict(bytes: &[u8; 32]) -> Scalar {
+    // Both k256 and arkworks use LE format for scalars
     Scalar::from_repr(FieldBytes::from(*bytes)).expect("non-canonical scalar encoding")
 }
 
 fn scalar_to_bytes(s: &Scalar) -> [u8; 32] {
+    // k256::Scalar::to_bytes() returns LE, matching arkworks format
     let field_bytes = s.to_bytes();
     let mut out = [0u8; 32];
     out.copy_from_slice(&field_bytes);
@@ -535,6 +539,11 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         );
         adaptor_sum += commitment;
 
+        // For VE circuit: convert scalar to LE bytes and compute point using arkworks
+        let share_bytes_le = scalar_to_bytes(&share);
+        let commitment_arkworks = scalar_bytes_to_point(&share_bytes_le);
+        let commitment_arkworks_compressed = compress_secp_point(&commitment_arkworks);
+
         let rho = Fr::rand(&mut rng);
         rhos.push(rho);
         let (col_arms, expected_key) = match (&bases_opt, &r_target_opt) {
@@ -556,6 +565,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             participant: participant.clone(),
             adaptor_share: share,
             adaptor_commitment: affine_from_projective(&commitment),
+            adaptor_commitment_arkworks: commitment_arkworks_compressed,
             column_arms: col_arms.clone(),
             encrypted_share: EncryptedShare {
                 ciphertext: Vec::new(),
@@ -803,7 +813,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     // Encrypt shares now with full-layered AD_core (using ctx_hash)
     for (idx, operator) in operator_armings.iter_mut().enumerate() {
         let share_bytes = scalar_to_bytes(&operator.adaptor_share);
-        let t_i = compressed_bytes(&operator.adaptor_commitment);
+        let t_i = operator.adaptor_commitment_arkworks.clone();
         let t_agg = compressed_bytes(&adaptor_point);
         let mut bases_bytes = Vec::new();
         operator
@@ -851,6 +861,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             &ciphertext,
             &tau,
             &mut rng,
+            false, // skip_ve: E2E tests need full VE circuit
         )
         .expect("column attestation");
         let verify_ok = OneSidedPvugc::verify_column_arming(
@@ -994,7 +1005,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         let derived_key = OneSidedPvugc::decapsulate(&commitments, &operator.column_arms).unwrap();
         assert_eq!(operator.expected_key, derived_key);
         // Rebuild AD_core for this operator
-        let t_i = compressed_bytes(&operator.adaptor_commitment);
+        let t_i = operator.adaptor_commitment_arkworks.clone();
         let t_agg = compressed_bytes(&adaptor_point);
         let mut bases_bytes = Vec::new();
         operator
@@ -1119,7 +1130,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
 
     // Rebuild AD_core for operator 0
     let op0 = &operator_armings[0];
-    let t_i0 = compressed_bytes(&op0.adaptor_commitment);
+    let t_i0 = op0.adaptor_commitment_arkworks.clone();
     let t_agg0 = compressed_bytes(&adaptor_point);
     let mut bases_bytes0 = Vec::new();
     op0.column_arms
@@ -1217,7 +1228,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             OneSidedPvugc::decapsulate(&wrong_commitments, &operator.column_arms).unwrap();
         assert_ne!(wrong_key, operator.expected_key);
         // Rebuild AD_core exactly as in the honest path for this operator
-        let t_i = compressed_bytes(&operator.adaptor_commitment);
+        let t_i = operator.adaptor_commitment_arkworks.clone();
         let t_agg = compressed_bytes(&adaptor_point);
         let mut bases_bytes = Vec::new();
         operator
@@ -1429,6 +1440,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
             &ciphertext,
             &tau,
             &mut rng,
+            true, // skip_ve: this test intentionally checks arm-time validation, doesn't need VE
         )
         .expect("column attestation");
         poce_ok[i] = OneSidedPvugc::verify_column_arming(
