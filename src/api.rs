@@ -177,7 +177,7 @@ impl OneSidedPvugc {
         ct_i: &[u8],                     // Ciphertext bytes (published)
         tau_i: &[u8],                    // Key-commitment tag bytes (published)
         rng: &mut R,
-        skip_ve: bool,                   // Skip expensive VE circuit for isolated testing
+        skip_ve: bool, // Skip expensive VE circuit for isolated testing
     ) -> PvugcResult<ColumnArmingAttestation<E>> {
         let poce = prove_poce_column::<E, R>(
             &bases.y_cols,

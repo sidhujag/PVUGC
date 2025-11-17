@@ -34,9 +34,10 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_r1cs_std::uint64::UInt64 as UInt64Var;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use std::ops::Not;
 // Light RPO for internal operations, canonicalize only at serialization boundaries
-use super::gadgets::gl_fast::{gl_add_light, gl_mul_light, gl_sub_light, GlVar};
+use super::gadgets::gl_fast::{
+    gl_add_light, gl_batch_inv_light, gl_mul_light, gl_sub_light, GlVar,
+};
 use super::gadgets::gl_range::{gl_alloc_u64, gl_alloc_u64_vec};
 use super::gadgets::utils::CombinerKind;
 
@@ -843,6 +844,13 @@ pub fn verify_deep_composition(
         }
     }
 
+    // Precompute z*g once (shared by every query)
+    let zg_gl = gl_mul_light(cs.clone(), &z_gl, &g_trace_gl)?;
+
+    // Hold numerators and denominator products for shared batch inversion
+    let mut numerators: Vec<GlVar> = Vec::with_capacity(trace_queries.len());
+    let mut denom_products: Vec<GlVar> = Vec::with_capacity(trace_queries.len());
+
     // For each query:
     for (q_idx, trace_row) in trace_queries.iter().enumerate() {
         let comp_row = comp_queries
@@ -872,23 +880,10 @@ pub fn verify_deep_composition(
         }
         let x = gl_mul_light(cs.clone(), &offset_gl, &acc)?;
 
-        // OPTIMIZED DEEP computation with shared denominators
-        // Compute z*g ONCE per query
-        let zg_gl = gl_mul_light(cs.clone(), &z_gl, &g_trace_gl)?;
-
         // Compute denominators ONCE (shared across all columns)
         let den_z_gl = gl_sub_light(cs.clone(), &x, &z_gl)?;
         let den_zg_gl = gl_sub_light(cs.clone(), &x, &zg_gl)?;
-
-        // Batch inversion: compute P_inv = 1/((x-z)*(x-z*g)) ONCE
-        let p_inv_gl = {
-            // P = (x-z) * (x-z*g)
-            let p_gl = gl_mul_light(cs.clone(), &den_z_gl, &den_zg_gl)?;
-
-            // P^{-1} with constraint check
-            use super::gadgets::gl_fast::gl_inv_light;
-            gl_inv_light(cs.clone(), &p_gl)?
-        };
+        let denom_product = gl_mul_light(cs.clone(), &den_z_gl, &den_zg_gl)?;
 
         // DEEP composition per Winterfell's exact formula (composer.rs lines 137-159)
         // Formula: result = (t1_num * t2_den + t2_num * t1_den) / (t1_den * t2_den)
@@ -967,97 +962,23 @@ pub fn verify_deep_composition(
         let cross_term1 = gl_mul_light(cs.clone(), &t1_num, &den_zg_gl)?;
         let cross_term2 = gl_mul_light(cs.clone(), &t2_num, &den_z_gl)?;
         let numerator = gl_add_light(cs.clone(), &cross_term1, &cross_term2)?;
+        numerators.push(numerator);
+        denom_products.push(denom_product);
+    }
 
-        // Use P_inv directly
-        let deep_sum = gl_mul_light(cs.clone(), &numerator, &p_inv_gl)?;
-
-        // The DEEP polynomial deep_sum is what goes to FRI!
-        // Convert GlVar back to FpGLVar for compatibility
+    // Batch invert all denominator products to amortize constraint cost
+    let denom_invs = gl_batch_inv_light(cs.clone(), &denom_products)?;
+    for (numerator, inv) in numerators.into_iter().zip(denom_invs.into_iter()) {
+        let deep_sum = gl_mul_light(cs.clone(), &numerator, &inv)?;
         deep_evaluations.push(deep_sum.0);
     }
 
     Ok(deep_evaluations)
 }
 
-fn sort_uint64_in_place(values: &mut [UInt64GLVar]) -> Result<(), SynthesisError> {
-    let original_len = values.len();
-    if original_len <= 1 {
-        return Ok(());
-    }
-
-    fn compare_and_swap(
-        arr: &mut [UInt64GLVar],
-        i: usize,
-        j: usize,
-        ascending: bool,
-    ) -> Result<(), SynthesisError> {
-        let should_swap = if ascending {
-            arr[i].is_gt(&arr[j])?
-        } else {
-            arr[i].is_lt(&arr[j])?
-        };
-        let new_i = UInt64GLVar::conditionally_select(&should_swap, &arr[j], &arr[i])?;
-        let new_j = UInt64GLVar::conditionally_select(&should_swap, &arr[i], &arr[j])?;
-        arr[i] = new_i;
-        arr[j] = new_j;
-        Ok(())
-    }
-
-    fn greatest_power_of_two_less_than(n: usize) -> usize {
-        let mut k = 1;
-        while k < n {
-            k <<= 1;
-        }
-        k >> 1
-    }
-
-    fn bitonic_merge(arr: &mut [UInt64GLVar], ascending: bool) -> Result<(), SynthesisError> {
-        let n = arr.len();
-        if n <= 1 {
-            return Ok(());
-        }
-        let m = greatest_power_of_two_less_than(n);
-        for i in 0..(n - m) {
-            compare_and_swap(arr, i, i + m, ascending)?;
-        }
-        let (left, right) = arr.split_at_mut(m);
-        bitonic_merge(left, ascending)?;
-        bitonic_merge(right, ascending)?;
-        Ok(())
-    }
-
-    fn bitonic_sort(arr: &mut [UInt64GLVar], ascending: bool) -> Result<(), SynthesisError> {
-        let n = arr.len();
-        if n <= 1 {
-            return Ok(());
-        }
-        let mid = n / 2;
-        let (left, right) = arr.split_at_mut(mid);
-        bitonic_sort(left, true)?;
-        bitonic_sort(right, false)?;
-        bitonic_merge(arr, ascending)?;
-        Ok(())
-    }
-
-    let mut scratch: Vec<UInt64GLVar> = values.to_vec();
-    let target_len = original_len.next_power_of_two();
-    if target_len > scratch.len() {
-        let pad = target_len - scratch.len();
-        scratch.extend((0..pad).map(|_| UInt64GLVar::constant(u64::MAX)));
-    }
-
-    bitonic_sort(&mut scratch, true)?;
-
-    for (dst, src) in values.iter_mut().zip(scratch.iter()) {
-        *dst = src.clone();
-    }
-
-    Ok(())
-}
-
 fn enforce_query_positions_alignment(
     expected_positions: &[UInt64GLVar],
-    mut raw_positions: Vec<UInt64GLVar>,
+    raw_positions: Vec<UInt64GLVar>,
     expected_unique_len: usize,
     total_queries: usize,
 ) -> Result<(), SynthesisError> {
@@ -1074,56 +995,28 @@ fn enforce_query_positions_alignment(
             return Err(SynthesisError::Unsatisfiable);
         }
     }
-
-    sort_uint64_in_place(&mut raw_positions)?;
-
-    let zero = FpGLVar::constant(InnerFr::from(0u64));
-    let one = FpGLVar::constant(InnerFr::from(1u64));
-
-    let mut unique_flags = Vec::with_capacity(total_queries);
-    for i in 0..total_queries {
-        if i == 0 {
-            unique_flags.push(Boolean::constant(true));
-        } else {
-            let eq_prev = raw_positions[i].is_eq(&raw_positions[i - 1])?;
-            unique_flags.push(eq_prev.not());
-        }
+    if expected_unique_len > total_queries {
+        return Err(SynthesisError::Unsatisfiable);
     }
 
-    let mut unique_flags_fp = Vec::with_capacity(total_queries);
-    let mut unique_counts = Vec::with_capacity(total_queries);
-    let mut running = zero.clone();
-    for flag in &unique_flags {
-        let flag_fp = FpGLVar::conditionally_select(flag, &one, &zero)?;
-        running = &running + &flag_fp;
-        unique_flags_fp.push(flag_fp);
-        unique_counts.push(running.clone());
+    // Every committed position must appear among the Fiat-Shamir draws
+    for expected in expected_positions {
+        let mut hit = Boolean::constant(false);
+        for raw in &raw_positions {
+            let eq = expected.is_eq(raw)?;
+            hit = &hit | &eq;
+        }
+        hit.enforce_equal(&Boolean::constant(true))?;
     }
 
-    unique_counts
-        .last()
-        .expect("non-empty")
-        .enforce_equal(&FpGLVar::constant(InnerFr::from(
-            expected_unique_len as u64,
-        )))?;
-
-    for k in 0..expected_unique_len {
-        let target_rank = FpGLVar::constant(InnerFr::from((k as u64) + 1));
-        let host_value_fp = expected_positions[k].to_fp()?;
-        let mut indicator_sum = zero.clone();
-
-        for i in 0..total_queries {
-            let rank_match = unique_counts[i].is_eq(&target_rank)?;
-            let rank_fp = FpGLVar::conditionally_select(&rank_match, &one, &zero)?;
-            let indicator_fp = &unique_flags_fp[i] * &rank_fp;
-            indicator_sum = &indicator_sum + &indicator_fp;
-
-            let derived_fp = raw_positions[i].to_fp()?;
-            let diff = derived_fp - &host_value_fp;
-            (diff * &indicator_fp).enforce_equal(&zero)?;
+    // Every derived draw must map to one of the committed unique positions
+    for raw in &raw_positions {
+        let mut hit = Boolean::constant(false);
+        for expected in expected_positions {
+            let eq = raw.is_eq(expected)?;
+            hit = &hit | &eq;
         }
-
-        indicator_sum.enforce_equal(&one)?;
+        hit.enforce_equal(&Boolean::constant(true))?;
     }
 
     Ok(())

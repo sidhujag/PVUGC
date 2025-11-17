@@ -240,6 +240,16 @@ pub fn gl_add_light(
     Ok(GlVar(r))
 }
 
+/// Light GL add with a public constant (keeps quotient bounded to {0,1}).
+pub fn gl_add_const_light(
+    cs: ConstraintSystemRef<InnerFr>,
+    a: &GlVar,
+    c: u64,
+) -> Result<GlVar, SynthesisError> {
+    let c_var = GlVar(FpVar::constant(InnerFr::from(c as u128)));
+    gl_add_light(cs, a, &c_var)
+}
+
 /// Light GL sub: a - b = r - t·p where t ∈ {0,1}
 /// ~10-20 constraints (1 boolean + equality)
 pub fn gl_sub_light(
@@ -296,6 +306,35 @@ pub fn gl_mul_light(
 
     // Enforce: a·b = r + k·p
     (a.0.clone() * b.0.clone()).enforce_equal(&(r.clone() + k * fp_p()))?;
+    Ok(GlVar(r))
+}
+
+/// Light GL mul by a public constant: a·c = r + k·p
+/// Avoids a variable multiplication gate by folding the constant into the linear combination.
+pub fn gl_mul_const_light(
+    cs: ConstraintSystemRef<InnerFr>,
+    a: &GlVar,
+    c: u64,
+) -> Result<GlVar, SynthesisError> {
+    // Witness the GL-reduced result
+    let r = FpVar::new_witness(cs.clone(), || {
+        use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
+        let av = fr_to_gl_u64(a.0.value()?);
+        Ok(InnerFr::from(gl_mul(av, c) as u128))
+    })?;
+
+    // Witness quotient k for congruence check
+    let k = FpVar::new_witness(cs.clone(), || {
+        use crate::stark::gl_u64::fr_to_gl_u64;
+        let av = fr_to_gl_u64(a.0.value()?);
+        let prod = (av as u128) * (c as u128);
+        let res = crate::stark::gl_u64::gl_mul(av, c) as u128;
+        Ok(InnerFr::from((prod - res) / P_U64 as u128))
+    })?;
+
+    // Enforce: a·c = r + k·p using a constant-scaled product (no mul gate)
+    let prod = &a.0 * InnerFr::from(c as u128);
+    prod.enforce_equal(&(r.clone() + k * fp_p()))?;
     Ok(GlVar(r))
 }
 

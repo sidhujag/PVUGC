@@ -5,7 +5,7 @@ use crate::outer_compressed::InnerFr;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub type FpGLVar = FpVar<InnerFr>;
 
@@ -25,6 +25,33 @@ pub fn verify_batch_merkle_root_gl(
     depth: usize,
     expected_root_bytes: &[UInt8<InnerFr>],
 ) -> Result<(), SynthesisError> {
+    // Cache byte→digest conversions so shared nodes are only constrained once
+    let mut digest_cache: HashMap<[u8; 32], [GlVar; 4]> = HashMap::new();
+    let mut digest_from_bytes = |arr: [u8; 32]| -> Result<[GlVar; 4], SynthesisError> {
+        if let Some(d) = digest_cache.get(&arr) {
+            return Ok(d.clone());
+        }
+        if arr.iter().all(|b| *b == 0u8) {
+            let zero = GlVar(FpVar::constant(InnerFr::from(0u64)));
+            let digest = [zero.clone(), zero.clone(), zero.clone(), zero];
+            digest_cache.insert(arr, digest.clone());
+            return Ok(digest);
+        }
+        let sib_bytes: Vec<UInt8<InnerFr>> = arr
+            .iter()
+            .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
+            .collect::<Result<_, _>>()?;
+        let sib_fp = digest32_to_gl4(&sib_bytes)?;
+        let dig = [
+            GlVar(sib_fp[0].clone()),
+            GlVar(sib_fp[1].clone()),
+            GlVar(sib_fp[2].clone()),
+            GlVar(sib_fp[3].clone()),
+        ];
+        digest_cache.insert(arr, dig.clone());
+        Ok(dig)
+    };
+
     // Replace odd indexes with even and dedup in ascending order
     let mut set = BTreeSet::new();
     for &index in indexes {
@@ -59,17 +86,7 @@ pub fn verify_batch_merkle_root_gl(
                 } else {
                     nodes_bytes[i][0]
                 };
-                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
-                    .iter()
-                    .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
-                    .collect::<Result<_, _>>()?;
-                let sib_fp = digest32_to_gl4(&sib_bytes)?;
-                right = [
-                    GlVar(sib_fp[0].clone()),
-                    GlVar(sib_fp[1].clone()),
-                    GlVar(sib_fp[2].clone()),
-                    GlVar(sib_fp[3].clone()),
-                ];
+                right = digest_from_bytes(sib_arr)?;
                 proof_pointers.push(1);
             }
         } else {
@@ -79,17 +96,7 @@ pub fn verify_batch_merkle_root_gl(
             } else {
                 nodes_bytes[i][0]
             };
-            let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
-                .iter()
-                .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
-                .collect::<Result<_, _>>()?;
-            let sib_fp = digest32_to_gl4(&sib_bytes)?;
-            left = [
-                GlVar(sib_fp[0].clone()),
-                GlVar(sib_fp[1].clone()),
-                GlVar(sib_fp[2].clone()),
-                GlVar(sib_fp[3].clone()),
-            ];
+            left = digest_from_bytes(sib_arr)?;
             if let Some(&i2) = index_map.get(&(index + 1)) {
                 right = leaves[i2].clone();
             } else {
@@ -134,17 +141,7 @@ pub fn verify_batch_merkle_root_gl(
                     return Err(SynthesisError::Unsatisfiable);
                 }
                 let sib_arr = node_vec[ptr];
-                let sib_bytes: Vec<UInt8<InnerFr>> = sib_arr
-                    .iter()
-                    .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
-                    .collect::<Result<_, _>>()?;
-                let sib_fp = digest32_to_gl4(&sib_bytes)?;
-                sibling = [
-                    GlVar(sib_fp[0].clone()),
-                    GlVar(sib_fp[1].clone()),
-                    GlVar(sib_fp[2].clone()),
-                    GlVar(sib_fp[3].clone()),
-                ];
+                sibling = digest_from_bytes(sib_arr)?;
                 if i < proof_pointers.len() {
                     proof_pointers[i] += 1;
                 }

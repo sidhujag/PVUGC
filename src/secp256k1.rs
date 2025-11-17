@@ -282,7 +282,7 @@ pub fn enforce_secp_fixed_base_mul<CF: PrimeField>(
     // Note: secp256k1 has cofactor=1, so every non-identity point is in the prime subgroup
     // We just need to verify T is on the curve and non-identity
     // The curve equation check is done in alloc_point_public_inputs
-    
+
     let (tx, ty) = alloc_point_public_inputs(cs.clone(), t_host)?;
 
     let mut scalar_bits = Vec::with_capacity(8 * m_bytes.len());
