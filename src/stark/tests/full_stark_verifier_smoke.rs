@@ -99,12 +99,16 @@ where
 
 #[test]
 fn full_stark_verifier_smoke() {
-    // 1) Generate a real Winterfell STARK proof with RPO-256 hasher (matches circuit!)
+    // 1) Generate a real Winterfell STARK proof with RPO-256 hasher
     let start = BaseElement::new(3);
     let steps = 8;
     let (proof, trace): (winterfell::Proof, winterfell::TraceTable<BaseElement>) =
         generate_test_vdf_proof_rpo(start, steps);
 
+    run_full_stark_verifier(proof, trace);
+}
+
+fn run_full_stark_verifier(proof: winterfell::Proof, trace: winterfell::TraceTable<BaseElement>) {
     // 2) Set up AIR parameters (must match what proof actually contains!)
     let proof_options = proof.options();
 

@@ -21,12 +21,12 @@ use crate::{
     secp256k1::{decompress_secp_point, enforce_secp_fixed_base_mul, point_to_field_elements},
 };
 use ark_bls12_381::{Bls12_381, Fr};
-use ark_ec::AffineRepr;
 use ark_crypto_primitives::sponge::{
     constraints::CryptographicSpongeVar,
     poseidon::{constraints::PoseidonSpongeVar, PoseidonSponge as PoseidonSpongeNative},
     CryptographicSponge,
 };
+use ark_ec::AffineRepr;
 use ark_ff::ToConstraintField;
 use ark_groth16::{prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, ProvingKey};
 use ark_r1cs_std::{eq::EqGadget, uint8::UInt8};

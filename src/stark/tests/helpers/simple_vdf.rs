@@ -177,18 +177,54 @@ pub fn generate_test_vdf_proof_rpo(
     start: BaseElement,
     steps: usize,
 ) -> (Proof, TraceTable<BaseElement>) {
-    let trace = build_vdf_trace(start, steps);
-
-    let options = ProofOptions::new(
-        28,
-        8,
-        0,
+    const MAX_ATTEMPTS: usize = 8;
+    let default_options = ProofOptions::new(
+        2,  // minimal queries keep regression tests snappy
+        8, // blowup to exercise domain logic
+        0,  // grinding factor
         winterfell::FieldExtension::None,
-        2,
-        31,
+        2,  // FRI folding factor
+        31, // num FRI layers
         winterfell::BatchingMethod::Linear,
         winterfell::BatchingMethod::Linear,
     );
+
+    let target_queries = default_options.num_queries();
+    for attempt in 0..MAX_ATTEMPTS {
+        let (proof, trace) =
+            generate_test_vdf_proof_rpo_with_options(start, steps, default_options.clone());
+        if proof.num_unique_queries as usize == target_queries {
+            if attempt > 0 {
+                eprintln!(
+                    "VDF proof retries succeeded after {} attempt(s)",
+                    attempt + 1
+                );
+            }
+            return (proof, trace);
+        } else {
+            eprintln!(
+                "Retrying VDF proof: only {} unique queries (expected {}), attempt {}/{}",
+                proof.num_unique_queries,
+                target_queries,
+                attempt + 1,
+                MAX_ATTEMPTS
+            );
+        }
+    }
+
+    panic!(
+        "Unable to produce VDF proof with {} unique queries after {} attempts",
+        default_options.num_queries(),
+        MAX_ATTEMPTS
+    );
+}
+
+pub fn generate_test_vdf_proof_rpo_with_options(
+    start: BaseElement,
+    steps: usize,
+    options: ProofOptions,
+) -> (Proof, TraceTable<BaseElement>) {
+    let trace = build_vdf_trace(start, steps);
 
     // Use RPO-256 hasher to match circuit!
     type RpoHasher = winter_crypto::hashers::Rp64_256;
@@ -199,5 +235,3 @@ pub fn generate_test_vdf_proof_rpo(
 
     (proof, trace)
 }
-
-// (helper functions removed: use RPO generator directly for tests)

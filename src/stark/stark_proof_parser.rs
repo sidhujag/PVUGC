@@ -22,6 +22,13 @@ use winterfell::Proof;
 
 extern crate alloc; // For BTreeMap and Vec
 
+fn enforce_expected_queries(actual: usize, expected: usize) {
+    assert_eq!(
+        actual, expected,
+        "Proof only contains {actual} unique queries; AIR requires {expected}"
+    );
+}
+
 pub fn parse_proof_for_circuit_with_query_positions<H, V>(
     proof: &Proof,
     pub_inputs_u64: Vec<u64>,
@@ -107,14 +114,15 @@ where
     // Use provided query positions
 
     // Parse query openings
-    // Use proof.num_unique_queries as the authoritative count (what's actually in the proof)
-    // Truncate query_positions to match if we derived too many
+    // Ensure the proof opened every configured query position (no silent deduplication).
     let actual_num_queries = proof.num_unique_queries as usize;
-    let positions_for_parsing = if query_positions.len() > actual_num_queries {
-        &query_positions[..actual_num_queries]
-    } else {
-        &query_positions[..]
-    };
+    enforce_expected_queries(actual_num_queries, air_params.num_queries);
+    assert_eq!(
+        query_positions.len(),
+        air_params.num_queries,
+        "Derived query positions must match AIR num_queries"
+    );
+    let positions_for_parsing = &query_positions[..];
 
     // Gather segment widths for all trace commitments (0.13.1 exposes main + aux)
     let trace_info = proof.context.trace_info();

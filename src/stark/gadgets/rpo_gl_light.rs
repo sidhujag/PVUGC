@@ -28,7 +28,7 @@
 //! - Any digest compared to proof bytes
 //!
 
-use super::gl_fast::{gl_add_light, gl_mul_light, GlVar};
+use super::gl_fast::{gl_add_const_light, gl_add_light, gl_mul_const_light, gl_mul_light, GlVar};
 use crate::outer_compressed::InnerFr;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::fields::fp::FpVar;
@@ -134,8 +134,7 @@ fn apply_mds_light(
     for i in 0..state.len() {
         for j in 0..state.len() {
             // new_state[i] += mds[i][j] * state[j]
-            let mds_const = GlVar(FpVar::constant(InnerFr::from(mds[i][j] as u128)));
-            let prod = gl_mul_light(cs.clone(), &mds_const, &state[j])?;
+            let prod = gl_mul_const_light(cs.clone(), &state[j], mds[i][j])?;
             new_state[i] = gl_add_light(cs.clone(), &new_state[i], &prod)?;
         }
     }
@@ -165,8 +164,7 @@ fn apply_round_light(
 
     // Step 3: Add ARK1 constants
     for i in 0..state.len() {
-        let rc = GlVar(FpVar::constant(InnerFr::from(ark1[i] as u128)));
-        state[i] = gl_add_light(cs.clone(), &state[i], &rc)?;
+        state[i] = gl_add_const_light(cs.clone(), &state[i], ark1[i])?;
     }
 
     // Step 4: Apply inverse S-boxes (x^(1/7)) to ALL elements
@@ -179,8 +177,7 @@ fn apply_round_light(
 
     // Step 6: Add ARK2 constants
     for i in 0..state.len() {
-        let rc = GlVar(FpVar::constant(InnerFr::from(ark2[i] as u128)));
-        state[i] = gl_add_light(cs.clone(), &state[i], &rc)?;
+        state[i] = gl_add_const_light(cs.clone(), &state[i], ark2[i])?;
     }
 
     Ok(())
