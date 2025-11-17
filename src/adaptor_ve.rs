@@ -501,13 +501,18 @@ fn extract_t_from_ad_core(ad_core: &[u8]) -> Result<SecpAffine, Error> {
 #[cfg(test)]
 mod tests {
     use super::{AdaptorVeCircuit, *};
-    use crate::ct::AdCore;
+    use crate::ct::{serialize_gt, AdCore};
     use crate::secp256k1::{compress_secp_point, scalar_bytes_to_point};
+    use ark_ec::{pairing::Pairing, PrimeGroup};
     use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
     fn adaptor_ve_roundtrip() {
-        let key_bytes = vec![1u8; super::gt_serialized_len()];
+        let gt_elem = <Bls12_381 as Pairing>::pairing(
+            <Bls12_381 as Pairing>::G1::generator(),
+            <Bls12_381 as Pairing>::G2::generator(),
+        );
+        let key_bytes = serialize_gt::<Bls12_381>(&gt_elem.0);
         let plaintext = vec![3u8; 32];
         let mut scalar_array = [0u8; 32];
         scalar_array.copy_from_slice(&plaintext);
