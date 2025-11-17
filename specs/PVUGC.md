@@ -375,6 +375,15 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
   - Breaking GT‑XPDH: given $\{Y_j^{\rho}\},[\delta]_2^{\rho}$ and independent $R\in\mathbb{G}_T$, compute $R^{\rho}$.
   Since $M_i$ is required to derive $K_i$ and decrypt $\alpha$, the adaptor cannot be finished.
 **Independence.** $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the published bases $\{Y_j\},[\delta]_2$ and their $\rho$‑powers. DLREP soundness prevents crafting commitments that correlate $R(\mathsf{vk},x)$ with the published masks.
+* **Security dependency.** Resistance to “self‑decapper” attacks does **not** rely on DLREP constraints. Under public‑(B) aggregation, $[\gamma]_2$ exclusion, and public-output coverage, let
+  $$
+  T := \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j)\right) \cdot e(X^{(B)}_\delta, [\delta]_2)
+  $$
+  denote the public B-leg aggregation. Any tuple that makes GS‑PPE hold without a valid Groth16 proof must solve
+  $$
+  e(C, [\delta]_2) = R(\mathsf{vk},x) \cdot T^{-1},
+  $$
+  i.e., discrete logarithm in $\mathbb{G}_T$.
 * **Proof ⇒ spend (right context).** DLREP soundness + PPE verification ⇒ any verifying attestation enforces the *same* product $R(\mathsf{vk},x)$; AD/`ctx_hash` bind $(\mathsf{vk},x)$, tapleaf(+version), tx template, path tag, $T_i$, $T$, and the mask vector.
 * **Arming integrity.** Schnorr PoK ties $T_i$ to $s_i$; **PoCE‑A** proves one $\rho_i$ for both mask vectors and that $T_i$ corresponds to $s_i$; **PoCE‑B** key‑commits the ciphertext to the derived key and AD.
 * **Compartmentalization.** Unique $T$ and MuSig2 $R$ per adaptor eliminate cross‑protocol nonce reuse and Wagner‑style collisions.

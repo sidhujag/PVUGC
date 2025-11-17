@@ -116,6 +116,20 @@ Consequently the PVUGC key Ki = Hash(ser_GT(Mi) ∥ …) remains hidden and the 
 
 ---
 
+## Self-decapper resistance
+
+**Security dependency.** Resistance to “self-decapper” attacks does **not** rely on the DLREP constraints. Under public-(B) aggregation, $[\gamma]_2$ exclusion, and public-output coverage, let
+$$
+T := \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j)\right) \cdot e(X^{(B)}_\delta, [\delta]_2)
+$$
+be the publicly evaluable B-leg aggregation. Any tuple that makes GS-PPE hold without a valid Groth16 proof must solve
+$$
+e(C, [\delta]_2) = R(\mathsf{vk}, x) \cdot T^{-1},
+$$
+i.e., discrete logarithm in $\mathbb{G}_T$. Therefore a “self-decapper” would have to break the GT discrete-log assumption even if DLREP checks were omitted; DLREP soundness simply ensures that honest proofs satisfy the PPE.
+
+---
+
 ## Note on “DLIP” (target-group assumptions)
 
 The above results do not rely on any additional GT-side assumptions. One may still cite target-group assumptions such as GT-DLIN/DLIP when considering alternate formulations in which R is algebraically derived from public GT combinations, but they are unnecessary for the GT-XPDH formulation used here (in which R is uniform and independent).
