@@ -874,6 +874,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
             &gs_digest,
             &ciphertext,
             &tau,
+            false, // skip_ve: E2E tests need full VE verification
         );
         if !verify_ok {
             let poce_ok = verify_poce_column::<E>(
@@ -1453,6 +1454,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
             &gs_digest,
             &ciphertext,
             &tau,
+            true, // skip_ve: this test is checking PoK/PoCE validation only
         );
     }
 

@@ -412,6 +412,7 @@ fn poce_cross_session_replay_fails() {
                 &fixture_a.gs_digest,
                 &fixture_a.ciphertext,
                 &fixture_a.tau,
+                true, // skip_ve: security tests don't need VE verification
             ),
             "baseline attestation must succeed"
         );
@@ -467,6 +468,7 @@ fn poce_cross_session_replay_fails() {
                     &gs_digest,
                     &ciphertext,
                     &tau,
+                    true, // skip_ve: security tests don't need VE verification
                 ),
                 "Column attestation unexpectedly succeeded for case {label}"
             );

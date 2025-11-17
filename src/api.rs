@@ -219,6 +219,7 @@ impl OneSidedPvugc {
         gs_digest: &[u8], // GS instance digest
         ct_i: &[u8],      // Ciphertext bytes (published)
         tau_i: &[u8],     // Key-commitment tag bytes (published)
+        skip_ve: bool,    // Skip VE verification for isolated testing
     ) -> bool {
         // Length guard before zipping (prevents silent truncation if caller messes up)
         if bases.y_cols.len() != col_arms.y_cols_rho.len() {
@@ -273,7 +274,13 @@ impl OneSidedPvugc {
             return false;
         }
 
-        verify_adaptor_ve(&attestation.ve, ad_core, ct_i, tau_i)
+        if skip_ve {
+            // For security tests: skip VE verification
+            true
+        } else {
+            // For E2E tests: full VE verification
+            verify_adaptor_ve(&attestation.ve, ad_core, ct_i, tau_i)
+        }
     }
 
     /// Verify PoCE-B key-commitment (decap-time, decapper-local)

@@ -221,6 +221,7 @@ fn test_one_sided_pvugc_proof_agnostic() {
         &gs_digest,
         &ct,
         &tau,
+        false, // skip_ve: E2E tests need full VE verification
     ));
 
     // === SPEND TIME - PROOF 1 ===
