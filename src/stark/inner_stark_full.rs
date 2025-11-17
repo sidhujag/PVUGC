@@ -284,7 +284,10 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             eq.enforce_equal(&Boolean::constant(true))?;
         }
 
-        // Enforce non-empty queries and alignment with positions
+        // Enforce non-empty queries and alignment with positions. The circuit now requires
+        // the committed query list to be exactly `num_queries` long; if Fiat–Shamir draws
+        // collide, the prover must re-sample until all draws are distinct and the proof
+        // encodes that full set.
         if self.query_positions.is_empty() {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -988,14 +991,10 @@ fn enforce_query_positions_alignment(
     if expected_positions.len() != expected_unique_len {
         return Err(SynthesisError::Unsatisfiable);
     }
-    if total_queries == 0 {
-        if expected_unique_len == 0 {
-            return Ok(());
-        } else {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+    if total_queries == 0 || expected_unique_len == 0 {
+        return Err(SynthesisError::Unsatisfiable);
     }
-    if expected_unique_len > total_queries {
+    if expected_unique_len != total_queries {
         return Err(SynthesisError::Unsatisfiable);
     }
 
