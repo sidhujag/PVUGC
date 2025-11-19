@@ -44,14 +44,12 @@ pub mod constraints;
 #[cfg(test)]
 mod test;
 
-pub use self::data_structures::*;
-pub use self::verifier::*;
+pub use self::{data_structures::*, verifier::*};
 
 use ark_crypto_primitives::snark::*;
 use ark_ec::pairing::Pairing;
 use ark_relations::r1cs::{ConstraintSynthesizer, SynthesisError};
-use ark_std::rand::RngCore;
-use ark_std::{marker::PhantomData, vec::Vec};
+use ark_std::{marker::PhantomData, rand::RngCore, vec::Vec};
 use r1cs_to_qap::{LibsnarkReduction, R1CSToQAP};
 
 /// The SNARK of [[Groth16]](https://eprint.iacr.org/2016/260.pdf).

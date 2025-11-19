@@ -1,6 +1,7 @@
 // For benchmark, run:
-//     RAYON_NUM_THREADS=N cargo bench --no-default-features --features "std parallel" -- --nocapture
-// where N is the number of threads you want to use (N = 1 for single-thread).
+//     RAYON_NUM_THREADS=N cargo bench --no-default-features --features "std
+// parallel" -- --nocapture where N is the number of threads you want to use (N
+// = 1 for single-thread).
 
 use ark_bls12_381::{Bls12_381, Fr as BlsFr};
 use ark_crypto_primitives::snark::SNARK;

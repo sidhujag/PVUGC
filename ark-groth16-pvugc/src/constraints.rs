@@ -54,6 +54,8 @@ pub struct VerifyingKeyVar<E: Pairing, P: PairingVar<E>> {
     pub delta_g2: P::G2Var,
     #[doc(hidden)]
     pub gamma_abc_g1: Vec<P::G1Var>,
+    #[doc(hidden)]
+    pub gamma_abc_g1_raw: Vec<P::G1Var>,
 }
 
 impl<E: Pairing, P: PairingVar<E>> VerifyingKeyVar<E, P> {
@@ -71,6 +73,7 @@ impl<E: Pairing, P: PairingVar<E>> VerifyingKeyVar<E, P> {
             gamma_g2_neg_pc,
             delta_g2_neg_pc,
             gamma_abc_g1: self.gamma_abc_g1.clone(),
+            gamma_abc_g1_raw: self.gamma_abc_g1_raw.clone(),
         })
     }
 }
@@ -91,6 +94,10 @@ where
             bytes.extend(g.to_sponge_bytes()?);
             Ok(())
         })?;
+        self.gamma_abc_g1_raw.iter().try_for_each(|g| {
+            bytes.extend(g.to_sponge_bytes()?);
+            Ok(())
+        })?;
         Ok(bytes)
     }
 
@@ -102,6 +109,10 @@ where
         field_elements.extend(self.gamma_g2.to_sponge_field_elements()?);
         field_elements.extend(self.delta_g2.to_sponge_field_elements()?);
         self.gamma_abc_g1.iter().try_for_each(|g| {
+            field_elements.extend(g.to_sponge_field_elements()?);
+            Ok(())
+        })?;
+        self.gamma_abc_g1_raw.iter().try_for_each(|g| {
             field_elements.extend(g.to_sponge_field_elements()?);
             Ok(())
         })?;
@@ -125,6 +136,8 @@ pub struct PreparedVerifyingKeyVar<E: Pairing, P: PairingVar<E>> {
     pub delta_g2_neg_pc: P::G2PreparedVar,
     #[doc(hidden)]
     pub gamma_abc_g1: Vec<P::G1Var>,
+    #[doc(hidden)]
+    pub gamma_abc_g1_raw: Vec<P::G1Var>,
 }
 
 /// Constraints for the verifier of the SNARK of [[Groth16]](https://eprint.iacr.org/2016/260.pdf).
@@ -233,6 +246,17 @@ where
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let gamma_abc_g1_raw = vk
+                .gamma_abc_g1_raw
+                .iter()
+                .map(|g| {
+                    P::G1Var::new_variable_omit_prime_order_check(
+                        ark_relations::ns!(cs, "gamma_abc_g1_raw"),
+                        || Ok(g.into_group()),
+                        mode,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             Ok(VerifyingKeyVar {
                 alpha_g1,
@@ -240,6 +264,7 @@ where
                 gamma_g2,
                 delta_g2,
                 gamma_abc_g1,
+                gamma_abc_g1_raw,
             })
         })
     }
@@ -253,12 +278,12 @@ where
         let circuit_pvk = circuit_pvk.clone();
 
         let g_ic = {
-            let mut g_ic: P::G1Var = circuit_pvk.gamma_abc_g1[0].clone();
+            let mut g_ic: P::G1Var = circuit_pvk.gamma_abc_g1_raw[0].clone();
             let mut input_len = 1;
             let mut public_inputs = x.clone().into_iter();
             for (input, b) in public_inputs
                 .by_ref()
-                .zip(circuit_pvk.gamma_abc_g1.iter().skip(1))
+                .zip(circuit_pvk.gamma_abc_g1_raw.iter().skip(1))
             {
                 let encoded_input_i: P::G1Var = b.scalar_mul_le(input.to_bits_le()?.iter())?;
                 g_ic += encoded_input_i;
@@ -351,12 +376,17 @@ where
                 || Ok(pvk.vk.gamma_abc_g1.clone()),
                 mode,
             )?;
-
+            let gamma_abc_g1_raw = Vec::new_variable(
+                ark_relations::ns!(cs, "gamma_abc_g1_raw"),
+                || Ok(pvk.vk.gamma_abc_g1_raw.clone()),
+                mode,
+            )?;
             Ok(Self {
                 alpha_g1_beta_g2,
                 gamma_g2_neg_pc,
                 delta_g2_neg_pc,
                 gamma_abc_g1,
+                gamma_abc_g1_raw,
             })
         })
     }
@@ -383,6 +413,7 @@ where
                 gamma_g2,
                 delta_g2,
                 gamma_abc_g1,
+                gamma_abc_g1_raw,
             } = vk.borrow().clone();
             let alpha_g1 =
                 P::G1Var::new_variable(ark_relations::ns!(cs, "alpha_g1"), || Ok(alpha_g1), mode)?;
@@ -394,12 +425,14 @@ where
                 P::G2Var::new_variable(ark_relations::ns!(cs, "delta_g2"), || Ok(delta_g2), mode)?;
 
             let gamma_abc_g1 = Vec::new_variable(cs.clone(), || Ok(gamma_abc_g1), mode)?;
+            let gamma_abc_g1_raw = Vec::new_variable(cs.clone(), || Ok(gamma_abc_g1_raw), mode)?;
             Ok(Self {
                 alpha_g1,
                 beta_g2,
                 gamma_g2,
                 delta_g2,
                 gamma_abc_g1,
+                gamma_abc_g1_raw,
             })
         })
     }
@@ -443,6 +476,9 @@ where
         bytes.extend_from_slice(&self.gamma_g2.to_bytes_le()?);
         bytes.extend_from_slice(&self.delta_g2.to_bytes_le()?);
         for g in &self.gamma_abc_g1 {
+            bytes.extend_from_slice(&g.to_bytes_le()?);
+        }
+        for g in &self.gamma_abc_g1_raw {
             bytes.extend_from_slice(&g.to_bytes_le()?);
         }
         Ok(bytes)
