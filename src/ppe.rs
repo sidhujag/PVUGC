@@ -242,6 +242,7 @@ mod tests {
         let (_pk, mut vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
         vk.gamma_abc_g1.clear();
+        vk.gamma_abc_g1_raw.clear();
 
         let err = compute_groth16_target(&vk, &[]).unwrap_err();
         assert!(matches!(err, Error::MismatchedSizes));
