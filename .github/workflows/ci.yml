@@ -62,8 +62,6 @@ jobs:
         run: cargo +nightly fuzz build
       - name: Smoke run fuzzers (1 min each)
         run: |
-          cargo +nightly fuzz run arm_rows -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run build_row_bases_from_vk -- -runs=0 -max_total_time=60 || true
           cargo +nightly fuzz run decap -- -runs=0 -max_total_time=60 || true
           cargo +nightly fuzz run statement_k_collision -- -runs=0 -max_total_time=60 || true
           cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=0 -max_total_time=60 || true

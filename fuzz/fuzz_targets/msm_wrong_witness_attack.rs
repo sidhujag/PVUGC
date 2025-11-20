@@ -109,7 +109,7 @@ fuzz_target!(|data: &[u8]| {
     let delta_rho = (delta.into_group() * rho).into_affine();
     
     // Compute target R and R^ρ
-    let r = compute_groth16_target::<E>(&vk, &[x]).expect("Failed to compute R");
+    let _r = compute_groth16_target::<E>(&vk, &[x]).expect("Failed to compute R");
     let r_rho = <E as Pairing>::pairing(vk.alpha_g1, vk.beta_g2.into_group() * rho)
         + <E as Pairing>::pairing(vk.gamma_abc_g1[0], vk.gamma_g2.into_group() * rho);
     
@@ -182,7 +182,7 @@ fuzz_target!(|data: &[u8]| {
                 if i < vk.gamma_abc_g1.len() {
                     let g1_elem = vk.gamma_abc_g1[i].into_group() * c1;
                     
-                    for (j, &c2) in coeffs_g2.iter().enumerate() {
+                    for (j, &_c2) in coeffs_g2.iter().enumerate() {
                         if j < y_cols_rho.len() {
                             msm_result += <E as Pairing>::pairing(
                                 g1_elem,

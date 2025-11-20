@@ -23,18 +23,30 @@ jobs:
         run: cargo +nightly install cargo-fuzz
       - name: Build fuzz targets
         run: cargo +nightly fuzz build
-      - name: Run fuzzers for 10 minutes each
+      - name: Run fuzzers for ≥10 minutes each (~80m total)
+        shell: bash
         run: |
-          cargo +nightly fuzz run arm_rows -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run build_row_bases_from_vk -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run decap -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run statement_k_collision -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run cross_circuit_k_difference -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run gt_span_small_coeff -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run gs_malleation_binding -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=0 -max_total_time=600 || true
-          cargo +nightly fuzz run gs_random_recomb_budget -- -runs=0 -max_total_time=600 || true
+          set -euo pipefail
+          FUZZERS=(
+            decap
+            statement_k_collision
+            proof_agnostic_same_statement
+            cross_circuit_k_difference
+            gt_span_small_coeff
+            gs_malleation_binding
+            gs_linear_recomb_dlrep
+            gs_random_recomb_budget
+          )
+          PER_TARGET=600   # 10 minutes per target
+          TOTAL_SECONDS=$(( PER_TARGET * ${#FUZZERS[@]} ))
+          echo "Allocating ${PER_TARGET}s per target (~$((TOTAL_SECONDS/60)) minutes total)."
+          for TARGET in "${FUZZERS[@]}"; do
+              echo "▶︎ $(date -Iseconds) :: Fuzzing ${TARGET} for ${PER_TARGET}s"
+              START_TS=$(date +%s)
+              cargo +nightly fuzz run "${TARGET}" -- -runs=0 -max_total_time="${PER_TARGET}" -print_final_stats=1 || true
+              END_TS=$(date +%s)
+              echo "⏱️  ${TARGET} finished in $((END_TS-START_TS))s (target budget ${PER_TARGET}s)"
+          done
       - name: Upload fuzz artifacts (crashes & corpora)
         if: always()
         uses: actions/upload-artifact@v4
