@@ -86,4 +86,10 @@ path = "fuzz_targets/gs_random_recomb_budget.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "msm_wrong_witness_attack"
+path = "fuzz_targets/msm_wrong_witness_attack.rs"
+test = false
+bench = false
+
 
