@@ -1,83 +1,188 @@
-# Generic Bilinear Proof for PVUGC Decapsulation (Hardened Scheme)
+# PVUGC Security Analysis: GBGM and Computational Reduction
 
-We analyze decapsulation in the algebraic generic bilinear group model (GBGM). The adversary receives the entire public transcript for a fixed statement (vk, x) and may fabricate arbitrary G₁ points, evaluate any pairings, and combine the results in G_T. We show that with the hardened arming policy—aggregate the public B-column and never arm γ₂—no such adversary can recover the KEM key M = R(vk, x)^ρ except with negligible probability. We also show the original per-public arming is generically breakable, matching the intuition that a decryptor could "separate" (a+b)(x+y) into ax+by inside G_T.
+This document provides both a generic bilinear group model (GBGM) analysis and a computational reduction to DDH/SXDH for PVUGC decapsulation security with hardened arming.
 
-## Setup (algebraic GBGM)
+## Executive Summary
 
-- Prime-order (G₁,G₂,G_T) with a non-degenerate bilinear pairing e. In the algebraic GBGM every group handle carries its (hidden) linear form in a set of formal indeterminates; the adversary is restricted to algebraic manipulations (additions, known-integer scalings, pairings).
+We prove PVUGC decapsulation security via two complementary approaches:
+1. **Generic Model**: In GBGM, adversaries cannot produce R^ρ except with negligible probability
+2. **Computational Reduction**: Any adversary producing R^ρ (by ANY method) breaks DDH in G₂
 
-- **CRS / vk:**
-  - G₂: independently sampled β₂, γ₂, δ₂ and query points Q_1,…,Q_m, with γ₂ ∉ span{β₂, Q_j, δ₂}.
-  - G₁: α₁ and the instance commitment IC(x) (assumed non-zero; we salt deterministically if needed).
-  - Exponent indeterminates: a, i_x for α₁, IC(x), y_β, y_γ, y_δ, y_j for the G₂ bases, and u_1, u_2, … for adversary-chosen G₁ seeds.
+The computational reduction is the stronger result, providing standard-model security without generic assumptions.
 
-The only programmed relation is
+## System Overview
 
-    y_pub = y_β + Σ_{i=1}^{ℓ} x_i y_i,
+### Modified Groth16 Structure
+Standard Groth16 uses the verification equation:
+```
+e(A,B) = e(α₁,β₂) · e(IC(x)/γ,γ₂) · e(C,δ₂)
+```
+where the instance commitment IC is scaled by 1/γ.
 
-corresponding to the aggregated public column B_pub(vk,x).
+For PVUGC, we modify this to:
+```
+e(A,B) = e(α₁,β₂) · e(IC(x),γ₂) · e(C,δ₂)
+```
+where IC(x) is unscaled. We re-parameterize the proving key and verifier so that honest proofs satisfy this equation. One way to achieve this is to precompute queries `[(1-γ)/δ · f_i(τ)]₁` in the proving key and have the prover add their x-linear combination to C.
 
-- **Arming (hardened):** sample fresh ρ ← 𝔽_r^* and publish only
+#### Why This Convention Is Safe
 
-    { B_pub^ρ, Q_j^ρ (j>ℓ), δ₂^ρ }.
+**Soundness/Zero-knowledge/Extraction**: The adjustment is a CRS re-parameterization; it preserves the standard Groth16 arguments because the simulator/extractor receive the same linear combinations of trapdoor scalars. The benefit is purely notational: IC(x) remains unscaled, which lets us embed the DDH challenge by setting γ₂ directly to the challenge handle without ever needing its discrete log.
 
-We never publish γ₂^ρ nor individual public masks β₂^ρ or Q_i^ρ for i≤ℓ.
+### PVUGC Anchor
+```
+R(vk,x) := e(α₁,β₂) · e(IC(x),γ₂)
+```
 
-- **KEM anchor:** R = e(α₁,β₂)·e(IC(x),γ₂). The decapper's target is M = R^ρ.
+### Hardened Arming Policy
+Given ρ ← 𝔽ᵣ*, publish:
+- D_pub = (β₂ + Σᵢ≤ℓ xᵢQᵢ)^ρ (aggregated public column)
+- Dⱼ = Qⱼ^ρ for j > ℓ (individual witness columns)
+- D_δ = δ₂^ρ (delta column)
 
-## Reachable subgroup in G_T
+Never publish γ₂^ρ or individual public column masks.
 
-Define the armed right-legs
+---
 
-    ArmedRight^ρ := { B_pub^ρ, Q_j^ρ (j>ℓ), δ₂^ρ }
+## Part I: Generic Bilinear Group Model Analysis
 
-and the subgroup they generate in G_T
+### Setup (Algebraic GBGM)
 
-    𝓗 := ⟨ e(U, Y^ρ) : U ∈ G₁, Y^ρ ∈ ArmedRight^ρ ⟩ ⊆ G_T.
+- Prime-order groups (G₁,G₂,G_T) with pairing e
+- Adversary restricted to algebraic operations
+- CRS elements: α₁, β₂, γ₂, δ₂, {Qⱼ}
+- Formal indeterminates: a, i_x, y_β, y_γ, y_δ, {yⱼ}
 
-**Lemma 1 (Reachability).** In the algebraic GBGM, the ρ-dependent part of the exponent of any reachable G_T handle lies in
+### Reachable Subgroup in G_T
 
-    ρ · span{ y_pub, y_j (j>ℓ), y_δ }.
+**Definition**: Armed right-legs
+```
+ArmedRight^ρ := {B_pub^ρ, Qⱼ^ρ (j>ℓ), δ₂^ρ}
+```
 
-In particular, no sequence of oracle queries can produce any handle whose exponent contains a non-zero ρ·y_γ term (equivalently, no e(·,γ₂^ρ) contribution can appear).
+**Lemma 1 (Reachability)**: In algebraic GBGM, any reachable G_T element has ρ-dependent exponent in:
+```
+ρ · span{y_pub, yⱼ (j>ℓ), y_δ}
+```
+Crucially, no ρ·y_γ terms can appear.
 
-**Proof sketch.** Pairing with a masked right leg produces monomials of the form ρ·L(U)·y_* (degree ≤3 in the indeterminates); pairing with unmasked CRS elements produces terms with no ρ; operations in G_T add exponents and scale by known integers. Thus every reachable exponent polynomial has degree ≤3 and its ρ-portion is confined to the span above. ∎
+### Decapsulation Hardness in GBGM
 
-## Decapsulation hardness in GBGM
+**Lemma 2**: Any algebraic generic adversary making q queries satisfies:
+```
+Pr[outputs R^ρ] ≤ c·q²/r
+```
 
-Let r_* = a·y_β + i_x·y_γ so that R = g_T^{r_*}. The decapper must output R^ρ = g_T^{ρ·r_*}.
+**Proof sketch**: The target R^ρ contains ρ·i_x·y_γ, but reachable elements have coefficient 0 for ρ·y_γ. Equality requires spurious collision (probability ≤ q²/r).
 
-**Lemma 2.** Any algebraic generic adversary making at most q oracle queries satisfies
+### Generic Attack on Unhardened Scheme
 
-    Pr[outputs R^ρ] ≤ c · q²/r
+With individual public masks (β₂^ρ, Qᵢ^ρ for i≤ℓ), adversary can:
+1. Lift identity e(γ_abc[i],γ₂) = e(Aᵢ(τ),β₂)·e(α₁,Bᵢ(τ))
+2. Sum to get e(IC(x),γ₂^ρ)
+3. Multiply by e(α₁,β₂^ρ) to recover R^ρ
 
-for an absolute constant c.
+This is the "(a+b)(x+y) → ax+by" attack that hardened arming prevents.
 
-**Proof idea.** Every reachable exponent has the form
+---
 
-    E_H(𝓥) = ρ·F_H(y_pub,{y_j}_{j>ℓ},y_δ;u) + G_H(y_β,y_γ;u) + c_H·r_*,
+## Part II: Computational Reduction to DDH (pairing-aware, no uniqueness)
 
-with c_H ∈ ℤ. By Lemma 1, the coefficient of ρ·y_γ in E_H is always zero, while in the target E_* = ρ·r_* = ρ·(a·y_β + i_x·y_γ) it equals i_x. In the algebraic GBGM, the only way those polynomials can coincide is via a spurious algebraic equality among the ≤q produced handles—an event bounded by O(q²/r); see the standard generic-group collision analysis. ∎
+**Setting.** The outer SNARK is Groth16 with verifier equation
+```
+e(A,B) = e(α₁,β₂) · e(IC(x),γ₂) · e(C,δ₂).
+```
+**Notation.** G₁ and G₂ use additive group law internally (we still write Y^ρ for scalar multiplication); G_T is multiplicative.
+PVUGC publishes only
+```
+D_pub = (β₂ + Σᵢ≤ℓ xᵢ Qᵢ)^ρ,   Dⱼ = Qⱼ^ρ (j>ℓ),   D_δ = δ₂^ρ,
+```
+and never any right-leg with a γ₂ component. Define R(vk,x)=e(α₁,β₂)·e(IC(x),γ₂).
 
-**Interpretation.** The adversary may "mix" pairings arbitrarily in G_T, but all ρ-bearing terms remain trapped in 𝓗. Because R^ρ carries an unarmed γ₂^ρ leg, it lies outside 𝓗 (unless IC(x)=0, which we exclude/salt). Hence mixing cannot reach M.
+### Theorem (PVUGC decap ⇒ DDH in G₂)
 
-**Corollary (GT-XPDH/SXDH view).** Equivalently, computing R^ρ from {Y, Y^ρ} breaks the masked-basis external Diffie–Hellman problem (GT-XPDH). In a selectively programmed instance one can cancel the armed β-part to recover e(IC(x),γ₂^ρ), directly solving XPDH—again yielding an O(q²/r)-type bound under SXDH.
+Let a PPT adversary 𝒜, with full pairing access and arbitrary G_T mixing, output M = R^ρ with probability ε. Then there exists a PPT distinguisher ℬ for DDH in G₂ with advantage at least ε - 1/r.
 
-## Unhardened scheme ⇒ generic break
+**Proof (explicit, pairing-aware).** Given a DDH challenge (g₂, X=g₂^ρ, Y=g₂^v, T), construct a real-looking PVUGC instance as follows.
 
-If the arming phase also publishes per-public masks (β₂^ρ, Q_i^ρ for i ≤ ℓ), the adversary gains masked handles for every B-column. In GBGM it can then lift the identities
+1. **Program the structured CRS.** Sample α₀,{αᵢ},α_δ ∈ 𝔽_r. Set β₂:=g₂^{α₀}, Qᵢ:=g₂^{αᵢ}, δ₂:=g₂^{α_δ}, γ₂:=Y. Sample u←𝔽_r^* and set α₁:=g₁^u. Publish IC(x) for a fixed x with IC(x)≠0.
 
-    e(γ_{abc}[i],γ₂) = e(A_i(τ),β₂)·e(α₁,B_i(τ))
+2. **Publish armed right-legs** using scalar linearity in G₂ (additive in G₂, multiplicative in G_T):
+```
+D_pub = α₀·X + Σᵢ≤ℓ xᵢ (αᵢ·X),   Dⱼ = αⱼ·X (j>ℓ),   D_δ = α_δ·X.
+```
 
-under ρ and sum over i to obtain e(IC(x),γ₂^ρ); multiplying by e(α₁,β₂^ρ) recovers R^ρ without a witness. This is exactly the "(a+b)(x+y) ⇒ ax+by" phenomenon and motivates the hardened rule (aggregate the public column; never arm γ₂).
+3. **Publish the anchor** R:=e(α₁,β₂)·e(IC(x),γ₂)=e(g₁^u,g₂^{α₀})·e(IC(x),Y).
 
-## Hygiene (required)
+4. **Run 𝒜** on the simulated instance; obtain M★ ∈ G_T.
 
-1. Never publish γ₂^ρ (nor any right-hand element with a γ₂ component).
-2. Ensure IC(x) ≠ 0 (salt deterministically if needed).
-3. Sample CRS elements independently, with γ₂ ∉ span{β₂,Q_j,δ₂}.
-4. Use a fresh ρ for every instance.
+5. **Decide DDH (corrected rule).** Compute
+```
+M' := M★ · e(α₁,β₂^ρ)^{-1}
+     = M★ · e(g₁^u, α₀·X)^{-1},
+T' := e(IC(x), T).
+```
+Output “DH” iff M' = T'.
 
-## Instantiation note
+- If T = Y^ρ (DH): T' = e(IC(x),Y)^ρ = e(IC(x),γ₂)^ρ. When 𝒜 succeeds, M★ = R^ρ = e(α₁,β₂)^ρ · e(IC(x),γ₂)^ρ, hence M' = T'. Success probability ε.
 
-In PVUGC, Y_0 = B_pub(vk,x) aggregates the constant and all public B-columns; Y_j for j>0 enumerate witness-only entries of b_g2_query. The arming phase publishes only Y_0^ρ, Y_j^ρ for j>ℓ, and δ₂^ρ; DLREP/GS artifacts never add new ρ-bearing bases, and γ₂ is excluded by construction. Thus the concrete system matches the abstract interface used above.
+- If T is uniform in G₂: T' is uniform in G_T and independent of M'. Thus Pr[M'=T']=1/r.
+
+Therefore Adv^DDH_G₂(ℬ) ≥ ε - 1/r. ∎
+
+**Remarks.** The simulation is exact for (β₂,Qᵢ,δ₂) and their masks (published as known scalar multiples of X), and γ₂ is independent as in the honest CRS. The reduction treats 𝒜 as a black box and requires no uniqueness assumptions in G_T.
+
+### Why Any Valid Proof Gives R^ρ
+
+For any valid (A,B,C) satisfying the verifier equation and any decomposition B = B_pub + Σ_{j>ℓ} bⱼ Qⱼ + s·δ₂,
+```
+M = e(A,B_pub^ρ) · ∏_{j>ℓ} e(bⱼ A, Qⱼ^ρ) · e(sA, δ₂^ρ) · e(C, δ₂^ρ)^{-1}
+  = (e(A,B) · e(C,δ₂)^{-1})^ρ
+  = (e(α₁,β₂) · e(IC(x),γ₂))^ρ
+  = R^ρ.
+```
+All group laws are multiplicative in G_T; the sum that defines B is in G₂. The identity holds for every valid proof, independent of how the witness was obtained.
+
+---
+
+## Security Requirements
+
+1. **Never publish γ₂^ρ** or any element with γ₂ component
+2. **Ensure IC(x) ≠ 0** (salt if needed)
+3. **Sample CRS independently** with γ₂ ∉ span{β₂,Qⱼ,δ₂}
+4. **Use fresh ρ per instance**
+
+---
+
+
+## Implications
+
+### What This Proves
+- PVUGC decapsulation is as hard as DDH in G₂ (SXDH)
+- Security holds even with individual witness columns exposed  
+- GT-level "mix and match" attacks would break DDH
+- The reduction works black-box without any uniqueness assumptions
+
+### What This Addresses
+Under DDH/SXDH, any GT-level mix-and-match strategy that succeeds with noticeable probability would immediately give a DDH break, so relative to those assumptions this addresses concerns about GT-level adversaries who can:
+- Mix witness columns arbitrarily
+- Exploit pairing structures beyond R1CS constraints
+- Use any algebraic identity in GT
+- Find alternative polynomial relations that bypass rank-1 structure
+
+Any such attack succeeding with non-negligible probability breaks DDH/SXDH.
+
+### Why the Groth16 Modification Matters
+The removal of the 1/γ scaling factor from IC(x) is essential for the security reduction:
+- **Standard Groth16**: IC scaled by 1/γ would require knowing γ to embed the DDH challenge
+- **Modified version**: Unscaled IC allows programming γ₂ = Y without knowing its discrete log
+- **Security preserved**: The re-parameterization maintains all Groth16 security properties
+
+
+---
+
+## Conclusion
+
+PVUGC decapsulation security rests on two standard assumptions:
+1. **Groth16 soundness** (for proof verification)
+2. **DDH in G₂/SXDH** (for decapsulation hardness via the reduction)
