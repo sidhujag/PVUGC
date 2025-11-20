@@ -4,23 +4,28 @@
 
 use crate::error::{Error, Result};
 use ark_ec::pairing::{Pairing, PairingOutput};
-use ark_ec::AffineRepr;
+use ark_ec::{AffineRepr, PrimeGroup};
 use ark_ff::PrimeField;
 use ark_groth16::VerifyingKey as Groth16VK;
 use ark_std::Zero;
 
 /// Compute the Groth16 verifier target R(vk, x)
 ///
-/// R(vk,x) = e(α, β) · e(L(x), γ)
+/// R(vk,x) = e(alpha, beta) · e(L_raw(x), gamma)
 /// where L(x) = Σ x_i · [γ_i]₁
 pub fn compute_groth16_target<E: Pairing>(
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
-    if vk.gamma_abc_g1.is_empty() {
+    let ic_bases = if !vk.gamma_abc_g1_raw.is_empty() {
+        &vk.gamma_abc_g1_raw
+    } else if !vk.gamma_abc_g1.is_empty() {
+        &vk.gamma_abc_g1
+    } else {
         return Err(Error::MismatchedSizes);
-    }
-    let expected_inputs = vk.gamma_abc_g1.len().saturating_sub(1);
+    };
+
+    let expected_inputs = ic_bases.len().saturating_sub(1);
     if public_inputs.len() != expected_inputs {
         return Err(Error::PublicInputLength {
             expected: expected_inputs,
@@ -28,14 +33,14 @@ pub fn compute_groth16_target<E: Pairing>(
         });
     }
 
-    // Compute L(x) = vk.gamma_abc_g1[0] + Σ x_i · vk.gamma_abc_g1[i+1]
-    let mut l = vk.gamma_abc_g1[0].into_group();
+    // Compute L(x) over whichever IC vector is available
+    let mut l = ic_bases[0].into_group();
 
-    for (gamma, x_i) in vk.gamma_abc_g1.iter().skip(1).zip(public_inputs.iter()) {
+    for (gamma, x_i) in ic_bases.iter().skip(1).zip(public_inputs.iter()) {
         l += gamma.into_group() * x_i;
     }
 
-    // R = e(α, β) + e(L(x), γ)  (additive notation in arkworks)
+    // R = e(alpha, beta) + e(L_raw(x), gamma)  (additive notation in arkworks)
     let r = E::pairing(vk.alpha_g1, vk.beta_g2) + E::pairing(l, vk.gamma_g2);
 
     Ok(r)
@@ -89,6 +94,11 @@ pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
     }
     if !is_good_g2(&vk.delta_g2) {
         return false;
+    }
+    for g in &vk.gamma_abc_g1_raw {
+        if !g.into_group().mul_bigint(order).is_zero() {
+            return false;
+        }
     }
     true
 }
@@ -208,7 +218,8 @@ mod tests {
             x: Some(Fr::from(25u64)),
             y: Some(Fr::from(5u64)),
         };
-        let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+        let (_pk, vk) =
+            Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
         let public_inputs = vec![Fr::from(25u64)];
 
@@ -237,6 +248,7 @@ mod tests {
         let (_pk, mut vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
         vk.gamma_abc_g1.clear();
+        vk.gamma_abc_g1_raw.clear();
 
         let err = compute_groth16_target(&vk, &[]).unwrap_err();
         assert!(matches!(err, Error::MismatchedSizes));

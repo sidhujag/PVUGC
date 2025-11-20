@@ -1,5 +1,12 @@
 # Appendix: AGM-SSRS Span-Separation Lemma and Selective-Programming Reduction
 
+This appendix analyzes the PVUGC-specific Groth16 variant (no 1/γ scaling inside IC(x)). These tweaks are opt-in and only exercised by the PVUGC outer prover; the rest of the Groth16 codebase continues to run in the traditional mode.
+
+**PVUGC-only CRS adjustments**
+- The verifier key exposes both the classic `IC` (scaled by 1/γ) and an unscaled `IC_raw`; PVUGC only references `IC_raw` when forming the anchor.
+- The proving key ships the `[(1-γ)/δ · f_i(τ)]₁` correction query so that the PVUGC prover can add the public-input linear combo to `C` and satisfy `e(A,B)=e(α₁,β₂)·e(IC_raw(x),γ₂)·e(C,δ₂)`.
+- All right-leg masks are aggregated: the β/public column is armed only as `B_pub^ρ`, witness columns remain separate, and γ₂ is never armed.
+
 ## 1. The AGM-SSRS Model
 
 ### Definition (Algebraic Group Model with Structured SRS)
@@ -54,7 +61,7 @@ where crucially, the coefficient of ρ·γ in log(H) is always 0.
    - This would mean Σ cⱼQⱼ = a·γ₂ + b·β₂ + ... in G₂
    - Contradicts independence hygiene γ₂ ∉ span{β₂, Qⱼ, δ₂}
 
-**Conclusion**: The ρ·γ monomial never appears, while R^ρ = e(α₁,β₂)^ρ · e(IC(x),γ₂)^ρ requires it with coefficient i_x ≠ 0. □
+**Conclusion**: The ρ·γ monomial never appears, while R^ρ = e(α₁,β₂)^ρ · e(IC(x),γ₂)^ρ (with IC(x) unscaled) requires it with coefficient i_x ≠ 0. □
 
 ## 3. Selective-Programming Reduction to XPDH
 
@@ -71,7 +78,7 @@ If adversary A breaks PVUGC decapsulation with advantage ε, then we construct B
 1. **Setup Phase**:
    - Receive GT-XPDH challenge with Y₀ = β₂, {Yⱼ = Qⱼ}_{j>ℓ}, Y_δ = δ₂
    - Choose public inputs x* such that B_pub = β₂ (possible by setting all xᵢ = 0)
-   - Set R = e(α₁,β₂) · e(IC(x*),γ₂) as the KEM anchor
+   - Set R = e(α₁,β₂) · e(IC(x*),γ₂) as the KEM anchor (the target without 1/γ)
 
 2. **Arming Simulation**:
    - Publish D_pub = Y₀^ρ = β₂^ρ (since B_pub = β₂)

@@ -118,13 +118,13 @@ pub fn compute_target_outer_for<C: RecursionCycle>(
         .map(fr_inner_to_outer_for::<C>)
         .collect();
 
-    // Compute L(x) = γ_abc_g1[0] + Σ x_i * γ_abc_g1[i+1]
-    let mut l = vk_outer.gamma_abc_g1[0].into_group();
+    // Compute L_raw(x) = γ_abc_g1_raw[0] + Σ x_i * γ_abc_g1_raw[i+1]
+    let mut l = vk_outer.gamma_abc_g1_raw[0].into_group();
     for (i, xi) in x_outer.iter().enumerate() {
-        l += vk_outer.gamma_abc_g1[i + 1] * xi;
+        l += vk_outer.gamma_abc_g1_raw[i + 1] * xi;
     }
 
-    // R = e(α,β) * e(L,γ)
+    // R = e(alpha,beta) * e(L_raw, gamma)
     C::OuterE::pairing(vk_outer.alpha_g1, vk_outer.beta_g2)
         + C::OuterE::pairing(l, vk_outer.gamma_g2)
 }

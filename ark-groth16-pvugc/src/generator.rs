@@ -1,13 +1,12 @@
 use crate::{r1cs_to_qap::R1CSToQAP, Groth16, ProvingKey, Vec, VerifyingKey};
-use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, CurveGroup};
-use ark_ff::{Field, UniformRand, Zero};
+use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing, AffineRepr, CurveGroup};
+use ark_ff::{Field, One, UniformRand, Zero};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{
     ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, Result as R1CSResult,
     SynthesisError, SynthesisMode,
 };
-use ark_std::rand::Rng;
-use ark_std::{cfg_into_iter, cfg_iter};
+use ark_std::{cfg_into_iter, cfg_iter, rand::Rng};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -23,6 +22,28 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
     where
         C: ConstraintSynthesizer<E::ScalarField>,
     {
+        Self::generate_random_parameters_with_mode(circuit, rng, false)
+    }
+
+    /// Generates a random CRS using the PVUGC variant.
+    pub fn generate_random_parameters_with_reduction_pvugc<C>(
+        circuit: C,
+        rng: &mut impl Rng,
+    ) -> R1CSResult<ProvingKey<E>>
+    where
+        C: ConstraintSynthesizer<E::ScalarField>,
+    {
+        Self::generate_random_parameters_with_mode(circuit, rng, true)
+    }
+
+    fn generate_random_parameters_with_mode<C>(
+        circuit: C,
+        rng: &mut impl Rng,
+        enable_pvugc: bool,
+    ) -> R1CSResult<ProvingKey<E>>
+    where
+        C: ConstraintSynthesizer<E::ScalarField>,
+    {
         let alpha = E::ScalarField::rand(rng);
         let beta = E::ScalarField::rand(rng);
         let gamma = E::ScalarField::rand(rng);
@@ -31,7 +52,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let g1_generator = E::G1::rand(rng);
         let g2_generator = E::G2::rand(rng);
 
-        Self::generate_parameters_with_qap(
+        Self::generate_parameters_with_qap_mode(
             circuit,
             alpha,
             beta,
@@ -40,10 +61,12 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
             g1_generator,
             g2_generator,
             rng,
+            enable_pvugc,
         )
     }
 
-    /// Create parameters for a circuit, given some toxic waste, R1CS to QAP calculator and group generators
+    /// Create parameters for a circuit, given some toxic waste, R1CS to QAP
+    /// calculator and group generators
     pub fn generate_parameters_with_qap<C>(
         circuit: C,
         alpha: E::ScalarField,
@@ -53,6 +76,60 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         g1_generator: E::G1,
         g2_generator: E::G2,
         rng: &mut impl Rng,
+    ) -> R1CSResult<ProvingKey<E>>
+    where
+        C: ConstraintSynthesizer<E::ScalarField>,
+    {
+        Self::generate_parameters_with_qap_mode(
+            circuit,
+            alpha,
+            beta,
+            gamma,
+            delta,
+            g1_generator,
+            g2_generator,
+            rng,
+            false,
+        )
+    }
+
+    /// Create parameters using the PVUGC variant that exposes IC raw entries.
+    pub fn generate_parameters_with_qap_pvugc<C>(
+        circuit: C,
+        alpha: E::ScalarField,
+        beta: E::ScalarField,
+        gamma: E::ScalarField,
+        delta: E::ScalarField,
+        g1_generator: E::G1,
+        g2_generator: E::G2,
+        rng: &mut impl Rng,
+    ) -> R1CSResult<ProvingKey<E>>
+    where
+        C: ConstraintSynthesizer<E::ScalarField>,
+    {
+        Self::generate_parameters_with_qap_mode(
+            circuit,
+            alpha,
+            beta,
+            gamma,
+            delta,
+            g1_generator,
+            g2_generator,
+            rng,
+            true,
+        )
+    }
+
+    fn generate_parameters_with_qap_mode<C>(
+        circuit: C,
+        alpha: E::ScalarField,
+        beta: E::ScalarField,
+        gamma: E::ScalarField,
+        delta: E::ScalarField,
+        g1_generator: E::G1,
+        g2_generator: E::G2,
+        rng: &mut impl Rng,
+        enable_pvugc: bool,
     ) -> R1CSResult<ProvingKey<E>>
     where
         C: ConstraintSynthesizer<E::ScalarField>,
@@ -73,8 +150,8 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         cs.finalize();
         end_timer!(lc_time);
 
-        // Following is the mapping of symbols from the Groth16 paper to this implementation
-        // l -> num_instance_variables
+        // Following is the mapping of symbols from the Groth16 paper to this
+        // implementation l -> num_instance_variables
         // m -> qap_num_variables
         // x -> t
         // t(x) - zt
@@ -110,10 +187,14 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let gamma_inverse = gamma.inverse().ok_or(SynthesisError::UnexpectedIdentity)?;
         let delta_inverse = delta.inverse().ok_or(SynthesisError::UnexpectedIdentity)?;
 
-        let gamma_abc = cfg_iter!(a[..num_instance_variables])
+        let gamma_abc_raw = cfg_iter!(a[..num_instance_variables])
             .zip(&b[..num_instance_variables])
             .zip(&c[..num_instance_variables])
-            .map(|((a, b), c)| (beta * a + &(alpha * b) + c) * &gamma_inverse)
+            .map(|((a, b), c)| beta * a + &(alpha * b) + c)
+            .collect::<Vec<_>>();
+        let gamma_abc = gamma_abc_raw
+            .iter()
+            .map(|coeff| *coeff * &gamma_inverse)
             .collect::<Vec<_>>();
 
         let l = cfg_iter!(a[num_instance_variables..])
@@ -181,6 +262,24 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         let verifying_key_time = start_timer!(|| "Generate the R1CS verification key");
         let gamma_g2 = g2_generator * &gamma;
         let gamma_abc_g1 = g1_table.batch_mul(&gamma_abc);
+        let gamma_abc_g1_raw = if enable_pvugc {
+            gamma_abc_g1
+                .iter()
+                .map(|g| (g.into_group() * gamma).into_affine())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let ic_correction_g1 = if enable_pvugc {
+            let one_minus_gamma = E::ScalarField::one() - gamma;
+            let one_minus_gamma_over_delta = one_minus_gamma * &delta_inverse;
+            gamma_abc_g1_raw
+                .iter()
+                .map(|g| (g.into_group() * one_minus_gamma_over_delta).into_affine())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         drop(g1_table);
 
         end_timer!(verifying_key_time);
@@ -191,6 +290,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
             gamma_g2: gamma_g2.into_affine(),
             delta_g2: delta_g2.into_affine(),
             gamma_abc_g1,
+            gamma_abc_g1_raw,
         };
 
         end_timer!(setup_time);
@@ -204,6 +304,7 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
             b_g2_query,
             h_query,
             l_query,
+            ic_correction_g1,
         })
     }
 }
