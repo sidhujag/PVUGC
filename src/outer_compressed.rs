@@ -201,7 +201,7 @@ pub fn setup_outer_params_for<C: RecursionCycle>(
 
     let circuit = OuterCircuit::<C>::new(vk_inner.clone(), dummy_x, dummy_proof);
 
-    let (pk, vk) = Groth16::<C::OuterE>::circuit_specific_setup(circuit, rng)?;
+    let (pk, vk) = Groth16::<C::OuterE>::circuit_specific_setup_pvugc(circuit, rng)?;
 
     Ok((pk, vk))
 }

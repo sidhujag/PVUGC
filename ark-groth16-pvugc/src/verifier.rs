@@ -26,15 +26,18 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         pvk: &PreparedVerifyingKey<E>,
         public_inputs: &[E::ScalarField],
     ) -> R1CSResult<E::G1> {
-        if (public_inputs.len() + 1) != pvk.vk.gamma_abc_g1_raw.len() {
+        let ic_bases = if pvk.vk.gamma_abc_g1_raw.is_empty() {
+            &pvk.vk.gamma_abc_g1
+        } else {
+            &pvk.vk.gamma_abc_g1_raw
+        };
+
+        if (public_inputs.len() + 1) != ic_bases.len() {
             return Err(SynthesisError::MalformedVerifyingKey);
         }
 
-        let mut g_ic = pvk.vk.gamma_abc_g1_raw[0].into_group();
-        for (i, b) in public_inputs
-            .iter()
-            .zip(pvk.vk.gamma_abc_g1_raw.iter().skip(1))
-        {
+        let mut g_ic = ic_bases[0].into_group();
+        for (i, b) in public_inputs.iter().zip(ic_bases.iter().skip(1)) {
             g_ic.add_assign(&b.mul_bigint(i.into_bigint()));
         }
 

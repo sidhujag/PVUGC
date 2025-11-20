@@ -278,12 +278,17 @@ where
         let circuit_pvk = circuit_pvk.clone();
 
         let g_ic = {
-            let mut g_ic: P::G1Var = circuit_pvk.gamma_abc_g1_raw[0].clone();
+            let ic_bases = if circuit_pvk.gamma_abc_g1_raw.is_empty() {
+                &circuit_pvk.gamma_abc_g1
+            } else {
+                &circuit_pvk.gamma_abc_g1_raw
+            };
+            let mut g_ic: P::G1Var = ic_bases[0].clone();
             let mut input_len = 1;
             let mut public_inputs = x.clone().into_iter();
             for (input, b) in public_inputs
                 .by_ref()
-                .zip(circuit_pvk.gamma_abc_g1_raw.iter().skip(1))
+                .zip(ic_bases.iter().skip(1))
             {
                 let encoded_input_i: P::G1Var = b.scalar_mul_le(input.to_bits_le()?.iter())?;
                 g_ic += encoded_input_i;
@@ -291,7 +296,7 @@ where
             }
             // Check that the input and the query in the verification are of the
             // same length.
-            assert!(input_len == circuit_pvk.gamma_abc_g1.len() && public_inputs.next().is_none());
+            assert!(input_len == ic_bases.len() && public_inputs.next().is_none());
             g_ic
         };
 

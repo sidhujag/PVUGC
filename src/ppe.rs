@@ -17,10 +17,15 @@ pub fn compute_groth16_target<E: Pairing>(
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
-    if vk.gamma_abc_g1_raw.is_empty() {
+    let ic_bases = if !vk.gamma_abc_g1_raw.is_empty() {
+        &vk.gamma_abc_g1_raw
+    } else if !vk.gamma_abc_g1.is_empty() {
+        &vk.gamma_abc_g1
+    } else {
         return Err(Error::MismatchedSizes);
-    }
-    let expected_inputs = vk.gamma_abc_g1_raw.len().saturating_sub(1);
+    };
+
+    let expected_inputs = ic_bases.len().saturating_sub(1);
     if public_inputs.len() != expected_inputs {
         return Err(Error::PublicInputLength {
             expected: expected_inputs,
@@ -28,10 +33,10 @@ pub fn compute_groth16_target<E: Pairing>(
         });
     }
 
-    // Compute L_raw(x) = vk.gamma_abc_g1_raw[0] + Σ x_i · vk.gamma_abc_g1_raw[i+1]
-    let mut l = vk.gamma_abc_g1_raw[0].into_group();
+    // Compute L(x) over whichever IC vector is available
+    let mut l = ic_bases[0].into_group();
 
-    for (gamma, x_i) in vk.gamma_abc_g1_raw.iter().skip(1).zip(public_inputs.iter()) {
+    for (gamma, x_i) in ic_bases.iter().skip(1).zip(public_inputs.iter()) {
         l += gamma.into_group() * x_i;
     }
 
@@ -213,7 +218,8 @@ mod tests {
             x: Some(Fr::from(25u64)),
             y: Some(Fr::from(5u64)),
         };
-        let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+        let (_pk, vk) =
+            Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
         let public_inputs = vec![Fr::from(25u64)];
 
