@@ -150,4 +150,6 @@ pub struct ProvingKey<E: Pairing> {
     pub h_query: Vec<E::G1Affine>,
     /// The elements `l_i * G` in `E::G1`.
     pub l_query: Vec<E::G1Affine>,
+    /// Correction bases for Convention-B IC ( ((1-γ)/δ) * γ_abc_raw )
+    pub ic_correction_g1: Vec<E::G1Affine>,
 }

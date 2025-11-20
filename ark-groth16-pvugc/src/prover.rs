@@ -3,7 +3,7 @@ use crate::{
     VerifyingKey,
 };
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{Field, PrimeField, UniformRand, Zero};
+use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_poly::GeneralEvaluationDomain;
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, OptimizationGoal,
@@ -224,6 +224,17 @@ impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
         g_c -= &r_s_delta_g1;
         g_c += &l_aux_acc;
         g_c += &h_acc;
+        if !pk.ic_correction_g1.is_empty() {
+            let mut public_inputs_with_one = Vec::with_capacity(pk.ic_correction_g1.len());
+            public_inputs_with_one.push(E::ScalarField::one());
+            public_inputs_with_one.extend_from_slice(&scalar_input);
+            let ic_bigints = public_inputs_with_one
+                .iter()
+                .map(|s| s.into_bigint())
+                .collect::<Vec<_>>();
+            let ic_correction = E::G1::msm_bigint(&pk.ic_correction_g1, &ic_bigints);
+            g_c += &ic_correction;
+        }
         end_timer!(c_time);
 
         let proof_a = g_a.into_affine();
