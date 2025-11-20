@@ -62,12 +62,12 @@ jobs:
         run: cargo +nightly fuzz build
       - name: Smoke run fuzzers (1 min each)
         run: |
-          cargo +nightly fuzz run decap -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run statement_k_collision -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run cross_circuit_k_difference -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run gt_span_small_coeff -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run gs_malleation_binding -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=0 -max_total_time=60 || true
-          cargo +nightly fuzz run gs_random_recomb_budget -- -runs=0 -max_total_time=60 || true
+          cargo +nightly fuzz run decap -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run statement_k_collision -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run proof_agnostic_same_statement -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run cross_circuit_k_difference -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run gt_span_small_coeff -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_malleation_binding -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=-1 -max_total_time=60 || true
+          cargo +nightly fuzz run gs_random_recomb_budget -- -runs=-1 -max_total_time=60 || true
 

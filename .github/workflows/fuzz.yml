@@ -43,7 +43,7 @@ jobs:
           for TARGET in "${FUZZERS[@]}"; do
               echo "▶︎ $(date -Iseconds) :: Fuzzing ${TARGET} for ${PER_TARGET}s"
               START_TS=$(date +%s)
-              cargo +nightly fuzz run "${TARGET}" -- -runs=0 -max_total_time="${PER_TARGET}" -print_final_stats=1 || true
+              cargo +nightly fuzz run "${TARGET}" -- -runs=-1 -max_total_time="${PER_TARGET}" -print_final_stats=1 || true
               END_TS=$(date +%s)
               echo "⏱️  ${TARGET} finished in $((END_TS-START_TS))s (target budget ${PER_TARGET}s)"
           done
