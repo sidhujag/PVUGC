@@ -98,44 +98,128 @@ Each handle carries an explicit label polynomial over formal indeterminates; in 
 
 Only right-leg (G₂) elements are ever published with a ρ mask, so every ρ-dependent term in G_T must originate from pairing against a masked right leg.
 
-### Armed Set
+### IC-Correction Terms and the ρ·y_γ Invariant
 
-Masked right-legs:
-- B_pub^ρ with label ρ·(y_β + Σᵢ≤ℓ xᵢyᵢ)
-- Qⱼ^ρ with label ρ·yⱼ for j > ℓ
-- δ₂^ρ with label ρ·y_δ
+We now make explicit how IC-correction interacts with the GBGM labels and show that it preserves the key invariant that no adversarial GT handle ever contains a ρ·y_γ monomial.
 
-By hygiene, **no** masked right-leg has any y_γ component.
+#### GBGM setup and hygiene axioms
 
-### Invariant (No ρ·y_γ)
+We work in the algebraic GBGM with pairing and the following formal symbols:
 
-By induction on adversary operations:
+- **Mask symbol**: ρ
+- **G₂ basis symbols**:
+  - y_β for β₂
+  - y_γ for γ₂
+  - y_δ for δ₂
+  - yⱼ for Qⱼ := [vⱼ(τ)]₂
+- **G₁ basis symbols**: a (for α₁) plus any prover‑chosen seeds.
 
-**Base**: Pairings with masked right-legs yield labels ρ·L_U·r(Y) where r(Y) ∈ span{y_β, yⱼ(j>ℓ), y_δ}; hence the ρ-part has no y_γ. Pairings with unmasked γ₂ produce L_U·y_γ with no ρ.
+Every G₂ handle has a label linear in {y_β, y_γ, y_δ, yⱼ}. Every G₁ handle has a label linear in the G₁ basis symbols. Pairing and G_T operations act on labels as:
 
-**Closure**: G_T multiplication/division add/subtract labels; scaling by known integer multiplies the whole label. None introduce ρ·y_γ if not present.
+- If Y is unmasked (no ρ), then e(U,Y) has label L_U · R_Y.
+- If Y is masked (Y^ρ), then e(U,Y^ρ) has label ρ · L_U · R_Y.
+- G_T multiplication/division add/subtract labels, and exponentiation by known integers scales the label.
 
-Let q denote the total number of oracle calls that can create new labels (pairing evaluations plus G_T operations that output fresh handles).
+We formalize the implementation hygiene as GBGM axioms:
 
-### Lemma (Reachable ρ-span)
+1. **Axiom H1 (no masked γ‑basis).**  
+   The only G₂ elements that are ever masked and published are β₂, δ₂, and the Qⱼ. Equivalently, every masked right‑leg Y^ρ has label
+   R_Y ∈ span{y_β, y_δ, yⱼ},
+   and **no masked right‑leg has any y_γ component**.
 
-Every G_T handle the adversary can produce has label:
-```
-E_H = ρ·F_H(y_β, yⱼ(j>ℓ), y_δ) + G_H(y_β, yⱼ, y_δ, y_γ)
-```
-with coefficient of ρ·y_γ equal to **0**.
+2. **Axiom H2 (no γ‑bearing G₁ paired with γ₂ in public equations).**  
+   Some G₁ queries (the IC‑correction terms) contain γ in their scalar, but the only public pairing equation that involves γ₂ is
+   e(IC(x), γ_2),
+   where IC(x) is built from γ‑free bases [fᵢ(τ)]₁. G₁ elements that involve γ in their scalar (such as IC‑correction) are only ever paired with δ₂ or δ₂^ρ, **never with γ₂**, in any published relation.
 
-### Target Label and GBGM Bound
+These two axioms are exactly what Convention B and the PVUGC plumbing enforce in code.
 
-Assuming IC(x) ≠ 0 (so i_x ≠ 0), R = e(α₁,β₂) · e(IC(x),γ₂) has label E_R = a·y_β + i_x·y_γ, so:
-```
-R^ρ: ρ·(a·y_β + i_x·y_γ)
-```
-whose ρ-part contains i_x·y_γ with i_x ≠ 0.
+#### IC and IC-correction labels
 
-**GBGM Bound**: Equality H = R^ρ forces a non-trivial polynomial identity (the ρ·y_γ coefficient must vanish). For degree-3 polynomials over 𝔽_r obtained from at most q oracle queries, the algebraic-generic collision bound gives Pr[H = R^ρ] ≤ c·q²/r for a fixed constant c.
+For each public index i we have:
 
-**Comment**: This is pairing-aware and doesn't assume (Σ aᵢuᵢ)(Σ aᵢvᵢ) is the only path; it permits any mixing in the τ-subspace and still concludes "no ρ·y_γ".
+- ICᵢ = [f_i(τ)]₁ from `gamma_abc_g1_raw[i]`, with no γ in its label; γ may appear only inside the scalar polynomial f_i(τ).
+- IC_corrᵢ = [((1-γ)/δ) · f_i(τ)]₁ from `ic_correction_g1[i]`.
+
+In the GBGM, γ, δ, and f_i(τ) are **field scalars**, not new basis symbols. Thus:
+
+- The G₁ label of ICᵢ is some linear form L_i in the G₁ bases.
+- The G₁ label of IC_corrᵢ is just a scalar multiple of the same form:
+  L_i^{corr} = ((1-γ)/δ) · L_i,
+  i.e., still linear in the same G₁ basis symbols. γ appears only as a scalar coefficient in front of L_i; it does **not** create a new G₂ basis symbol.
+
+#### Pairings involving IC-correction
+
+Now consider all pairings an adversary can form that involve IC_corr and public G₂ elements.
+
+1. **With masked δ₂^ρ** (right‑leg label y_δ):
+   e(IC_corrᵢ, δ_2^ρ) ⇒ label = ρ · L_i^{corr} · y_δ.  
+   The ρ‑part is some scalar · y_δ. No y_γ appears.
+
+2. **With masked D_pub = (β₂ + Σᵢ≤ℓ xᵢQᵢ)^ρ** (right‑leg label y_β + Σᵢ≤ℓ xᵢyᵢ):
+   e(IC_corrᵢ, D_pub) ⇒ label = ρ · L_i^{corr} · (y_β + Σ_{k≤ℓ} x_k y_k).  
+   The ρ‑part lies in the span of {y_β, y_k (k≤ℓ)} only.
+
+3. **With masked witness columns Dⱼ = Qⱼ^ρ (j>ℓ)** (right‑leg label yⱼ):
+   e(IC_corrᵢ, D_j) ⇒ label = ρ · L_i^{corr} · y_j.  
+   Again, the ρ‑part is some scalar · yⱼ.
+
+4. **With unmasked γ₂** (right‑leg label y_γ):
+   e(IC_corrᵢ, γ_2) ⇒ label = L_i^{corr} · y_γ.  
+   Here we do see y_γ, but **there is no ρ prefix**: this contributes only to the ρ‑free part of the label.
+
+By Axiom H1, there are no other masked G₂ elements; by Axiom H2, IC_corr is never paired with γ₂^ρ (which doesn’t exist) or any γ₂‑contaminated masked base.
+
+#### Lemma: IC-correction preserves the “no ρ·y_γ” invariant
+
+We can now restate and prove the central invariant in the presence of IC‑correction.
+
+**Lemma.** For every G_T handle H that the adversary can produce (using arbitrary algebraic combinations, pairings, and IC‑correction terms), its GBGM label has the form
+E_H = ρ·F_H(y_β, y_j, y_δ) + G_H(y_β, y_j, y_δ, y_γ),
+and the coefficient of ρ·y_γ in E_H is exactly 0.
+
+*Proof.* We proceed by induction over the operations the adversary and oracles can perform.
+
+- **Base cases (pairings).**
+
+  - If the right‑leg is a masked base Y^ρ, then by Axiom H1 its label is in the span of {y_β, y_j, y_δ}. Thus
+    label(e(U,Y^ρ)) = ρ · L_U · R_Y
+    has ρ‑part in span{y_β, y_j, y_δ}, in particular with **no y_γ**. This covers all pairings with D_pub, Dⱼ, D_δ, including those where U = IC_corr.
+
+  - If the right‑leg is unmasked γ₂, then
+    label(e(U,γ_2)) = L_U · y_γ,
+    which contains y_γ but **no ρ prefix**. So it only contributes to G_H, never to the ρ‑part.
+
+- **Inductive step (G_T algebra).**  
+  Suppose H₁, H₂ satisfy the lemma with labels
+  E_{H_1} = ρ F_1 + G_1,   E_{H_2} = ρ F_2 + G_2,
+  where F₁,F₂ depend only on (y_β, y_j, y_δ). Then:
+
+  - Multiplication: H = H₁·H₂ has label
+    E_H = E_{H_1} + E_{H_2} = ρ(F_1+F_2) + (G_1+G_2),
+    so the ρ‑part is still free of y_γ.
+
+  - Division: H = H₁/H₂ gives
+    E_H = E_{H_1} - E_{H_2} = ρ(F_1-F_2) + (G_1-G_2),
+    same property.
+
+  - Exponentiation by a known scalar k: H = H₁^k has label
+    E_H = k·E_{H_1} = ρ(kF_1) + kG_1,
+    again no new basis symbols appear in the ρ‑part.
+
+Thus no sequence of allowed operations can ever introduce a ρ·y_γ term if it was not present in the base operations. By the base case, such a term is never introduced in the first place, so the lemma holds for all H. ∎
+
+#### Consequence for R^ρ and GBGM bound
+
+Recall the PVUGC anchor
+R(vk,x) := e(α₁,β₂)·e(IC(x),γ₂).
+Assuming IC(x) ≠ 0, we have
+E_R = a·y_β + i_x·y_γ, with i_x ≠ 0,
+and therefore
+R^ρ has label ρ·(a·y_β + i_x·y_γ),
+whose ρ‑part contains a **nonzero** y_γ coefficient.
+
+By the lemma, no adversarially generated G_T handle can have such a label unless the underlying independent formal symbols satisfy a nontrivial degree‑3 polynomial identity. By the standard algebraic generic bound, the probability of such a collision with at most q oracle calls is at most O(q²/r), negligible in the group order r. In particular, the presence of γ in the scalar factor (1−γ)/δ inside IC_corr only affects the scalar coefficients of F_H and G_H; it **never promotes y_γ into the ρ‑part**.
 
 ### Generic Attack on Unhardened Scheme
 
