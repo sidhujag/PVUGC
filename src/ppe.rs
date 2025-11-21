@@ -40,8 +40,19 @@ pub fn compute_groth16_target<E: Pairing>(
         l += gamma.into_group() * x_i;
     }
 
+    // SECURITY: IC(x) ≠ 0 (specs/PVUGC.md)
+    if l.is_zero() {
+        return Err(Error::ZeroInstanceCommitment);
+    }
+
     // R = e(alpha, beta) + e(L_raw(x), gamma)  (additive notation in arkworks)
     let r = E::pairing(vk.alpha_g1, vk.beta_g2) + E::pairing(l, vk.gamma_g2);
+
+    // SECURITY: R(vk,x) ≠ 1 (specs/PVUGC.md)
+    use ark_ff::{One, Zero};
+    if r.0.is_one() || r.0.is_zero() {
+        return Err(Error::DegenerateTarget);
+    }
 
     Ok(r)
 }
