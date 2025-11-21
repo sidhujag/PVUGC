@@ -2,7 +2,6 @@
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
 use ark_ec::pairing::Pairing;
-use ark_ec::AffineRepr;
 use ark_ff::{One, Zero};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{
