@@ -132,7 +132,7 @@ We formalize the implementation hygiene as GBGM axioms:
    e(IC(x), γ_2),
    where IC(x) is built from γ‑free bases [fᵢ(τ)]₁. G₁ elements that involve γ in their scalar (such as IC‑correction) are only ever paired with δ₂ or δ₂^ρ, **never with γ₂**, in any published relation.
 
-These two axioms are exactly what Convention B and the PVUGC plumbing enforce in code.
+These two axioms are exactly what this convention and the PVUGC plumbing enforce in code.
 
 #### IC and IC-correction labels
 
