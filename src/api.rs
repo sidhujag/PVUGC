@@ -69,6 +69,8 @@ fn split_statement_only_bases<E: Pairing>(
     if pvugc_vk.b_g2_query.len() < required_bases {
         return Err(Error::MismatchedSizes);
     }
+    pvugc_vk.enforce_isolated_witness_block(total_instance)?;
+    pvugc_vk.enforce_public_residual_safe(public_inputs)?;
 
     let mut aggregate = pvugc_vk.beta_g2.into_group();
     aggregate += pvugc_vk.b_g2_query[0].into_group();
@@ -110,6 +112,9 @@ pub const DEFAULT_MAX_B_COLUMNS: usize = 24;
 pub const DEFAULT_MAX_THETA_ROWS: usize = 22;
 
 /// Main API for one-sided PVUGC
+///
+/// SECURITY WARNING: To prevent "Full Span" mix-and-match attacks, this scheme MUST
+/// be used with a "Lean CRS" that does not contain raw Powers of Tau.
 pub struct OneSidedPvugc;
 
 impl OneSidedPvugc {

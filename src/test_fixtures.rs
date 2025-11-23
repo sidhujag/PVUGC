@@ -8,6 +8,8 @@ use ark_groth16::Groth16;
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
+use ark_ec::pairing::Pairing;
+use ark_ff::Zero;
 
 use crate::outer_compressed::{
     self, cycles::Mnt4Mnt6Cycle, DefaultCycle, InnerScalar, OuterScalar, RecursionCycle,
@@ -58,8 +60,16 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     let (pk_outer, vk_outer) =
         Groth16::<C::OuterE>::circuit_specific_setup(circuit_outer, &mut rng).unwrap();
 
-    // Build PvugcVk from the outer proving key
-    let pvugc_vk = crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer);
+    // Build PvugcVk from the outer proving key (Manually, no baking for AddCircuit)
+    // AddCircuit is used for basic tests, baking logic is specific to OuterCircuit
+    use crate::ppe::PvugcVk;
+    let q_points_dummy = vec![<C::OuterE as Pairing>::G1Affine::zero(); pk_outer.vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        pk_outer.vk.beta_g2,
+        pk_outer.vk.delta_g2,
+        pk_outer.b_g2_query.clone(),
+        q_points_dummy,
+    );
 
     // Outer-recursive keys: reuse setup_outer_params once per process
     let setup_start = Instant::now();
@@ -71,8 +81,10 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         C::name(),
         outer_setup_time
     );
+    
+    // Use the proper builder for recursion circuit to include Baked Quotient points
     let pvugc_vk_outer_recursive =
-        crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive);
+        crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive, &vk_inner);
 
     GlobalFixture {
         pk_inner: Arc::new(pk_inner),

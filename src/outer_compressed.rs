@@ -430,7 +430,7 @@ mod tests {
             let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
             eprintln!("[timing:{}] decap {:?}", C::name(), decap_start.elapsed());
 
-            let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &public_x);
+            let r = crate::pvugc_outer::compute_target_outer_for::<C>(&*vk_outer, &pvugc_vk, &public_x);
             let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
             assert!(
