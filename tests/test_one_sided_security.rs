@@ -58,11 +58,14 @@ fn test_cannot_compute_k_from_arms_alone() {
 
     // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    let pvugc_vk: PvugcVk<E> = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // Dummy Q points for non-baked tests
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
     let cols = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &vault_utxo).unwrap();
     let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
 
@@ -190,11 +193,13 @@ fn test_verify_rejects_mismatched_statement() {
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
 
     // Canonical Γ required by verifier
 
@@ -232,11 +237,13 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         y: Some(Fr::from(5u64)),
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
     let statement_x = vec![Fr::from(25u64)];
     // Arming bases
     let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).unwrap();
@@ -378,11 +385,13 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
         y: Some(Fr::from(5u64)),
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -452,11 +461,13 @@ fn test_r_independence_from_rho() {
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
 
     // Two fresh exponents ρ1 != 0 and ρ2 != 0
     let mut rho1 = Fr::rand(&mut rng);
@@ -522,11 +533,13 @@ fn test_rejects_gamma2_in_statement_bases() {
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
 
     let public_x = vec![Fr::from(25u64)];
     // Produce a valid bundle for the honest pvugc_vk
@@ -581,11 +594,13 @@ fn test_size_caps_enforced_in_verify() {
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
     let public_x = vec![Fr::from(25u64)];
 
     // Build a valid bundle via recorder

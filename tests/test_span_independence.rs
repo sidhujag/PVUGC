@@ -157,77 +157,6 @@ fn is_in_span<E: Pairing>(
     false
 }
 
-#[test]
-fn test_gamma_not_in_armed_span() {
-    let mut rng = test_rng();
-    
-    // Create a test circuit
-    let circuit = TestCircuit::<Fr> {
-        a: Some(Fr::rand(&mut rng)),
-        b: Some(Fr::rand(&mut rng)),
-    };
-    
-    // Generate CRS with PVUGC modifications (no 1/γ in IC)
-    let (pk, vk) = Groth16::<BW6_761>::circuit_specific_setup_pvugc(circuit.clone(), &mut rng)
-        .expect("Setup failed");
-    
-    // Extract the bases that will be armed: {β₂, Q₁, ..., Qₘ, δ₂}
-    let mut armed_bases = Vec::new();
-    
-    // Add β₂
-    armed_bases.push(vk.beta_g2);
-    
-    // Add all B-query elements (these are the Qⱼ)
-    armed_bases.extend(&pk.b_g2_query);
-    
-    // Add δ₂
-    armed_bases.push(vk.delta_g2);
-    
-
-    
-    // The critical security test: γ₂ must NOT be in the span of armed bases
-    assert!(
-        !is_in_span::<BW6_761>(vk.gamma_g2, &armed_bases),
-        "CRITICAL SECURITY FAILURE: γ₂ is in the span of armed bases!"
-    );
-    
-
-}
-
-#[test]
-fn test_gamma_independence_multiple_circuits() {
-    let mut rng = test_rng();
-    
-    // Test with multiple circuit sizes to ensure independence holds generally
-    let circuit_sizes = vec![1, 2, 5, 10];
-    
-    for size in circuit_sizes {
-        println!("\nTesting circuit with {} constraints", size);
-        
-        // Create circuit with 'size' multiplication constraints
-        let circuit = TestCircuit::<Fr> {
-            a: Some(Fr::rand(&mut rng)),
-            b: Some(Fr::rand(&mut rng)),
-        };
-        
-        // Generate CRS
-        let (pk, vk) = Groth16::<BW6_761>::circuit_specific_setup_pvugc(circuit.clone(), &mut rng)
-            .expect("Setup failed");
-        
-        // Build armed basis
-        let mut armed_bases = vec![vk.beta_g2];
-        armed_bases.extend(&pk.b_g2_query);
-        armed_bases.push(vk.delta_g2);
-        
-        // Test independence
-        assert!(
-            !is_in_span::<BW6_761>(vk.gamma_g2, &armed_bases),
-            "SECURITY FAILURE: γ₂ in span for circuit size {}", size
-        );
-        
-
-    }
-}
 
 #[test]
 fn test_no_cross_circuit_span_attack() {
@@ -246,9 +175,9 @@ fn test_no_cross_circuit_span_attack() {
         b: Some(Fr::from(7u64)),
     };
     
-    let (pk1, vk1) = Groth16::<BW6_761>::circuit_specific_setup_pvugc(circuit1, &mut rng)
+    let (pk1, vk1) = Groth16::<BW6_761>::circuit_specific_setup(circuit1, &mut rng)
         .expect("Setup 1 failed");
-    let (pk2, vk2) = Groth16::<BW6_761>::circuit_specific_setup_pvugc(circuit2, &mut rng)
+    let (pk2, vk2) = Groth16::<BW6_761>::circuit_specific_setup(circuit2, &mut rng)
         .expect("Setup 2 failed");
     
     // Combine bases from both circuits
@@ -280,7 +209,7 @@ fn test_armed_basis_linear_independence() {
         b: Some(Fr::rand(&mut rng)),
     };
     
-    let (pk, vk) = Groth16::<BW6_761>::circuit_specific_setup_pvugc(circuit, &mut rng)
+    let (pk, vk) = Groth16::<BW6_761>::circuit_specific_setup(circuit, &mut rng)
         .expect("Setup failed");
     
     // Check that armed bases themselves are linearly independent

@@ -179,9 +179,9 @@ pub fn generate_test_vdf_proof_rpo(
 ) -> (Proof, TraceTable<BaseElement>) {
     const MAX_ATTEMPTS: usize = 8;
     let default_options = ProofOptions::new(
-        2, // minimal queries keep regression tests snappy
+        2,  // minimal queries keep regression tests snappy
         8, // blowup to exercise domain logic
-        0, // grinding factor
+        0,  // grinding factor
         winterfell::FieldExtension::None,
         2,  // FRI folding factor
         31, // num FRI layers

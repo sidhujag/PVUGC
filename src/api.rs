@@ -17,7 +17,7 @@ use crate::error::{Error, Result as PvugcResult};
 use crate::poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
 use crate::ppe::validate_groth16_vk_subgroups;
 pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
-use crate::{compute_groth16_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
+use crate::{compute_baked_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 
@@ -135,7 +135,7 @@ impl OneSidedPvugc {
     }
 
     /// Canonical setup and arming (formerly setup_and_arm_columns)
-    /// Returns: (ColumnBases, ColumnArms, R, K=R^ρ)
+    /// Returns: (ColumnBases, ColumnArms, R_baked, K=R_baked^ρ)
     pub fn setup_and_arm<E: Pairing>(
         pvugc_vk: &PvugcVk<E>,
         vk: &Groth16VK<E>,
@@ -154,15 +154,17 @@ impl OneSidedPvugc {
             return Err(Error::InvalidSubgroup);
         }
 
-        let r = compute_groth16_target(vk, public_inputs)?;
+        // Use BAKED target computation
+        let r_baked = compute_baked_target(vk, pvugc_vk, public_inputs)?;
+        
         // Early guard: R must not be identity (spec §6/§7)
-        if crate::ct::gt_eq_ct::<E>(&r, &PairingOutput::<E>(One::one())) {
+        if crate::ct::gt_eq_ct::<E>(&r_baked, &PairingOutput::<E>(One::one())) {
             return Err(Error::Crypto("R_is_identity".to_string()));
         }
         let bases = Self::build_column_bases(pvugc_vk, vk, public_inputs)?;
         let col_arms = arm_columns(&bases, rho)?;
-        let k = Self::compute_r_to_rho(&r, rho);
-        Ok((bases, col_arms, r, k))
+        let k = Self::compute_r_to_rho(&r_baked, rho);
+        Ok((bases, col_arms, r_baked, k))
     }
 
     /// Produce PoCE-A attestation for column arming (arm-time)
@@ -445,13 +447,15 @@ impl OneSidedPvugc {
             }
         }
 
-        // 5. Verify PPE equals R(vk,x) using direct column pairing
-        let r_target = match compute_groth16_target(vk, public_inputs) {
+        // 5. Verify PPE equals R_baked(vk,x) using direct column pairing
+        // Use BAKED target computation
+        let r_baked = match compute_baked_target(vk, pvugc_vk, public_inputs) {
             Ok(r) => r,
             Err(_) => return false,
         };
+        
         // Guard: R must not be identity
-        if crate::ct::gt_eq_ct::<E>(&r_target, &PairingOutput::<E>(One::one())) {
+        if crate::ct::gt_eq_ct::<E>(&r_baked, &PairingOutput::<E>(One::one())) {
             return false;
         }
 
@@ -517,8 +521,8 @@ impl OneSidedPvugc {
             return false;
         }
 
-        // Check: LHS == R (constant-time compare)
-        if !crate::ct::gt_eq_ct::<E>(&lhs, &r_target) {
+        // Check: LHS == R_baked (constant-time compare)
+        if !crate::ct::gt_eq_ct::<E>(&lhs, &r_baked) {
             return false;
         }
 

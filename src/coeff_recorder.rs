@@ -108,6 +108,25 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
             _ => None,
         }
     }
+
+    /// Populate recorder state directly from a known assignment/proof (e.g. lean prover)
+    pub fn record_from_assignment(
+        &mut self,
+        assignment: &[E::ScalarField],
+        a: &E::G1Affine,
+        c: &E::G1Affine,
+        s: E::ScalarField,
+    ) {
+        assert!(
+            self.num_instance_variables.is_some(),
+            "set_num_instance_variables must be called before recording"
+        );
+        self.a = Some(*a);
+        self.c = Some(*c);
+        self.s = Some(s);
+        self.b_coeffs = assignment.to_vec();
+        self.b_commitment = None;
+    }
 }
 
 impl<E: Pairing> PvugcCoefficientHook<E> for SimpleCoeffRecorder<E> {

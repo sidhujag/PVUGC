@@ -47,7 +47,7 @@ fn test_constant_one_is_public() {
     };
 
     // Generate CRS
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup_pvugc(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let pvugc_vk = PvugcVk::<E> {
         beta_g2: vk.beta_g2,
@@ -71,13 +71,13 @@ fn test_ic_zero_rejected() {
         y: Some(Fr::from(6u64)),
     };
 
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup_pvugc(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let normal_input = vec![Fr::from(36u64)];
     assert!(compute_groth16_target(&vk, &normal_input).is_ok());
 
     let mut bad_vk = vk.clone();
-    bad_vk.gamma_abc_g1_raw = vec![<E as Pairing>::G1Affine::identity(); 2];
+    bad_vk.gamma_abc_g1 = vec![<E as Pairing>::G1Affine::identity(); 2];
 
     let result = compute_groth16_target(&bad_vk, &normal_input);
     assert!(result.is_err());
@@ -93,7 +93,7 @@ fn test_degenerate_target_rejected() {
         y: Some(Fr::from(7u64)),
     };
 
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup_pvugc(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let r = compute_groth16_target(&vk, &vec![Fr::from(49u64)]).unwrap();
     
@@ -124,7 +124,7 @@ fn test_gamma_g2_rejection() {
         y: Some(Fr::from(8u64)),
     };
 
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup_pvugc(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let pvugc_vk = PvugcVk::<E> {
         beta_g2: vk.beta_g2,

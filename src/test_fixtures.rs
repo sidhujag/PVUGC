@@ -9,7 +9,7 @@ use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
 use ark_ec::pairing::Pairing;
-use ark_ff::Zero;
+use ark_ec::AffineRepr; // Import AffineRepr for .zero()
 
 use crate::outer_compressed::{
     self, cycles::Mnt4Mnt6Cycle, DefaultCycle, InnerScalar, OuterScalar, RecursionCycle,
@@ -26,7 +26,6 @@ pub struct GlobalFixture<C: RecursionCycle> {
     pub pvugc_vk: crate::ppe::PvugcVk<C::OuterE>,
     pub pk_outer_recursive: Arc<ark_groth16::ProvingKey<C::OuterE>>,
     pub vk_outer_recursive: Arc<ark_groth16::VerifyingKey<C::OuterE>>,
-    pub pvugc_vk_outer_recursive: crate::ppe::PvugcVk<C::OuterE>,
     pub outer_setup_time: std::time::Duration,
 }
 
@@ -82,10 +81,6 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         outer_setup_time
     );
     
-    // Use the proper builder for recursion circuit to include Baked Quotient points
-    let pvugc_vk_outer_recursive =
-        crate::pvugc_outer::build_pvugc_vk_outer_from_pk_for::<C>(&pk_outer_recursive, &vk_inner);
-
     GlobalFixture {
         pk_inner: Arc::new(pk_inner),
         vk_inner: Arc::new(vk_inner),
@@ -94,7 +89,6 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         pvugc_vk,
         pk_outer_recursive: Arc::new(pk_outer_recursive),
         vk_outer_recursive: Arc::new(vk_outer_recursive),
-        pvugc_vk_outer_recursive,
         outer_setup_time,
     }
 }
