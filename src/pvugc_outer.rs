@@ -16,10 +16,10 @@ use ark_ff::{Field, PrimeField, Zero, One};
 use ark_groth16::{Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
-use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::collections::HashSet;
-use std::time::Instant;
 use std::fs::File;
+use std::time::Instant;
 use rayon::prelude::*;
 
 /// Build PVUGC VK and Lean PK from the OUTER proving key.
@@ -29,8 +29,12 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
 ) -> (PvugcVk<C::OuterE>, LeanProvingKey<C::OuterE>) {
     let start = Instant::now();
     println!("[Setup] Starting PVUGC Setup from PK...");
-    
-    let n_inputs = pk_outer.vk.gamma_abc_g1.len() - 1;
+
+    let n_inner_inputs = vk_inner.gamma_abc_g1.len() - 1;
+    println!(
+        "[Setup] Inner public inputs (packed outer instances): {}",
+        n_inner_inputs
+    );
 
     // Sanitize cycle name for filename
     let safe_name = C::name().replace("/", "_").replace(" ", "_");
@@ -40,13 +44,13 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
         let file = File::open(&cache_path).expect("failed to open cached setup");
         let (pk, q_points): (LeanProvingKey<C::OuterE>, Vec<<C::OuterE as Pairing>::G1Affine>) = 
-            CanonicalDeserialize::deserialize_compressed(file)
+            CanonicalDeserialize::deserialize_uncompressed_unchecked(file)
             .expect("failed to deserialize setup");
         println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
         (pk, q_points)
     } else {
         println!("[Setup] No cache found. Computing witness bases...");
-        let h_query_wit = compute_witness_bases::<C>(pk_outer, vk_inner, n_inputs);
+        let h_query_wit = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
         println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
 
         let lean_pk = LeanProvingKey {
@@ -60,14 +64,17 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
             l_query: pk_outer.l_query.clone(),
         };
 
-        println!("[Setup] Computing q_points (running {} proofs)...", n_inputs + 1);
+        println!(
+            "[Setup] Computing q_points (running {} proofs)...",
+            n_inner_inputs + 1
+        );
         let q_points =
-            compute_q_const_points_from_gap::<C>(pk_outer, &lean_pk, vk_inner, n_inputs);
+            compute_q_const_points_from_gap::<C>(pk_outer, &lean_pk, vk_inner, n_inner_inputs);
         println!("[Setup] q_points computed in {:?}", start.elapsed());
 
-        println!("[Setup] Serializing setup to {}...", cache_path);
-        let file = File::create(&cache_path).expect("failed to create cache file");
-        (lean_pk.clone(), q_points.clone()).serialize_compressed(file).expect("failed to serialize setup");
+       println!("[Setup] Serializing setup to {}...", cache_path);
+       let file = File::create(&cache_path).expect("failed to create cache file");
+       (lean_pk.clone(), q_points.clone()).serialize_uncompressed(file).expect("failed to serialize setup");
         
         (lean_pk, q_points)
     };
@@ -117,12 +124,12 @@ pub fn build_column_bases_outer(
 fn compute_witness_bases<C: RecursionCycle>(
     pk: &Groth16PK<C::OuterE>,
     vk_inner: &InnerVk<C>,
-    n_inputs: usize,
+    n_inner_inputs: usize,
 ) -> Vec<(u32, u32, <C::OuterE as Pairing>::G1Affine)> {
     let start = Instant::now();
     println!("[Quotient] Synthesizing Circuit...");
 
-    let dummy_x = vec![InnerScalar::<C>::from(0u64); n_inputs];
+    let dummy_x = vec![InnerScalar::<C>::from(0u64); n_inner_inputs];
     let dummy_proof = crate::outer_compressed::InnerProof::<C> {
         a: Default::default(),
         b: Default::default(),
@@ -182,7 +189,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     let lagrange_srs: Vec<_> = lagrange_srs.into_par_iter().map(|p| p.into_affine()).collect();
     println!("[Quotient] Lagrange SRS computed in {:?}", fft_start.elapsed());
 
-    let num_pub = n_inputs + 1;
+    let num_pub = cs.num_instance_variables();
     let mut vars_a = HashSet::new();
     let mut vars_b = HashSet::new();
     for (row, terms) in matrices.a.iter().enumerate() {
@@ -432,10 +439,10 @@ fn compute_q_const_points_from_gap<C: RecursionCycle>(
     pk_outer: &Groth16PK<C::OuterE>,
     lean_pk: &LeanProvingKey<C::OuterE>,
     vk_inner: &InnerVk<C>,
-    n_inputs: usize,
+    n_inner_inputs: usize,
 ) -> Vec<<C::OuterE as Pairing>::G1Affine> {
     let mut q_points =
-        vec![<C::OuterE as Pairing>::G1Affine::zero(); n_inputs + 1];
+        vec![<C::OuterE as Pairing>::G1Affine::zero(); n_inner_inputs + 1];
 
     let dummy_proof = crate::outer_compressed::InnerProof::<C> {
         a: Default::default(),
@@ -443,9 +450,9 @@ fn compute_q_const_points_from_gap<C: RecursionCycle>(
         c: Default::default(),
     };
 
-    let mut base_inputs = vec![InnerScalar::<C>::zero(); n_inputs];
+    let mut base_inputs = vec![InnerScalar::<C>::zero(); n_inner_inputs];
 
-    for idx in 0..=n_inputs {
+    for idx in 0..=n_inner_inputs {
         if idx > 0 {
             base_inputs[idx - 1] = InnerScalar::<C>::one();
         }

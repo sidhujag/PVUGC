@@ -12,7 +12,9 @@ use ark_ec::pairing::Pairing;
 use ark_ec::AffineRepr; // Import AffineRepr for .zero()
 
 use crate::outer_compressed::{
-    self, cycles::Mnt4Mnt6Cycle, DefaultCycle, InnerScalar, OuterScalar, RecursionCycle,
+    self,
+    cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle},
+    DefaultCycle, InnerScalar, OuterScalar, RecursionCycle,
 };
 use crate::test_circuits::AddCircuit;
 
@@ -36,6 +38,7 @@ impl<C: RecursionCycle> GlobalFixture<C> {
 }
 
 pub type DefaultFixture = GlobalFixture<DefaultCycle>;
+pub type BlsFixture = GlobalFixture<Bls12Bw6Cycle>;
 pub type MntFixture = GlobalFixture<Mnt4Mnt6Cycle>;
 
 fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
@@ -96,12 +99,20 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
 static GLOBAL_FIXTURE_DEFAULT: Lazy<Mutex<DefaultFixture>> =
     Lazy::new(|| Mutex::new(build_fixture_for_cycle::<DefaultCycle>()));
 
+static GLOBAL_FIXTURE_BLS: Lazy<Mutex<BlsFixture>> =
+    Lazy::new(|| Mutex::new(build_fixture_for_cycle::<Bls12Bw6Cycle>()));
+
 static GLOBAL_FIXTURE_MNT: Lazy<Mutex<MntFixture>> =
     Lazy::new(|| Mutex::new(build_fixture_for_cycle::<Mnt4Mnt6Cycle>()));
 
 /// Get the global fixture for the default (BLS12/BW6) cycle
 pub fn get_fixture() -> DefaultFixture {
     let guard = GLOBAL_FIXTURE_DEFAULT.lock().unwrap();
+    guard.clone()
+}
+
+pub fn get_fixture_bls() -> BlsFixture {
+    let guard = GLOBAL_FIXTURE_BLS.lock().unwrap();
     guard.clone()
 }
 

@@ -1,4 +1,4 @@
-use crate::outer_compressed::InnerE;
+use crate::outer_compressed::{cycles::Bls12Bw6Cycle, RecursionCycle};
 use crate::stark::inner_stark_full::AirParams;
 use crate::stark::stark_proof_parser::parse_proof_for_circuit_with_query_positions;
 use ark_groth16::Groth16;
@@ -108,6 +108,9 @@ fn full_stark_verifier_smoke() {
     run_full_stark_verifier(proof, trace);
 }
 
+type StarkCycle = Bls12Bw6Cycle;
+type StarkInnerE = <StarkCycle as RecursionCycle>::InnerE;
+
 fn run_full_stark_verifier(proof: winterfell::Proof, trace: winterfell::TraceTable<BaseElement>) {
     // 2) Set up AIR parameters (must match what proof actually contains!)
     let proof_options = proof.options();
@@ -208,15 +211,16 @@ fn run_full_stark_verifier(proof: winterfell::Proof, trace: winterfell::TraceTab
 
     // 5) Generate Groth16 proof (this will measure constraints!)
     let mut rng = StdRng::seed_from_u64(42);
-    let (pk, vk) = Groth16::<InnerE>::circuit_specific_setup(circuit.clone(), &mut rng)
+    let (pk, vk) = Groth16::<StarkInnerE>::circuit_specific_setup(circuit.clone(), &mut rng)
         .expect("Groth16 setup");
 
     // Save public input before moving circuit
     let pub_input = vec![circuit.statement_hash];
-    let proof_inner = Groth16::<InnerE>::prove(&pk, circuit, &mut rng).expect("Groth16 prove");
+    let proof_inner =
+        Groth16::<StarkInnerE>::prove(&pk, circuit, &mut rng).expect("Groth16 prove");
 
     // 6) Verify
-    let valid = Groth16::<InnerE>::verify(&vk, &pub_input, &proof_inner).expect("verify");
+    let valid = Groth16::<StarkInnerE>::verify(&vk, &pub_input, &proof_inner).expect("verify");
 
     assert!(valid, "Full STARK verifier proof should verify");
 }

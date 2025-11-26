@@ -14,7 +14,7 @@ use super::inner_stark_full::{
     AirParams, CompQuery, FriLayerQueries, FriQuery, FullStarkVerifierCircuit, TraceQuery,
     TraceSegmentWitness,
 };
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use winter_crypto::{Digest, ElementHasher};
 use winter_math::fields::f64::BaseElement as GL; // Goldilocks field
 use winter_math::FieldElement;

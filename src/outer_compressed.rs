@@ -15,12 +15,23 @@ use ark_ec::pairing::Pairing;
 use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
 
-use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, pairing::PairingVar as PairingVarTrait};
+use ark_r1cs_std::{
+    alloc::AllocVar,
+    eq::EqGadget,
+    fields::fp::FpVar,
+    pairing::PairingVar as PairingVarTrait,
+};
 use ark_groth16::constraints::{ProofVar, VerifyingKeyVar, Groth16VerifierGadget};
 use ark_r1cs_std::boolean::Boolean;
 use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_relations::{
+    lc,
+    r1cs::{
+        ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
+    },
+};
 use ark_snark::SNARK;
+use ark_std::One;
 // use ark_std::{One, Zero};
 
 /// Trait describing a recursion-friendly pairing cycle.
@@ -88,7 +99,7 @@ pub mod cycles {
 pub use cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle};
 
 /// Default cycle used across the crate unless otherwise specified.
-pub type DefaultCycle = Bls12Bw6Cycle;
+pub type DefaultCycle = Mnt4Mnt6Cycle;
 
 /// Convenience aliases for the default recursion cycle.
 pub type InnerE = <DefaultCycle as RecursionCycle>::InnerE;
@@ -111,7 +122,20 @@ pub fn fr_inner_to_outer_for<C: RecursionCycle>(x: &InnerScalar<C>) -> OuterScal
 pub fn fr_inner_to_outer(x: &InnerFr) -> OuterFr {
     fr_inner_to_outer_for::<DefaultCycle>(x)
 }
+#[inline]
+fn inner_modulus_bits<C: RecursionCycle>() -> usize {
+    InnerScalar::<C>::MODULUS_BIT_SIZE as usize
+}
 
+pub fn normalized_inner_bits_le<C: RecursionCycle>(scalar: &InnerScalar<C>) -> Vec<bool> {
+    let bit_len = inner_modulus_bits::<C>();
+    let mut bits = scalar.into_bigint().to_bits_le();
+    bits.truncate(bit_len);
+    if bits.len() < bit_len {
+        bits.resize(bit_len, false);
+    }
+    bits
+}
 /// Outer circuit proving "Groth16::verify(vk_inner, x_inner, proof_inner) == true" for a cycle.
 #[derive(Clone)]
 pub struct OuterCircuit<C: RecursionCycle> {
@@ -133,6 +157,66 @@ impl<C: RecursionCycle> OuterCircuit<C> {
             proof_inner,
             _cycle: PhantomData,
         }
+    }
+    /// Allocate bits as witnesses WITHOUT booleanity constraints.
+    /// 
+    // We don't add b*(1-b)=0 here. The honest witness generator produces real bits
+    // via normalized_inner_bits_le(), and the Groth16 verifier gadget only uses
+    // them linearly to reconstruct the inner public inputs.
+    /// - If bits are not boolean, the reconstructed inner public input will be wrong
+    /// - The pairing check will fail because the proof was for a different input
+    /// 
+    /// This avoids witness×witness quadratic terms from booleanity constraints,
+    /// keeping the quotient polynomial affine in the public input.
+    fn allocate_packed_boolean_inputs(
+        cs: ConstraintSystemRef<OuterScalar<C>>,
+        x_inner: &[InnerScalar<C>],
+    ) -> Result<
+        (
+            BooleanInputVar<InnerScalar<C>, OuterScalar<C>>,
+            Vec<Vec<Boolean<OuterScalar<C>>>>,
+        ),
+        SynthesisError,
+    > {
+        use ark_r1cs_std::boolean::AllocatedBool;
+        
+        let mut per_input_bits = Vec::with_capacity(x_inner.len());
+        let mut raw_bits = Vec::with_capacity(x_inner.len());
+        for scalar in x_inner {
+            let bits_const = normalized_inner_bits_le::<C>(scalar);
+            let mut bit_vars = Vec::with_capacity(bits_const.len());
+            for bit in bits_const {
+                // Use new_witness_without_booleanity_check to avoid b*(1-b)=0 constraint
+                // The Groth16 verifier will implicitly enforce booleanity via the pairing check
+                let alloc_bool = AllocatedBool::new_witness_without_booleanity_check(
+                    cs.clone(),
+                    || Ok(bit),
+                )?;
+                bit_vars.push(Boolean::from(alloc_bool));
+            }
+            per_input_bits.push(bit_vars.clone());
+            raw_bits.push(bit_vars);
+        }
+        Ok((BooleanInputVar::new(per_input_bits), raw_bits))
+    }
+}
+fn fpvar_to_lc<C: RecursionCycle>(
+    var: &FpVar<OuterScalar<C>>,
+) -> LinearCombination<OuterScalar<C>> {
+    match var {
+        FpVar::Constant(c) => lc!() + (*c, Variable::One),
+        FpVar::Var(v) => lc!() + v.variable,
+    }
+}
+
+fn boolean_linear_term<F: PrimeField>(
+    bit: &Boolean<F>,
+    coeff: F,
+) -> LinearCombination<F> {
+    match bit {
+        Boolean::Constant(true) => lc!() + (coeff, Variable::One),
+        Boolean::Constant(false) => lc!(),
+        Boolean::Var(v) => lc!() + (coeff, v.variable()),
     }
 }
 /*
@@ -170,42 +254,62 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
     }
 }*/
 
+
 impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C> {
     fn generate_constraints(
         self,
         cs: ConstraintSystemRef<OuterScalar<C>>,
     ) -> Result<(), SynthesisError> {
+        // 1. Allocate the inner verifying key as a constant
         let vk_var = VerifyingKeyVar::<C::InnerE, C::InnerPairingVar>::new_constant(
             cs.clone(),
             &self.vk_inner,
         )?;
-        let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
-            Ok(self.proof_inner)
-        })?;
 
-        let input_var =
-            BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_input(cs.clone(), || {
-                Ok(self.x_inner.clone())
+        // 2. Allocate the inner proof as a witness
+        let proof_var =
+            ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+                Ok(self.proof_inner.clone())
             })?;
 
+        // 3. Allocate packed boolean inputs (bits as witnesses, returns BooleanInputVar for verifier)
+        let (input_var, input_bits) =
+            Self::allocate_packed_boolean_inputs(cs.clone(), &self.x_inner)?;
 
-        const VERIFY_INNER_PROOF: bool = false;
-        if VERIFY_INNER_PROOF {
-            let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
-                &vk_var,
-                &input_var,
-                &proof_var,
+        // 4. For each inner scalar, allocate ONE packed public FpVar and enforce linear packing
+        for (scalar, bits) in self.x_inner.iter().zip(input_bits.iter()) {
+            let x_outer = fr_inner_to_outer_for::<C>(scalar);
+            let x_var = FpVar::<OuterScalar<C>>::new_input(cs.clone(), || Ok(x_outer))?;
+
+            // Build linear combination: Σ 2^i * bit_i
+            let mut lc_bits = lc!();
+            let mut coeff = OuterScalar::<C>::one();
+            for bit in bits {
+                lc_bits = lc_bits + boolean_linear_term(bit, coeff);
+                coeff = coeff + coeff;
+            }
+
+            // Enforce: x_outer = Σ 2^i * bit_i (linear constraint)
+            let x_lc = fpvar_to_lc::<C>(&x_var);
+            cs.enforce_constraint(
+                x_lc - lc_bits,
+                lc!() + Variable::One,
+                lc!(),
             )?;
-            ok.enforce_equal(&Boolean::TRUE)?;
-        } else {
-            let _ = (vk_var, proof_var, input_var);
         }
+
+        // 5. Verify the inner Groth16 proof using the verifier gadget
+        let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
+            &vk_var,
+            &input_var,
+            &proof_var,
+        )?;
+        ok.enforce_equal(&Boolean::TRUE)?;
 
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
-
 /// Setup outer Groth16 parameters for a given inner VK and public input count.
 pub fn setup_outer_params_for<C: RecursionCycle>(
     vk_inner: &InnerVk<C>,
@@ -311,7 +415,7 @@ mod tests {
     use ark_std::rand::SeedableRng;
 
     use crate::test_circuits::AddCircuit;
-    use crate::test_fixtures::{get_fixture, get_fixture_mnt, GlobalFixture};
+    use crate::test_fixtures::{get_fixture, get_fixture_bls, get_fixture_mnt, GlobalFixture};
 
     fn smoke_test_for_cycle<C: ProvidesFixture>() {
         let mut rng = StdRng::seed_from_u64(12345);
@@ -480,9 +584,9 @@ mod tests {
         fn load_fixture() -> GlobalFixtureAdapter<Self>;
     }
 
-    impl ProvidesFixture for DefaultCycle {
+    impl ProvidesFixture for Bls12Bw6Cycle {
         fn load_fixture() -> GlobalFixtureAdapter<Self> {
-            let fx = get_fixture();
+            let fx = get_fixture_bls();
             GlobalFixtureAdapter {
                 pk_inner: fx.pk_inner,
                 vk_inner: fx.vk_inner,

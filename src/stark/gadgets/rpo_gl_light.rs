@@ -29,7 +29,7 @@
 //!
 
 use super::gl_fast::{gl_add_const_light, gl_add_light, gl_mul_const_light, gl_mul_light, GlVar};
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;

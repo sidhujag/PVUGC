@@ -9,7 +9,7 @@ use crate::stark::gadgets::rpo_gl_light::{
     rpo_hash_elements_light, rpo_merge_light, RpoParamsGLLight,
 };
 use crate::stark::inner_stark_full::enforce_gl_eq;
-use crate::{api::enforce_public_inputs_are_outputs, outer_compressed::InnerFr};
+use crate::{api::enforce_public_inputs_are_outputs, stark::StarkInnerFr as InnerFr};
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::R1CSVar;

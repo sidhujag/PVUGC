@@ -3,16 +3,20 @@
 //! Verifies that the "Lean Prover" (using sparse H-bases) produces valid Groth16 proofs
 //! that are accepted by the standard Verifier.
 
-use ark_ec::pairing::Pairing;
+use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
+use ark_ff::{Field, One, PrimeField};
 use ark_groth16::Groth16;
 use ark_snark::SNARK;
-use ark_std::rand::SeedableRng;
-use arkworks_groth16::outer_compressed::{OuterCircuit, InnerScalar, DefaultCycle, InnerE};
+use ark_relations::r1cs::{ConstraintSystem, ConstraintSynthesizer};
+use ark_std::{rand::SeedableRng, Zero};
+use arkworks_groth16::outer_compressed::{
+    OuterCircuit, InnerScalar, DefaultCycle, InnerE, OuterScalar,
+};
 use arkworks_groth16::test_fixtures::get_fixture;
 use arkworks_groth16::test_circuits::AddCircuit;
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
-use arkworks_groth16::prover_lean::prove_lean;
-use arkworks_groth16::ppe::compute_baked_target;
+use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers, LeanProvingKey};
+use arkworks_groth16::ppe::{compute_baked_target, PvugcVk};
 use arkworks_groth16::RecursionCycle;
 
 #[test]
@@ -59,8 +63,10 @@ fn test_lean_prover_end_to_end() {
         ).expect("lean proving failed");
 
         // 6. Verify
-        let public_inputs_outer = arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner[0]);
+        let public_inputs_outer =
+            arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner[0]);
         let inputs_outer = vec![public_inputs_outer];
+
 
         let r_baked = compute_baked_target(
             &vk_outer,
@@ -74,6 +80,6 @@ fn test_lean_prover_end_to_end() {
         let rhs = r_baked + pairing_c_delta;
         assert_eq!(lhs, rhs, "Lean Proof + Baked Target failed verification");
     } else {
-        println!("Baked Quotient setup panicked as expected for non-linear circuit.");
+        assert!(false, "Baked Quotient setup panicked as expected for non-linear circuit.");
     }
 }

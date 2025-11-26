@@ -73,4 +73,7 @@ pub use outer_compressed::{
 
 // Test utilities re-exports
 pub use test_circuits::AddCircuit;
-pub use test_fixtures::{get_fixture, get_fixture_mnt, DefaultFixture, GlobalFixture, MntFixture};
+pub use test_fixtures::{
+    get_fixture, get_fixture_bls, get_fixture_mnt, BlsFixture, DefaultFixture, GlobalFixture,
+    MntFixture,
+};
