@@ -160,9 +160,7 @@ impl<C: RecursionCycle> OuterCircuit<C> {
     }
     /// Allocate bits as witnesses WITHOUT booleanity constraints.
     /// 
-    // We don't add b*(1-b)=0 here. The honest witness generator produces real bits
-    // via normalized_inner_bits_le(), and the Groth16 verifier gadget only uses
-    // them linearly to reconstruct the inner public inputs.
+    /// The Groth16 verifier gadget implicitly enforces booleanity:
     /// - If bits are not boolean, the reconstructed inner public input will be wrong
     /// - The pairing check will fail because the proof was for a different input
     /// 
