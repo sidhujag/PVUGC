@@ -709,8 +709,8 @@ fn probabilistic_rank_check(
     // Generate random vectors and compute M * v for each
     let projected: Vec<Vec<Fr>> = (0..num_projections)
         .into_par_iter()
-        .map(|_| {
-            let mut local_rng = ark_std::rand::rngs::StdRng::seed_from_u64(12345 + _ as u64);
+        .map(|proj_idx| {
+            let mut local_rng = ark_std::rand::rngs::StdRng::seed_from_u64(12345 + proj_idx as u64);
             let random_vec: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut local_rng)).collect();
             
             // Compute M * random_vec (one scalar per diagonal row)
