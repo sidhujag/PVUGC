@@ -423,6 +423,7 @@ mod tests {
     use ark_groth16::Groth16;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
+    use ark_std::Zero;
 
     use crate::test_circuits::AddCircuit;
     use crate::test_fixtures::{get_fixture, get_fixture_bls, get_fixture_mnt, GlobalFixture};

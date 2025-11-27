@@ -529,13 +529,20 @@ fn test_lean_prover_end_to_end() {
 
     // 1. Get Inner Proof (Fixture)
     let fixture = get_fixture();
-    // Create a valid inner proof for the AddCircuit with public input x=10
+    
+    // Runtime statement - this would be a hash in production (e.g., Bitcoin UTXO)
     let x_val = InnerScalar::<DefaultCycle>::from(10u64); 
-
-    let circuit_inner = AddCircuit::with_public_input(x_val);
-    let proof_inner = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng)
-        .expect("inner proof failed");
     let x_inner = vec![x_val];
+
+    // PRODUCTION SIMULATION: Runtime proof uses a DIFFERENT seed than setup!
+    // This proves the system works when proofs are generated independently.
+    const SETUP_SEED: u64 = 99999;    // Used by inner_proof_generator during setup
+    const RUNTIME_SEED: u64 = 12345;  // Used for actual proof at runtime (different!)
+    
+    let circuit_inner = AddCircuit::with_public_input(x_val);
+    let mut runtime_rng = ark_std::rand::rngs::StdRng::seed_from_u64(RUNTIME_SEED);
+    let proof_inner = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut runtime_rng)
+        .expect("inner proof failed");
 
     // 2. Define Outer Circuit
     let circuit_outer = OuterCircuit::<DefaultCycle>::new(
@@ -551,18 +558,19 @@ fn test_lean_prover_end_to_end() {
     ).expect("outer setup failed");
 
     // 4. Convert to Lean PK
-    // Create a closure that generates valid inner proofs for any statement vector
-    // This is needed because q_const computation samples at x=0 and x=1,
-    // and the verifier gadget requires valid proofs for those statements
+    // 
+    // The generator creates valid inner proofs for q_const computation (statements 0, 1).
+    // It uses SETUP_SEED, which is DIFFERENT from RUNTIME_SEED used for proof_inner.
+    // 
+    // This tests the production scenario where:
+    // - Setup is done once with arbitrary proofs for statements 0, 1
+    // - Runtime proofs are generated independently with different randomness
+    // 
+    // q_const only captures pub×pub terms (independent of proof coordinates).
+    // h_query_wit handles all wit×wit terms (computed fresh for each proof).
     let pk_inner_clone = fixture.pk_inner.clone();
     let inner_proof_generator = move |statements: &[InnerScalar<DefaultCycle>]| {
-        // Derive seed from statement to ensure different proofs get different randomizers
-        use ark_ff::BigInteger;
-        let seed = statements.get(0)
-            .map(|s| s.into_bigint().0[0])
-            .unwrap_or(12345);
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
-        // For AddCircuit with 1 public input, use the first (and only) statement
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(SETUP_SEED);
         let statement = statements.get(0).copied().unwrap_or(InnerScalar::<DefaultCycle>::zero());
         let circuit = AddCircuit::with_public_input(statement);
         Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng)
