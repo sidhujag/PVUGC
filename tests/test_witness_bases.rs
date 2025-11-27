@@ -62,10 +62,20 @@ mod tests {
         let (pk_outer, _vk_outer) = Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
 
         // 3. Build PVUGC Setup (Generates h_wit and q_const)
-        // Need a sample inner proof for q_const computation
-        let sample_inner_circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
-        let sample_inner_proof = Groth16::<InnerE>::prove(&pk_inner, sample_inner_circuit, &mut rng).unwrap();
-        let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner, &sample_inner_proof);
+        // Create a closure that generates valid inner proofs for any statement vector
+        let pk_inner_clone = pk_inner.clone();
+        let inner_proof_generator = move |statements: &[InnerFr]| {
+            // For SimpleMulCircuit with no public inputs, statement doesn't affect circuit
+            // but we still derive seed from it for consistency
+            use ark_ff::BigInteger;
+            let seed = statements.get(0)
+                .map(|s| s.into_bigint().0[0])
+                .unwrap_or(12345);
+            let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+            let circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
+            Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng).unwrap()
+        };
+        let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle, _>(&pk_outer, &vk_inner, inner_proof_generator);
 
         // 4. Generate a valid instance/witness for the outer circuit
         // We need a valid inner proof to satisfy the outer circuit verification logic (if enabled)
@@ -124,10 +134,19 @@ mod tests {
         let outer_circuit: OuterCircuit<DefaultCycle> = OuterCircuit::new(vk_inner.clone(), vec![], ark_groth16::Proof::default());
         let (pk_outer, _) = Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
         
-        // Need a sample inner proof for q_const computation
-        let sample_inner_circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
-        let sample_inner_proof = Groth16::<InnerE>::prove(&pk_inner, sample_inner_circuit, &mut rng).unwrap();
-        let (_, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner, &sample_inner_proof);
+        // Create a closure that generates valid inner proofs for any statement vector
+        let pk_inner_clone = pk_inner.clone();
+        let inner_proof_generator = move |statements: &[InnerFr]| {
+            // Derive seed from statement to ensure different proofs get different randomizers
+            use ark_ff::BigInteger;
+            let seed = statements.get(0)
+                .map(|s| s.into_bigint().0[0])
+                .unwrap_or(12345);
+            let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+            let circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
+            Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng).unwrap()
+        };
+        let (_, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle, _>(&pk_outer, &vk_inner, inner_proof_generator);
 
         // Serialize
         let mut serialized = Vec::new();

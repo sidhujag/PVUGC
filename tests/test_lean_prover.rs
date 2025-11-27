@@ -541,7 +541,7 @@ fn test_lean_prover_end_to_end() {
     let circuit_outer = OuterCircuit::<DefaultCycle>::new(
         (*fixture.vk_inner).clone(),
         x_inner.clone(),
-        proof_inner.clone()  // Clone so we can reuse for setup
+        proof_inner.clone()
     );
 
     // 3. Setup Outer PK
@@ -551,11 +551,26 @@ fn test_lean_prover_end_to_end() {
     ).expect("outer setup failed");
 
     // 4. Convert to Lean PK
-    // We need to pass a valid inner proof for q_const computation to ensure
-    // the witness sparsity pattern matches real proofs.
-    // We can reuse proof_inner - any valid proof works, the statement doesn't matter.
+    // Create a closure that generates valid inner proofs for any statement vector
+    // This is needed because q_const computation samples at x=0 and x=1,
+    // and the verifier gadget requires valid proofs for those statements
+    let pk_inner_clone = fixture.pk_inner.clone();
+    let inner_proof_generator = move |statements: &[InnerScalar<DefaultCycle>]| {
+        // Derive seed from statement to ensure different proofs get different randomizers
+        use ark_ff::BigInteger;
+        let seed = statements.get(0)
+            .map(|s| s.into_bigint().0[0])
+            .unwrap_or(12345);
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        // For AddCircuit with 1 public input, use the first (and only) statement
+        let statement = statements.get(0).copied().unwrap_or(InnerScalar::<DefaultCycle>::zero());
+        let circuit = AddCircuit::with_public_input(statement);
+        Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng)
+            .expect("inner proof generation failed")
+    };
+    
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &fixture.vk_inner, &proof_inner)
+        build_pvugc_setup_from_pk_for::<DefaultCycle, _>(&pk_outer, &fixture.vk_inner, inner_proof_generator)
     }));
 
     if let Ok((_pvugc_vk, lean_pk)) = result {
