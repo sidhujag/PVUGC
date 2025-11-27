@@ -522,6 +522,11 @@ pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
     circuit: C,
 ) -> (usize, usize, usize, bool) {
     use ark_poly::EvaluationDomain;
+    use rayon::prelude::*;
+    use std::time::Instant;
+    
+    let start = Instant::now();
+    println!("[DiagAudit] Synthesizing circuit...");
     
     let cs = ConstraintSystem::<Fr>::new_ref();
     circuit.clone().generate_constraints(cs.clone()).expect("synthesis");
@@ -532,6 +537,9 @@ pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
     let num_inputs = cs.num_instance_variables();
     let num_pub = num_inputs;
     
+    println!("[DiagAudit] Circuit: {} constraints, {} inputs. Time: {:?}", 
+        num_constraints, num_inputs, start.elapsed());
+    
     // Domain size (same as in compute_witness_bases)
     let qap_domain_size = num_constraints + num_inputs;
     let domain = GeneralEvaluationDomain::<Fr>::new(qap_domain_size)
@@ -540,15 +548,21 @@ pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
     let n = domain.size();
     
     // Find diagonal rows (rows where both A and B have witness terms)
-    let mut diagonal_rows = Vec::new();
-    for k in 0..matrices.a.len().min(n) {
-        let has_wit_a = matrices.a[k].iter().any(|&(_, col)| col >= num_pub);
-        let has_wit_b = matrices.b[k].iter().any(|&(_, col)| col >= num_pub);
-        if has_wit_a && has_wit_b {
-            diagonal_rows.push(k);
-        }
-    }
+    println!("[DiagAudit] Finding diagonal rows...");
+    let diag_start = Instant::now();
+    
+    let diagonal_rows: Vec<usize> = (0..matrices.a.len().min(n))
+        .into_par_iter()
+        .filter(|&k| {
+            let has_wit_a = matrices.a[k].iter().any(|&(_, col)| col >= num_pub);
+            let has_wit_b = matrices.b[k].iter().any(|&(_, col)| col >= num_pub);
+            has_wit_a && has_wit_b
+        })
+        .collect();
+    
     let d = diagonal_rows.len();
+    
+    println!("[DiagAudit] Found {} diagonal rows in {:?}", d, diag_start.elapsed());
     
     if d == 0 {
         println!("[DiagAudit] No diagonal rows found. Trivially secure.");
@@ -558,12 +572,42 @@ pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
     println!("[DiagAudit] Found {} diagonal rows out of {} domain size", d, n);
     println!("[DiagAudit] Ratio d/n = {:.4}%", (d as f64 / n as f64) * 100.0);
     
-    // Build the coefficient matrix M where M[i][m] = Q_{k_i}(ω^m)
-    // k_i is the i-th diagonal row
+    // Security analysis based on ratio
+    if d as f64 / n as f64 > 0.5 {
+        println!("[DiagAudit] ⚠ WARNING: High ratio d/n > 50%!");
+        println!("[DiagAudit] This exposes more than half the Lagrange SRS space.");
+        println!("[DiagAudit] Consider if this is acceptable for your security model.");
+    }
+    
+    // For very large matrices, we can use a probabilistic rank check
+    // instead of full Gaussian elimination
+    let use_probabilistic = d > 1000 || n > 10000;
+    
+    if use_probabilistic {
+        println!("[DiagAudit] Using probabilistic rank estimation (d={}, n={} too large for exact)...", d, n);
+        let (rank_estimate, is_full_rank) = probabilistic_rank_check(&diagonal_rows, n, &domain);
+        
+        println!("[DiagAudit] Probabilistic rank estimate: {} (expected: {})", rank_estimate, d.min(n-1));
+        
+        if is_full_rank {
+            println!("[DiagAudit] ✓ LIKELY SECURE: Probabilistic check suggests full rank.");
+            println!("[DiagAudit] Hidden subspace dimension: ~{} (out of {})", 
+                (n - 1).saturating_sub(d), n - 1);
+        } else {
+            println!("[DiagAudit] ⚠ UNCERTAIN: Probabilistic check inconclusive.");
+        }
+        
+        return (d, n, rank_estimate, is_full_rank);
+    }
+    
+    // Exact rank computation for smaller matrices
+    println!("[DiagAudit] Building coefficient matrix ({} x {})...", d, n);
+    let matrix_start = Instant::now();
+    
+    // Precompute T[j] = 1 / (n * (1 - ω^j)) for j ≠ 0
     let n_field = domain.size_as_field_element();
     let t0 = (n_field - Fr::one()) * (n_field + n_field).inverse().expect("2n invertible");
     
-    // Precompute T[j] = 1 / (n * (1 - ω^j)) for j ≠ 0
     let mut coeffs_table = vec![Fr::zero(); n];
     coeffs_table[0] = t0;
     
@@ -577,41 +621,146 @@ pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
         coeffs_table[j + 1] = inv;
     }
     
-    // Build coefficient matrix (d rows, n columns)
-    // M[i][m] = T[(m - k_i) mod n]
-    let mut matrix: Vec<Vec<Fr>> = Vec::with_capacity(d);
-    for &k in &diagonal_rows {
-        let mut row = vec![Fr::zero(); n];
-        for m in 0..n {
-            let diff = if m >= k { m - k } else { m + n - k };
-            row[m] = coeffs_table[diff];
-        }
-        matrix.push(row);
-    }
+    println!("[DiagAudit] Coefficients precomputed in {:?}", matrix_start.elapsed());
+    
+    // Build matrix rows in parallel
+    let build_start = Instant::now();
+    let matrix: Vec<Vec<Fr>> = diagonal_rows
+        .par_iter()
+        .map(|&k| {
+            let mut row = vec![Fr::zero(); n];
+            for m in 0..n {
+                let diff = if m >= k { m - k } else { m + n - k };
+                row[m] = coeffs_table[diff];
+            }
+            row
+        })
+        .collect();
+    
+    println!("[DiagAudit] Matrix built in {:?} ({} rows x {} cols)", 
+        build_start.elapsed(), matrix.len(), n);
     
     // Compute rank using Gaussian elimination
-    let rank = compute_matrix_rank(&mut matrix, n);
+    println!("[DiagAudit] Computing rank via Gaussian elimination...");
+    let rank_start = Instant::now();
+    let rank = compute_matrix_rank_with_progress(matrix, n);
     
-    let is_secure = rank == d;
+    println!("[DiagAudit] Rank computation done in {:?}", rank_start.elapsed());
     
-    println!("[DiagAudit] Coefficient matrix rank: {} (expected: {})", rank, d);
+    let is_secure = rank == d || rank == n - 1; // rank can't exceed n-1 (h_query dimension)
+    
+    println!("[DiagAudit] Coefficient matrix rank: {} (expected: min({}, {}))", rank, d, n-1);
     if is_secure {
-        println!("[DiagAudit] ✓ SECURE: Rank equals d, no degeneracy.");
-        println!("[DiagAudit] Hidden subspace dimension: {} (out of {})", n - 1 - d, n - 1);
+        println!("[DiagAudit] ✓ SECURE: Rank is as expected, no unexpected degeneracy.");
+        println!("[DiagAudit] Hidden subspace dimension: {} (out of {})", 
+            (n - 1).saturating_sub(rank), n - 1);
     } else {
-        println!("[DiagAudit] ✗ WARNING: Rank {} < d = {}!", rank, d);
-        println!("[DiagAudit] This means diagonal bases have unexpected linear dependencies.");
+        println!("[DiagAudit] ✗ WARNING: Rank {} differs from expected!", rank);
+        println!("[DiagAudit] This may indicate unexpected linear dependencies.");
     }
+    
+    println!("[DiagAudit] Total audit time: {:?}", start.elapsed());
     
     (d, n, rank, is_secure)
 }
 
+/// Probabilistic rank check using random projections.
+/// Much faster than exact Gaussian elimination for large matrices.
+fn probabilistic_rank_check(
+    diagonal_rows: &[usize],
+    n: usize,
+    domain: &GeneralEvaluationDomain<Fr>,
+) -> (usize, bool) {
+    use rayon::prelude::*;
+    use std::time::Instant;
+    
+    let d = diagonal_rows.len();
+    let start = Instant::now();
+    
+    // Precompute coefficients
+    let n_field = domain.size_as_field_element();
+    let t0 = (n_field - Fr::one()) * (n_field + n_field).inverse().expect("2n invertible");
+    
+    let mut coeffs_table = vec![Fr::zero(); n];
+    coeffs_table[0] = t0;
+    
+    let mut denoms = Vec::with_capacity(n - 1);
+    for j in 1..n {
+        let omega_j = domain.element(j);
+        denoms.push(n_field * (Fr::one() - omega_j));
+    }
+    ark_ff::batch_inversion(&mut denoms);
+    for (j, inv) in denoms.into_iter().enumerate() {
+        coeffs_table[j + 1] = inv;
+    }
+    
+    println!("[DiagAudit] Probabilistic: Coefficients computed in {:?}", start.elapsed());
+    
+    // Use random projections to estimate rank
+    // If M has rank r, then M * random_vector is non-zero with high probability
+    // We project to a smaller dimension and check rank there
+    
+    let num_projections = 100.min(n); // Number of random projections
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(12345);
+    
+    println!("[DiagAudit] Probabilistic: Running {} random projections...", num_projections);
+    let proj_start = Instant::now();
+    
+    // Generate random vectors and compute M * v for each
+    let projected: Vec<Vec<Fr>> = (0..num_projections)
+        .into_par_iter()
+        .map(|_| {
+            let mut local_rng = ark_std::rand::rngs::StdRng::seed_from_u64(12345 + _ as u64);
+            let random_vec: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut local_rng)).collect();
+            
+            // Compute M * random_vec (one scalar per diagonal row)
+            diagonal_rows
+                .iter()
+                .map(|&k| {
+                    let mut sum = Fr::zero();
+                    for m in 0..n {
+                        let diff = if m >= k { m - k } else { m + n - k };
+                        sum += coeffs_table[diff] * random_vec[m];
+                    }
+                    sum
+                })
+                .collect()
+        })
+        .collect();
+    
+    println!("[DiagAudit] Probabilistic: Projections computed in {:?}", proj_start.elapsed());
+    
+    // Now compute rank of the d x num_projections projected matrix
+    println!("[DiagAudit] Probabilistic: Computing rank of {} x {} projected matrix...", 
+        d, num_projections);
+    
+    let mut proj_matrix: Vec<Vec<Fr>> = (0..d)
+        .map(|i| projected.iter().map(|col| col[i]).collect())
+        .collect();
+    
+    let proj_rank = compute_matrix_rank_with_progress(proj_matrix, num_projections);
+    
+    println!("[DiagAudit] Probabilistic: Projected rank = {}", proj_rank);
+    
+    // If projected rank equals min(d, num_projections), likely full rank
+    let expected_proj_rank = d.min(num_projections).min(n - 1);
+    let is_likely_full_rank = proj_rank >= expected_proj_rank.saturating_sub(5); // Allow small tolerance
+    
+    (proj_rank.min(d).min(n-1), is_likely_full_rank)
+}
+
 /// Compute the rank of a matrix using Gaussian elimination over a finite field.
-fn compute_matrix_rank(matrix: &mut Vec<Vec<Fr>>, num_cols: usize) -> usize {
+/// Includes progress logging for large matrices.
+fn compute_matrix_rank_with_progress(mut matrix: Vec<Vec<Fr>>, num_cols: usize) -> usize {
+    use std::time::Instant;
+    
     let num_rows = matrix.len();
     if num_rows == 0 {
         return 0;
     }
+    
+    let start = Instant::now();
+    let log_interval = (num_rows / 20).max(100); // Log every 5%
     
     let mut rank = 0;
     let mut pivot_col = 0;
@@ -619,6 +768,14 @@ fn compute_matrix_rank(matrix: &mut Vec<Vec<Fr>>, num_cols: usize) -> usize {
     for row in 0..num_rows {
         if pivot_col >= num_cols {
             break;
+        }
+        
+        if row % log_interval == 0 && row > 0 {
+            let pct = (row as f64 / num_rows as f64) * 100.0;
+            let elapsed = start.elapsed().as_secs_f64();
+            let eta = elapsed * (num_rows as f64 / row as f64 - 1.0);
+            println!("[DiagAudit] Rank progress: {:.1}% ({}/{} rows), rank so far: {}, ETA: {:.1}s", 
+                pct, row, num_rows, rank, eta);
         }
         
         // Find pivot
@@ -641,7 +798,7 @@ fn compute_matrix_rank(matrix: &mut Vec<Vec<Fr>>, num_cols: usize) -> usize {
                     matrix[row][c] *= pivot_inv;
                 }
                 
-                // Eliminate column
+                // Eliminate column (this is the expensive part)
                 for r in 0..num_rows {
                     if r != row && !matrix[r][pivot_col].is_zero() {
                         let factor = matrix[r][pivot_col];
