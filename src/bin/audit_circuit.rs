@@ -149,15 +149,26 @@ fn main() {
     let circuit = get_valid_circuit();
     let (d, n, rank, is_secure) = audit_diagonal_basis_security(circuit);
     
+    let hidden_dims = if n > 1 { (n - 1).saturating_sub(rank) } else { 0 };
+    let hidden_ratio = if n > 1 { hidden_dims as f64 / (n - 1) as f64 } else { 0.0 };
+    
     println!("\nSummary:");
-    println!("  Diagonal rows (d): {}", d);
-    println!("  Domain size (n):   {}", n);
-    println!("  Matrix rank:       {}", rank);
-    println!("  Hidden dimensions: {}", if n > 1 { n - 1 - d } else { 0 });
-    println!("  Security ratio:    {:.2}% hidden", 
-        if n > 1 { ((n - 1 - d) as f64 / (n - 1) as f64) * 100.0 } else { 0.0 });
+    println!("  Diagonal rows (d):    {}", d);
+    println!("  Domain size (n):      {}", n);
+    println!("  Estimated rank:       {}", rank);
+    println!("  Exposed dimensions:   {} ({:.1}%)", rank, (rank as f64 / (n - 1) as f64) * 100.0);
+    println!("  Hidden dimensions:    {} ({:.1}%)", hidden_dims, hidden_ratio * 100.0);
+    
     println!("\nDiagonal Basis Security: {}", 
-        if is_secure { "✓ SECURE" } else { "✗ VULNERABLE" });
+        if is_secure { "✓ SECURE (>= 50% hidden)" } else { "✗ NOT SECURE (< 50% hidden)" });
+    
+    if !is_secure {
+        println!("\n⚠ WARNING: The sparse diagonal basis approach does NOT provide");
+        println!("  adequate security for this circuit. Consider alternatives:");
+        println!("  1. Use consistent witness values between setup and proving");
+        println!("  2. Redesign circuit to minimize wit×wit constraints");
+        println!("  3. Use proof-dependent key derivation (if applicable)");
+    }
 }
 
 fn run_audit(subject: &dyn AuditSubject) {
@@ -742,11 +753,36 @@ fn probabilistic_rank_check(
     
     println!("[DiagAudit] Probabilistic: Projected rank = {}", proj_rank);
     
-    // If projected rank equals min(d, num_projections), likely full rank
-    let expected_proj_rank = d.min(num_projections).min(n - 1);
-    let is_likely_full_rank = proj_rank >= expected_proj_rank.saturating_sub(5); // Allow small tolerance
+    // If projected rank equals num_projections, the original matrix has rank >= num_projections
+    // This confirms no unexpected degeneracy but doesn't tell us the actual rank
+    let expected_proj_rank = num_projections.min(d).min(n - 1);
+    let no_degeneracy = proj_rank >= expected_proj_rank.saturating_sub(5);
     
-    (proj_rank.min(d).min(n-1), is_likely_full_rank)
+    if no_degeneracy {
+        println!("[DiagAudit] Probabilistic: No degeneracy detected (rank >= {})", proj_rank);
+        println!("[DiagAudit] Assuming full rank = min(d, n-1) = {}", d.min(n-1));
+    }
+    
+    // The actual rank is likely d (or n-1 if d > n-1)
+    // This is because Cauchy-like matrices have full rank
+    let estimated_actual_rank = d.min(n - 1);
+    let hidden_dims = (n - 1).saturating_sub(estimated_actual_rank);
+    let hidden_ratio = hidden_dims as f64 / (n - 1) as f64;
+    
+    // Security check: is enough hidden?
+    let is_secure = hidden_ratio >= 0.5; // Require at least 50% hidden
+    
+    println!("[DiagAudit] Estimated actual rank: {}", estimated_actual_rank);
+    println!("[DiagAudit] Hidden dimensions: {} ({:.1}%)", hidden_dims, hidden_ratio * 100.0);
+    
+    if is_secure {
+        println!("[DiagAudit] ✓ SECURE: >= 50% of space is hidden");
+    } else {
+        println!("[DiagAudit] ✗ NOT SECURE: Only {:.1}% hidden (need >= 50%)", hidden_ratio * 100.0);
+        println!("[DiagAudit] The diagonal bases expose too much of the Lagrange SRS.");
+    }
+    
+    (estimated_actual_rank, is_secure)
 }
 
 /// Compute the rank of a matrix using Gaussian elimination over a finite field.
