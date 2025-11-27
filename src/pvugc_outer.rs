@@ -280,7 +280,7 @@ fn compute_witness_bases<C: RecursionCycle>(
                 
                 // Progress logging (approximate)
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if prog == 0 || prog % 1000000 == 0 {
+                if prog == 0 || prog % 10000000 == 0 {
                      let elapsed = wit_start.elapsed().as_secs_f64();
                      let rate = prog as f64 / elapsed;
                      
