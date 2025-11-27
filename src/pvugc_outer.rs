@@ -6,7 +6,7 @@
 use crate::arming::{ColumnArms, ColumnBases};
 use crate::outer_compressed::{
     fr_inner_to_outer_for, DefaultCycle, InnerFr, InnerScalar, OuterCircuit, OuterE, OuterFr,
-    OuterScalar, RecursionCycle, InnerVk,
+    OuterScalar, RecursionCycle, InnerVk, InnerProof,
 };
 use crate::ppe::PvugcVk;
 use crate::prover_lean::{prove_lean_with_randomizers, LeanProvingKey};
@@ -16,20 +16,30 @@ use ark_ff::{Field, PrimeField, Zero, One};
 use ark_groth16::{Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use std::collections::HashSet;
 use std::fs::File;
 use std::time::Instant;
 use rayon::prelude::*;
 
 /// Build PVUGC VK and Lean PK from the OUTER proving key.
+/// 
+/// IMPORTANT: `sample_inner_proof` must be a VALID inner Groth16 proof (for any statement).
+/// This is needed because the q_const computation requires the same witness sparsity pattern
+/// as real proofs. Using a dummy proof with zeros causes the H-term computation to have
+/// a completely different sparsity pattern, leading to incorrect q_const values.
+/// 
+/// The sample proof can be for any valid inner statement - it doesn't need to match
+/// the statements you'll actually prove later. It just needs to have non-zero curve points
+/// so the witness structure matches real proofs.
 pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
     pk_outer: &Groth16PK<C::OuterE>,
     vk_inner: &InnerVk<C>,
+    sample_inner_proof: &InnerProof<C>,
 ) -> (PvugcVk<C::OuterE>, LeanProvingKey<C::OuterE>) {
     let start = Instant::now();
     println!("[Setup] Starting PVUGC Setup from PK...");
-
+    
     let n_inner_inputs = vk_inner.gamma_abc_g1.len() - 1;
     println!(
         "[Setup] Inner public inputs (packed outer instances): {}",
@@ -69,13 +79,11 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
             n_inner_inputs + 1
         );
         let q_points =
-            compute_q_const_points_from_gap::<C>(pk_outer, &lean_pk, vk_inner, n_inner_inputs);
+            compute_q_const_points_from_gap::<C>(pk_outer, &lean_pk, vk_inner, n_inner_inputs, sample_inner_proof);
         println!("[Setup] q_points computed in {:?}", start.elapsed());
-
-       println!("[Setup] Serializing setup to {}...", cache_path);
-       let file = File::create(&cache_path).expect("failed to create cache file");
-       (lean_pk.clone(), q_points.clone()).serialize_uncompressed(file).expect("failed to serialize setup");
-        
+        println!("[Setup] Serializing setup to {}...", cache_path);
+        let file = File::create(&cache_path).expect("failed to create cache file");
+        (lean_pk.clone(), q_points.clone()).serialize_uncompressed(file).expect("failed to serialize setup");
         (lean_pk, q_points)
     };
 
@@ -93,15 +101,17 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
 pub fn build_pvugc_vk_outer_from_pk_for<C: RecursionCycle>(
     pk_outer: &Groth16PK<C::OuterE>,
     vk_inner: &InnerVk<C>,
+    sample_inner_proof: &InnerProof<C>,
 ) -> PvugcVk<C::OuterE> {
-    build_pvugc_setup_from_pk_for::<C>(pk_outer, vk_inner).0
+    build_pvugc_setup_from_pk_for::<C>(pk_outer, vk_inner, sample_inner_proof).0
 }
 
 pub fn build_pvugc_vk_outer_from_pk(
     pk_outer: &Groth16PK<OuterE>,
     vk_inner: &InnerVk<DefaultCycle>,
+    sample_inner_proof: &InnerProof<DefaultCycle>,
 ) -> PvugcVk<OuterE> {
-    build_pvugc_vk_outer_from_pk_for::<DefaultCycle>(pk_outer, vk_inner)
+    build_pvugc_vk_outer_from_pk_for::<DefaultCycle>(pk_outer, vk_inner, sample_inner_proof)
 }
 
 pub fn build_column_bases_outer_for<C: RecursionCycle>(
@@ -440,15 +450,14 @@ fn compute_q_const_points_from_gap<C: RecursionCycle>(
     lean_pk: &LeanProvingKey<C::OuterE>,
     vk_inner: &InnerVk<C>,
     n_inner_inputs: usize,
+    sample_inner_proof: &InnerProof<C>,
 ) -> Vec<<C::OuterE as Pairing>::G1Affine> {
     let mut q_points =
         vec![<C::OuterE as Pairing>::G1Affine::zero(); n_inner_inputs + 1];
 
-    let dummy_proof = crate::outer_compressed::InnerProof::<C> {
-        a: Default::default(),
-        b: Default::default(),
-        c: Default::default(),
-    };
+    // Use the sample inner proof (should be a real valid proof with non-zero curve points)
+    // This ensures the witness sparsity pattern matches real proofs
+    let proof_for_setup = sample_inner_proof.clone();
 
     let mut base_inputs = vec![InnerScalar::<C>::zero(); n_inner_inputs];
 
@@ -458,7 +467,7 @@ fn compute_q_const_points_from_gap<C: RecursionCycle>(
         }
 
         let circuit_std =
-            OuterCircuit::<C>::new(vk_inner.clone(), base_inputs.clone(), dummy_proof.clone());
+            OuterCircuit::<C>::new(vk_inner.clone(), base_inputs.clone(), proof_for_setup.clone());
         let proof_std = Groth16::<C::OuterE>::create_proof_with_reduction_no_zk(
             circuit_std,
             pk_outer,
@@ -466,7 +475,7 @@ fn compute_q_const_points_from_gap<C: RecursionCycle>(
         .expect("standard proof failed");
 
         let circuit_lean =
-            OuterCircuit::<C>::new(vk_inner.clone(), base_inputs.clone(), dummy_proof.clone());
+            OuterCircuit::<C>::new(vk_inner.clone(), base_inputs.clone(), proof_for_setup.clone());
         let (proof_lean, _) = prove_lean_with_randomizers(
             lean_pk,
             circuit_lean,

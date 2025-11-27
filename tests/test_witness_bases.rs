@@ -62,7 +62,10 @@ mod tests {
         let (pk_outer, _vk_outer) = Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
 
         // 3. Build PVUGC Setup (Generates h_wit and q_const)
-        let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner);
+        // Need a sample inner proof for q_const computation
+        let sample_inner_circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
+        let sample_inner_proof = Groth16::<InnerE>::prove(&pk_inner, sample_inner_circuit, &mut rng).unwrap();
+        let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner, &sample_inner_proof);
 
         // 4. Generate a valid instance/witness for the outer circuit
         // We need a valid inner proof to satisfy the outer circuit verification logic (if enabled)
@@ -121,7 +124,10 @@ mod tests {
         let outer_circuit: OuterCircuit<DefaultCycle> = OuterCircuit::new(vk_inner.clone(), vec![], ark_groth16::Proof::default());
         let (pk_outer, _) = Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
         
-        let (_, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner);
+        // Need a sample inner proof for q_const computation
+        let sample_inner_circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
+        let sample_inner_proof = Groth16::<InnerE>::prove(&pk_inner, sample_inner_circuit, &mut rng).unwrap();
+        let (_, lean_pk) = build_pvugc_setup_from_pk_for::<DefaultCycle>(&pk_outer, &vk_inner, &sample_inner_proof);
 
         // Serialize
         let mut serialized = Vec::new();

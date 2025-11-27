@@ -184,8 +184,20 @@ impl<C: RecursionCycle> OuterCircuit<C> {
             let bits_const = normalized_inner_bits_le::<C>(scalar);
             let mut bit_vars = Vec::with_capacity(bits_const.len());
             for bit in bits_const {
-                // Use new_witness_without_booleanity_check to avoid b*(1-b)=0 constraint
-                // The Groth16 verifier will implicitly enforce booleanity via the pairing check
+                // Use new_witness_without_booleanity_check to avoid b*(1-b)=0 constraint.
+                // 
+                // WHY THIS IS NECESSARY FOR LEAN PROVER:
+                // The booleanity constraint b*(1-b)=0 creates wit×wit terms where the
+                // coefficients depend on the actual bit values. Since bits are derived
+                // from public input x, different x values produce different H-term
+                // contributions, making H(x) = H_const + H_wit(w(x)) non-affine in x.
+                //
+                // WHY THIS IS STILL SECURE:
+                // 1. The linear packing constraint x = Σ 2^i * bit_i binds the bits to x
+                // 2. The inner Groth16 verifier gadget computes g_ic from these bits
+                // 3. Any non-boolean bits that sum to x would produce wrong g_ic
+                // 4. The inner proof only verifies if g_ic matches the statement
+                // 5. The inner circuit (STARK verifier) enforces booleanity internally
                 let alloc_bool = AllocatedBool::new_witness_without_booleanity_check(
                     cs.clone(),
                     || Ok(bit),
@@ -495,8 +507,15 @@ mod tests {
 
         let pk_outer = Arc::clone(&fixture.pk_outer_recursive);
         let vk_outer = Arc::clone(&fixture.vk_outer_recursive);
+        
+        // Generate a sample inner proof for q_const computation
+        let sample_x = InnerScalar::<C>::from(1u64);
+        let sample_circuit = AddCircuit::with_public_input(sample_x);
+        let sample_inner_proof =
+            Groth16::<C::InnerE>::prove(&fixture.pk_inner, sample_circuit, &mut rng).unwrap();
+        
         let (pvugc_vk, lean_pk) =
-            crate::pvugc_outer::build_pvugc_setup_from_pk_for::<C>(&pk_outer, &fixture.vk_inner);
+            crate::pvugc_outer::build_pvugc_setup_from_pk_for::<C>(&pk_outer, &fixture.vk_inner, &sample_inner_proof);
 
         let x = InnerScalar::<C>::from(42u64);
         let public_x = vec![x];
