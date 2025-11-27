@@ -257,9 +257,13 @@ fn compute_witness_bases<C: RecursionCycle>(
 
 
     // Chunk size for batching to reduce overhead and allow buffer reuse
-    const CHUNK_SIZE: usize = 256; 
+    // Optimized for collection phase (MSMs are batched globally)
+    // With 150M pairs and 96 cores: 50k gives ~3000 chunks (good load balancing)
+    // Larger chunks = better cache locality and buffer reuse
+    const CHUNK_SIZE: usize = 50_000; 
 
-    let h_wit: Vec<_> = sorted_pairs
+    // Phase 1: Collect all MSM tasks in parallel chunks
+    let all_msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = sorted_pairs
         .par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
             // Thread-local buffers to reuse across the chunk
@@ -267,7 +271,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
             
-            // Collect all MSM tasks first, then process in parallel for better CPU utilization
             let mut msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
@@ -280,8 +283,6 @@ fn compute_witness_bases<C: RecursionCycle>(
                 if prog == 0 || prog % 100000 == 0 {
                      let elapsed = wit_start.elapsed().as_secs_f64();
                      let rate = prog as f64 / elapsed;
-                     
-                     // Read timers (convert micros to ms for readability)
                      
                      println!(
                         "[Quotient] {}/{} ({:.1}%) | {:.0} pair/s",
@@ -347,8 +348,7 @@ fn compute_witness_bases<C: RecursionCycle>(
                     }
                 }
 
-                // 3. Collect bases for MSM (store for parallel processing)
-                // Create new vectors for each pair to avoid move issues
+                // 3. Collect bases for MSM (store for global parallel processing)
                 let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b);
                 let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b);
                 
@@ -369,55 +369,78 @@ fn compute_witness_bases<C: RecursionCycle>(
                     msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
                 }
             }
-
-            // Process MSMs in parallel for better CPU utilization
-            let msm_start = Instant::now();
-            let num_msms = msm_tasks.len();
-            let total_points: usize = msm_tasks.iter().map(|(bases, _, _)| bases.len()).sum();
             
-            let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
-                .into_par_iter()
-                .map(|(bases, scalars, pair_id)| {
-                    let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
-                    (pair_id, h_acc)
-                })
-                .filter(|(_, h_acc)| !h_acc.is_zero())
-                .collect();
-            
-            let msm_elapsed = msm_start.elapsed();
-            if num_msms > 0 {
-                eprintln!(
-                    "[Quotient] Chunk MSM: {} MSMs, {} total points, {:.2}ms ({:.0} MSM/s, {:.0} points/s)",
-                    num_msms,
-                    total_points,
-                    msm_elapsed.as_secs_f64() * 1000.0,
-                    num_msms as f64 / msm_elapsed.as_secs_f64(),
-                    total_points as f64 / msm_elapsed.as_secs_f64()
-                );
-            }
-
-            // SoA layout to avoid intermediate tuple allocations and copies for normalization
-            let mut point_accs = Vec::with_capacity(msm_results.len());
-            let mut point_ids = Vec::with_capacity(msm_results.len());
-            
-            for (pair_id, h_acc) in msm_results {
-                point_accs.push(h_acc);
-                point_ids.push(pair_id);
-            }
-            
-            // Batch normalize to save inversions (significant for small MSMs)
-            // 158M inversions -> ~26 mins. Batch norm -> ~20 secs.
-            let mut affine_results = Vec::with_capacity(point_accs.len());
-            if !point_accs.is_empty() {
-                 let affines = <C::OuterE as Pairing>::G1::normalize_batch(&point_accs);
-                 for (idx, affine) in affines.into_iter().enumerate() {
-                     affine_results.push((point_ids[idx].0, point_ids[idx].1, affine));
-                 }
-            }
-            
-            affine_results
+            msm_tasks
         })
         .collect();
+
+    // Phase 2: Process ALL MSMs globally in parallel (better CPU utilization across all cores)
+    let msm_start = Instant::now();
+    let num_msms = all_msm_tasks.len();
+    let total_points: usize = all_msm_tasks.iter().map(|(bases, _, _)| bases.len()).sum();
+    let msm_progress_counter = std::sync::atomic::AtomicUsize::new(0);
+    
+    eprintln!(
+        "[Quotient] Starting global MSM: {} MSMs, {} total points",
+        num_msms, total_points
+    );
+    
+    let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = all_msm_tasks
+        .into_par_iter()
+        .map(|(bases, scalars, pair_id)| {
+            let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+            
+            // Progress logging during MSM processing
+            let msm_prog = msm_progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if msm_prog == 0 || (msm_prog + 1) % 10000 == 0 {
+                let elapsed = msm_start.elapsed().as_secs_f64();
+                let rate = (msm_prog + 1) as f64 / elapsed;
+                eprintln!(
+                    "[Quotient] MSM progress: {}/{} ({:.1}%) | {:.0} MSM/s",
+                    msm_prog + 1,
+                    num_msms,
+                    ((msm_prog + 1) as f64 / num_msms as f64) * 100.0,
+                    rate
+                );
+            }
+            
+            (pair_id, h_acc)
+        })
+        .filter(|(_, h_acc)| !h_acc.is_zero())
+        .collect();
+    
+    let msm_elapsed = msm_start.elapsed();
+    if num_msms > 0 {
+        eprintln!(
+            "[Quotient] Global MSM complete: {} MSMs, {} total points, {:.2}ms ({:.0} MSM/s, {:.0} points/s)",
+            num_msms,
+            total_points,
+            msm_elapsed.as_secs_f64() * 1000.0,
+            num_msms as f64 / msm_elapsed.as_secs_f64(),
+            total_points as f64 / msm_elapsed.as_secs_f64()
+        );
+    }
+
+    // Phase 3: Batch normalize all results (single batch normalization for all results)
+    let mut point_accs = Vec::with_capacity(msm_results.len());
+    let mut point_ids = Vec::with_capacity(msm_results.len());
+    
+    for (pair_id, h_acc) in msm_results {
+        point_accs.push(h_acc);
+        point_ids.push(pair_id);
+    }
+    
+    // Batch normalize to save inversions (significant for small MSMs)
+    // 158M inversions -> ~26 mins. Batch norm -> ~20 secs.
+    let h_wit: Vec<_> = if !point_accs.is_empty() {
+        let affines = <C::OuterE as Pairing>::G1::normalize_batch(&point_accs);
+        affines.into_iter()
+            .enumerate()
+            .map(|(idx, affine)| (point_ids[idx].0, point_ids[idx].1, affine))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let count = h_wit.len();
     println!(
