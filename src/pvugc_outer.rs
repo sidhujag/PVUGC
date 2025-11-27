@@ -19,7 +19,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationG
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::time::Instant;
 use rayon::prelude::*;
 
@@ -86,9 +86,9 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
         println!("[Setup] Serializing setup to {}...", cache_path);
         let file = File::create(&cache_path).expect("failed to create cache file");
         let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
+        // Serialize as tuple - need owned values for CanonicalSerialize
         (lean_pk.clone(), q_points.clone()).serialize_uncompressed(&mut writer).expect("failed to serialize setup");
-        // BufWriter flushes automatically on drop, but sync to ensure data is on disk
-        writer.get_mut().sync_all().expect("failed to sync file");
+        writer.flush().expect("failed to flush buffer");
         (lean_pk, q_points)
     };
 
@@ -266,12 +266,9 @@ fn compute_witness_bases<C: RecursionCycle>(
             let mut denominators = Vec::with_capacity(buffer_capacity);
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
-            let mut bases = Vec::with_capacity(max_col_a + max_col_b);
-            let mut scalars = Vec::with_capacity(max_col_a + max_col_b);
             
-            // SoA layout to avoid intermediate tuple allocations and copies for normalization
-            let mut point_accs = Vec::with_capacity(chunk.len());
-            let mut point_ids = Vec::with_capacity(chunk.len());
+            // Collect all MSM tasks first, then process in parallel for better CPU utilization
+            let mut msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
                 if (i as usize) < num_pub && (j as usize) < num_pub {
@@ -350,33 +347,62 @@ fn compute_witness_bases<C: RecursionCycle>(
                     }
                 }
 
-                // 3. Collect bases for MSM
-                bases.clear();
-                scalars.clear();
+                // 3. Collect bases for MSM (store for parallel processing)
+                // Create new vectors for each pair to avoid move issues
+                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b);
+                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b);
                 
                 for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
                     if !acc_u[idx_u].is_zero() {
-                        bases.push(lagrange_srs[k]);
-                        scalars.push(acc_u[idx_u]);
+                        pair_bases.push(lagrange_srs[k]);
+                        pair_scalars.push(acc_u[idx_u]);
                     }
                 }
                 for (idx_v, &(m, _)) in rows_v.iter().enumerate() {
                     if !acc_v[idx_v].is_zero() {
-                        bases.push(lagrange_srs[m]);
-                        scalars.push(acc_v[idx_v]);
+                        pair_bases.push(lagrange_srs[m]);
+                        pair_scalars.push(acc_v[idx_v]);
                     }
                 }
 
-                if bases.is_empty() {
-                    continue;
+                if !pair_bases.is_empty() {
+                    msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
                 }
+            }
 
-                let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
-                
-                if !h_acc.is_zero() {
-                    point_accs.push(h_acc);
-                    point_ids.push((i as u32, j as u32));
-                }
+            // Process MSMs in parallel for better CPU utilization
+            let msm_start = Instant::now();
+            let num_msms = msm_tasks.len();
+            let total_points: usize = msm_tasks.iter().map(|(bases, _, _)| bases.len()).sum();
+            
+            let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
+                .into_par_iter()
+                .map(|(bases, scalars, pair_id)| {
+                    let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+                    (pair_id, h_acc)
+                })
+                .filter(|(_, h_acc)| !h_acc.is_zero())
+                .collect();
+            
+            let msm_elapsed = msm_start.elapsed();
+            if num_msms > 0 {
+                eprintln!(
+                    "[Quotient] Chunk MSM: {} MSMs, {} total points, {:.2}ms ({:.0} MSM/s, {:.0} points/s)",
+                    num_msms,
+                    total_points,
+                    msm_elapsed.as_secs_f64() * 1000.0,
+                    num_msms as f64 / msm_elapsed.as_secs_f64(),
+                    total_points as f64 / msm_elapsed.as_secs_f64()
+                );
+            }
+
+            // SoA layout to avoid intermediate tuple allocations and copies for normalization
+            let mut point_accs = Vec::with_capacity(msm_results.len());
+            let mut point_ids = Vec::with_capacity(msm_results.len());
+            
+            for (pair_id, h_acc) in msm_results {
+                point_accs.push(h_acc);
+                point_ids.push(pair_id);
             }
             
             // Batch normalize to save inversions (significant for small MSMs)
