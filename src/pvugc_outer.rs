@@ -277,7 +277,7 @@ fn compute_witness_bases<C: RecursionCycle>(
                 
                 // Progress logging (approximate)
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if prog == 0 || prog % 1000000 == 0 {
+                if prog == 0 || prog % 100000 == 0 {
                      let elapsed = wit_start.elapsed().as_secs_f64();
                      let rate = prog as f64 / elapsed;
                      
@@ -371,10 +371,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
 
             // Process MSMs in parallel for better CPU utilization
-            let msm_start = Instant::now();
-            let num_msms = msm_tasks.len();
-            let total_points: usize = msm_tasks.iter().map(|(bases, _, _)| bases.len()).sum();
-            
             let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
                 .into_par_iter()
                 .map(|(bases, scalars, pair_id)| {
@@ -384,17 +380,6 @@ fn compute_witness_bases<C: RecursionCycle>(
                 .filter(|(_, h_acc)| !h_acc.is_zero())
                 .collect();
             
-            let msm_elapsed = msm_start.elapsed();
-            if num_msms > 0 {
-                eprintln!(
-                    "[Quotient] Chunk MSM: {} MSMs, {} total points, {:.2}ms ({:.0} MSM/s, {:.0} points/s)",
-                    num_msms,
-                    total_points,
-                    msm_elapsed.as_secs_f64() * 1000.0,
-                    num_msms as f64 / msm_elapsed.as_secs_f64(),
-                    total_points as f64 / msm_elapsed.as_secs_f64()
-                );
-            }
 
             // SoA layout to avoid intermediate tuple allocations and copies for normalization
             let mut point_accs = Vec::with_capacity(msm_results.len());
