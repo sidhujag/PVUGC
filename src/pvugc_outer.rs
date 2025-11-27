@@ -19,6 +19,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationG
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 use std::collections::HashSet;
 use std::fs::File;
+use std::io::{BufReader, BufWriter};
 use std::time::Instant;
 use rayon::prelude::*;
 
@@ -53,8 +54,9 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
     let (lean_pk, q_points) = if std::path::Path::new(&cache_path).exists() {
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
         let file = File::open(&cache_path).expect("failed to open cached setup");
+        let reader = BufReader::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
         let (pk, q_points): (LeanProvingKey<C::OuterE>, Vec<<C::OuterE as Pairing>::G1Affine>) = 
-            CanonicalDeserialize::deserialize_uncompressed_unchecked(file)
+            CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
             .expect("failed to deserialize setup");
         println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
         (pk, q_points)
@@ -83,7 +85,10 @@ pub fn build_pvugc_setup_from_pk_for<C: RecursionCycle>(
         println!("[Setup] q_points computed in {:?}", start.elapsed());
         println!("[Setup] Serializing setup to {}...", cache_path);
         let file = File::create(&cache_path).expect("failed to create cache file");
-        (lean_pk.clone(), q_points.clone()).serialize_uncompressed(file).expect("failed to serialize setup");
+        let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
+        (lean_pk.clone(), q_points.clone()).serialize_uncompressed(&mut writer).expect("failed to serialize setup");
+        // BufWriter flushes automatically on drop, but sync to ensure data is on disk
+        writer.get_mut().sync_all().expect("failed to sync file");
         (lean_pk, q_points)
     };
 
@@ -252,7 +257,7 @@ fn compute_witness_bases<C: RecursionCycle>(
 
 
     // Chunk size for batching to reduce overhead and allow buffer reuse
-    const CHUNK_SIZE: usize = 32; 
+    const CHUNK_SIZE: usize = 256; 
 
     let h_wit: Vec<_> = sorted_pairs
         .par_chunks(CHUNK_SIZE)
