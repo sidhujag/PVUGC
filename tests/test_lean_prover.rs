@@ -531,9 +531,8 @@ fn test_lean_prover_end_to_end() {
     let fixture = get_fixture();
     // Create a valid inner proof for the AddCircuit with public input x=10
     let x_val = InnerScalar::<DefaultCycle>::from(10u64); 
-    let x_1val = InnerScalar::<DefaultCycle>::from(100u64); 
 
-    let circuit_inner = AddCircuit::with_public_input(x_1val);
+    let circuit_inner = AddCircuit::with_public_input(x_val);
     let proof_inner = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng)
         .expect("inner proof failed");
     let x_inner = vec![x_val];
