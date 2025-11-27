@@ -141,6 +141,23 @@ fn main() {
         run_audit(subject.as_ref());
         println!("\n");
     }
+    
+    // Diagonal Basis Security Audit (for Lean Prover)
+    println!(">>> DIAGONAL BASIS SECURITY AUDIT <<<");
+    println!("=====================================\n");
+    
+    let circuit = get_valid_circuit();
+    let (d, n, rank, is_secure) = audit_diagonal_basis_security(circuit);
+    
+    println!("\nSummary:");
+    println!("  Diagonal rows (d): {}", d);
+    println!("  Domain size (n):   {}", n);
+    println!("  Matrix rank:       {}", rank);
+    println!("  Hidden dimensions: {}", if n > 1 { n - 1 - d } else { 0 });
+    println!("  Security ratio:    {:.2}% hidden", 
+        if n > 1 { ((n - 1 - d) as f64 / (n - 1) as f64) * 100.0 } else { 0.0 });
+    println!("\nDiagonal Basis Security: {}", 
+        if is_secure { "✓ SECURE" } else { "✗ VULNERABLE" });
 }
 
 fn run_audit(subject: &dyn AuditSubject) {
@@ -481,4 +498,170 @@ fn check_independence_streaming(
     
     let residue = basis.reduce(target_vec);
     residue.iter().all(|x| x.is_zero()) == false 
+}
+
+// ============================================================================
+// DIAGONAL BASIS SECURITY AUDIT
+// ============================================================================
+// 
+// Verifies that the sparse diagonal bases don't leak the full Lagrange SRS.
+// 
+// The diagonal bases are: D_k = Σ_m Q_k(ω^m) · L_m for k ∈ diagonal_rows
+// where Q_k(ω^m) = ω^k / (n·(ω^k - ω^m)) for m ≠ k, and (n-1)/(2n) for m = k.
+//
+// Security condition: rank(M) = d where M is the d×n coefficient matrix.
+// This ensures each diagonal basis reveals exactly 1 dimension of information.
+
+/// Audit the diagonal basis security for the lean prover.
+/// Returns (d, n, rank, is_secure) where:
+/// - d = number of diagonal rows
+/// - n = domain size  
+/// - rank = actual rank of coefficient matrix
+/// - is_secure = true if rank == d (no degeneracy)
+pub fn audit_diagonal_basis_security<C: ConstraintSynthesizer<Fr> + Clone>(
+    circuit: C,
+) -> (usize, usize, usize, bool) {
+    use ark_poly::EvaluationDomain;
+    
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.clone().generate_constraints(cs.clone()).expect("synthesis");
+    cs.finalize();
+    
+    let matrices = cs.to_matrices().expect("matrices");
+    let num_constraints = cs.num_constraints();
+    let num_inputs = cs.num_instance_variables();
+    let num_pub = num_inputs;
+    
+    // Domain size (same as in compute_witness_bases)
+    let qap_domain_size = num_constraints + num_inputs;
+    let domain = GeneralEvaluationDomain::<Fr>::new(qap_domain_size)
+        .or_else(|| GeneralEvaluationDomain::<Fr>::new(qap_domain_size.next_power_of_two()))
+        .expect("domain");
+    let n = domain.size();
+    
+    // Find diagonal rows (rows where both A and B have witness terms)
+    let mut diagonal_rows = Vec::new();
+    for k in 0..matrices.a.len().min(n) {
+        let has_wit_a = matrices.a[k].iter().any(|&(_, col)| col >= num_pub);
+        let has_wit_b = matrices.b[k].iter().any(|&(_, col)| col >= num_pub);
+        if has_wit_a && has_wit_b {
+            diagonal_rows.push(k);
+        }
+    }
+    let d = diagonal_rows.len();
+    
+    if d == 0 {
+        println!("[DiagAudit] No diagonal rows found. Trivially secure.");
+        return (0, n, 0, true);
+    }
+    
+    println!("[DiagAudit] Found {} diagonal rows out of {} domain size", d, n);
+    println!("[DiagAudit] Ratio d/n = {:.4}%", (d as f64 / n as f64) * 100.0);
+    
+    // Build the coefficient matrix M where M[i][m] = Q_{k_i}(ω^m)
+    // k_i is the i-th diagonal row
+    let n_field = domain.size_as_field_element();
+    let t0 = (n_field - Fr::one()) * (n_field + n_field).inverse().expect("2n invertible");
+    
+    // Precompute T[j] = 1 / (n * (1 - ω^j)) for j ≠ 0
+    let mut coeffs_table = vec![Fr::zero(); n];
+    coeffs_table[0] = t0;
+    
+    let mut denoms = Vec::with_capacity(n - 1);
+    for j in 1..n {
+        let omega_j = domain.element(j);
+        denoms.push(n_field * (Fr::one() - omega_j));
+    }
+    ark_ff::batch_inversion(&mut denoms);
+    for (j, inv) in denoms.into_iter().enumerate() {
+        coeffs_table[j + 1] = inv;
+    }
+    
+    // Build coefficient matrix (d rows, n columns)
+    // M[i][m] = T[(m - k_i) mod n]
+    let mut matrix: Vec<Vec<Fr>> = Vec::with_capacity(d);
+    for &k in &diagonal_rows {
+        let mut row = vec![Fr::zero(); n];
+        for m in 0..n {
+            let diff = if m >= k { m - k } else { m + n - k };
+            row[m] = coeffs_table[diff];
+        }
+        matrix.push(row);
+    }
+    
+    // Compute rank using Gaussian elimination
+    let rank = compute_matrix_rank(&mut matrix, n);
+    
+    let is_secure = rank == d;
+    
+    println!("[DiagAudit] Coefficient matrix rank: {} (expected: {})", rank, d);
+    if is_secure {
+        println!("[DiagAudit] ✓ SECURE: Rank equals d, no degeneracy.");
+        println!("[DiagAudit] Hidden subspace dimension: {} (out of {})", n - 1 - d, n - 1);
+    } else {
+        println!("[DiagAudit] ✗ WARNING: Rank {} < d = {}!", rank, d);
+        println!("[DiagAudit] This means diagonal bases have unexpected linear dependencies.");
+    }
+    
+    (d, n, rank, is_secure)
+}
+
+/// Compute the rank of a matrix using Gaussian elimination over a finite field.
+fn compute_matrix_rank(matrix: &mut Vec<Vec<Fr>>, num_cols: usize) -> usize {
+    let num_rows = matrix.len();
+    if num_rows == 0 {
+        return 0;
+    }
+    
+    let mut rank = 0;
+    let mut pivot_col = 0;
+    
+    for row in 0..num_rows {
+        if pivot_col >= num_cols {
+            break;
+        }
+        
+        // Find pivot
+        let mut pivot_row = None;
+        for r in row..num_rows {
+            if !matrix[r][pivot_col].is_zero() {
+                pivot_row = Some(r);
+                break;
+            }
+        }
+        
+        match pivot_row {
+            Some(pr) => {
+                // Swap rows
+                matrix.swap(row, pr);
+                
+                // Scale pivot row
+                let pivot_inv = matrix[row][pivot_col].inverse().expect("non-zero pivot");
+                for c in pivot_col..num_cols {
+                    matrix[row][c] *= pivot_inv;
+                }
+                
+                // Eliminate column
+                for r in 0..num_rows {
+                    if r != row && !matrix[r][pivot_col].is_zero() {
+                        let factor = matrix[r][pivot_col];
+                        for c in pivot_col..num_cols {
+                            let val = matrix[row][c] * factor;
+                            matrix[r][c] -= val;
+                        }
+                    }
+                }
+                
+                rank += 1;
+                pivot_col += 1;
+            }
+            None => {
+                // No pivot in this column, move to next
+                pivot_col += 1;
+                continue;
+            }
+        }
+    }
+    
+    rank
 }
