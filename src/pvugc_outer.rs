@@ -262,181 +262,211 @@ fn compute_witness_bases<C: RecursionCycle>(
     // Larger chunks = better cache locality and buffer reuse
     const CHUNK_SIZE: usize = 50_000; 
 
-    // Phase 1: Collect all MSM tasks in parallel chunks
-    let all_msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = sorted_pairs
-        .par_chunks(CHUNK_SIZE)
-        .flat_map(|chunk| {
-            // Thread-local buffers to reuse across the chunk
-            let mut denominators = Vec::with_capacity(buffer_capacity);
-            let mut acc_u = Vec::with_capacity(max_col_a);
-            let mut acc_v = Vec::with_capacity(max_col_b);
-            
-            let mut msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = Vec::with_capacity(chunk.len());
-
-            for &(i, j) in chunk {
-                if (i as usize) < num_pub && (j as usize) < num_pub {
-                    continue;
-                }
-                
-                // Progress logging (approximate)
-                let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if prog == 0 || prog % 10000000 == 0 {
-                     let elapsed = wit_start.elapsed().as_secs_f64();
-                     let rate = prog as f64 / elapsed;
-                     
-                     println!(
-                        "[Quotient] {}/{} ({:.1}%) | {:.0} pair/s",
-                        prog, total_pairs, (prog as f64 / total_pairs as f64) * 100.0, rate
-                    );
-                }
-
-                let i_idx = i as usize;
-                let j_idx = j as usize;
-                let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
-                let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
-                
-                if rows_u.is_empty() || rows_v.is_empty() {
-                    continue;
-                }
-
-                let n_u = rows_u.len();
-                let n_v = rows_v.len();
-                let cap = n_u * n_v;
-
-                // 1. Compute denominators
-                denominators.clear();
-                if denominators.capacity() < cap { denominators.reserve(cap - denominators.capacity()); }
-                
-                for &(k, _) in rows_u {
-                    for &(m, _) in rows_v {
-                        if k == m {
-                            denominators.push(OuterScalar::<C>::one());
-                        } else {
-                            let diff = domain_elements[k] - domain_elements[m];
-                            denominators.push(n_scalar * diff);
-                        }
-                    }
-                }
-
-                if denominators.is_empty() {
-                    continue;
-                }
-
-                ark_ff::batch_inversion(&mut denominators);
-
-                // 2. Accumulate coefficients
-                acc_u.clear();
-                acc_u.resize(n_u, OuterScalar::<C>::zero());
-                acc_v.clear();
-                acc_v.resize(n_v, OuterScalar::<C>::zero());
-
-                let mut denom_idx = 0;
-                for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
-                    for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
-                        let k = rows_u[idx_u].0;
-                        let m = rows_v[idx_v].0;
-                        let inv_denom = denominators[denom_idx];
-                        denom_idx += 1;
-
-                        if k == m { continue; }
-
-                        let wm = domain_elements[m];
-                        let wk = domain_elements[k];
-                        let common = val_u * val_v * inv_denom;
-                        acc_u[idx_u] += common * wm;
-                        acc_v[idx_v] -= common * wk;
-                    }
-                }
-
-                // 3. Collect bases for MSM (store for global parallel processing)
-                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b);
-                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b);
-                
-                for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
-                    if !acc_u[idx_u].is_zero() {
-                        pair_bases.push(lagrange_srs[k]);
-                        pair_scalars.push(acc_u[idx_u]);
-                    }
-                }
-                for (idx_v, &(m, _)) in rows_v.iter().enumerate() {
-                    if !acc_v[idx_v].is_zero() {
-                        pair_bases.push(lagrange_srs[m]);
-                        pair_scalars.push(acc_v[idx_v]);
-                    }
-                }
-
-                if !pair_bases.is_empty() {
-                    msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
-                }
+    // Process in batches to avoid storing all MSM tasks in memory at once
+    // Batch size: process 1M MSM tasks at a time (balance memory vs parallelism)
+    const MSM_BATCH_SIZE: usize = 1_000_000;
+    
+    let mut all_point_accs = Vec::new();
+    let mut all_point_ids = Vec::new();
+    let msm_progress_counter = std::sync::atomic::AtomicUsize::new(0);
+    let msm_start = Instant::now();
+    let mut total_msms_processed = 0;
+    let mut total_points_processed = 0;
+    
+    // Process pairs in chunks, collect MSM tasks, process in batches
+    let mut msm_batch: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = Vec::with_capacity(MSM_BATCH_SIZE);
+    
+    for chunk in sorted_pairs.chunks(CHUNK_SIZE) {
+        // Thread-local buffers to reuse across the chunk
+        let mut denominators = Vec::with_capacity(buffer_capacity);
+        let mut acc_u = Vec::with_capacity(max_col_a);
+        let mut acc_v = Vec::with_capacity(max_col_b);
+        
+        for &(i, j) in chunk {
+            if (i as usize) < num_pub && (j as usize) < num_pub {
+                continue;
             }
             
-            msm_tasks
-        })
-        .collect();
-
-    // Phase 2: Process ALL MSMs globally in parallel (better CPU utilization across all cores)
-    let msm_start = Instant::now();
-    let num_msms = all_msm_tasks.len();
-    let total_points: usize = all_msm_tasks.iter().map(|(bases, _, _)| bases.len()).sum();
-    let msm_progress_counter = std::sync::atomic::AtomicUsize::new(0);
-    
-    eprintln!(
-        "[Quotient] Starting global MSM: {} MSMs, {} total points",
-        num_msms, total_points
-    );
-    
-    let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = all_msm_tasks
-        .into_par_iter()
-        .map(|(bases, scalars, pair_id)| {
-            let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
-            
-            // Progress logging during MSM processing
-            let msm_prog = msm_progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if msm_prog == 0 || (msm_prog + 1) % 10000 == 0 {
-                let elapsed = msm_start.elapsed().as_secs_f64();
-                let rate = (msm_prog + 1) as f64 / elapsed;
-                eprintln!(
-                    "[Quotient] MSM progress: {}/{} ({:.1}%) | {:.0} MSM/s",
-                    msm_prog + 1,
-                    num_msms,
-                    ((msm_prog + 1) as f64 / num_msms as f64) * 100.0,
-                    rate
+            // Progress logging (approximate)
+            let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if prog == 0 || prog % 10000000 == 0 {
+                 let elapsed = wit_start.elapsed().as_secs_f64();
+                 let rate = prog as f64 / elapsed;
+                 
+                 println!(
+                    "[Quotient] {}/{} ({:.1}%) | {:.0} pair/s",
+                    prog, total_pairs, (prog as f64 / total_pairs as f64) * 100.0, rate
                 );
             }
+
+            let i_idx = i as usize;
+            let j_idx = j as usize;
+            let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
+            let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
             
-            (pair_id, h_acc)
-        })
-        .filter(|(_, h_acc)| !h_acc.is_zero())
-        .collect();
+            if rows_u.is_empty() || rows_v.is_empty() {
+                continue;
+            }
+
+            let n_u = rows_u.len();
+            let n_v = rows_v.len();
+            let cap = n_u * n_v;
+
+            // 1. Compute denominators
+            denominators.clear();
+            if denominators.capacity() < cap { denominators.reserve(cap - denominators.capacity()); }
+            
+            for &(k, _) in rows_u {
+                for &(m, _) in rows_v {
+                    if k == m {
+                        denominators.push(OuterScalar::<C>::one());
+                    } else {
+                        let diff = domain_elements[k] - domain_elements[m];
+                        denominators.push(n_scalar * diff);
+                    }
+                }
+            }
+
+            if denominators.is_empty() {
+                continue;
+            }
+
+            ark_ff::batch_inversion(&mut denominators);
+
+            // 2. Accumulate coefficients
+            acc_u.clear();
+            acc_u.resize(n_u, OuterScalar::<C>::zero());
+            acc_v.clear();
+            acc_v.resize(n_v, OuterScalar::<C>::zero());
+
+            let mut denom_idx = 0;
+            for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
+                for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
+                    let k = rows_u[idx_u].0;
+                    let m = rows_v[idx_v].0;
+                    let inv_denom = denominators[denom_idx];
+                    denom_idx += 1;
+
+                    if k == m { continue; }
+
+                    let wm = domain_elements[m];
+                    let wk = domain_elements[k];
+                    let common = val_u * val_v * inv_denom;
+                    acc_u[idx_u] += common * wm;
+                    acc_v[idx_v] -= common * wk;
+                }
+            }
+
+            // 3. Collect bases for MSM
+            let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b);
+            let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b);
+            
+            for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
+                if !acc_u[idx_u].is_zero() {
+                    pair_bases.push(lagrange_srs[k]);
+                    pair_scalars.push(acc_u[idx_u]);
+                }
+            }
+            for (idx_v, &(m, _)) in rows_v.iter().enumerate() {
+                if !acc_v[idx_v].is_zero() {
+                    pair_bases.push(lagrange_srs[m]);
+                    pair_scalars.push(acc_v[idx_v]);
+                }
+            }
+
+            if !pair_bases.is_empty() {
+                msm_batch.push((pair_bases, pair_scalars, (i as u32, j as u32)));
+                
+                // Process batch when it reaches threshold
+                if msm_batch.len() >= MSM_BATCH_SIZE {
+                    let batch_points: usize = msm_batch.iter().map(|(bases, _, _)| bases.len()).sum();
+                    total_points_processed += batch_points;
+                    
+                    let batch_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_batch
+                        .into_par_iter()
+                        .map(|(bases, scalars, pair_id)| {
+                            let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+                            
+                            // Progress logging during MSM processing
+                            let msm_prog = msm_progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if msm_prog == 0 || (msm_prog + 1) % 10000 == 0 {
+                                let elapsed = msm_start.elapsed().as_secs_f64();
+                                let rate = (msm_prog + 1) as f64 / elapsed;
+                                eprintln!(
+                                    "[Quotient] MSM progress: {} MSMs | {:.0} MSM/s",
+                                    msm_prog + 1,
+                                    rate
+                                );
+                            }
+                            
+                            (pair_id, h_acc)
+                        })
+                        .filter(|(_, h_acc)| !h_acc.is_zero())
+                        .collect();
+                    
+                    total_msms_processed += batch_results.len();
+                    for (pair_id, h_acc) in batch_results {
+                        all_point_accs.push(h_acc);
+                        all_point_ids.push(pair_id);
+                    }
+                    
+                    msm_batch = Vec::with_capacity(MSM_BATCH_SIZE);
+                }
+            }
+        }
+    }
+    
+    // Process remaining MSM tasks in final batch
+    if !msm_batch.is_empty() {
+        let batch_points: usize = msm_batch.iter().map(|(bases, _, _)| bases.len()).sum();
+        total_points_processed += batch_points;
+        
+        let batch_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_batch
+            .into_par_iter()
+            .map(|(bases, scalars, pair_id)| {
+                let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+                
+                let msm_prog = msm_progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if msm_prog == 0 || (msm_prog + 1) % 10000 == 0 {
+                    let elapsed = msm_start.elapsed().as_secs_f64();
+                    let rate = (msm_prog + 1) as f64 / elapsed;
+                    eprintln!(
+                        "[Quotient] MSM progress: {} MSMs | {:.0} MSM/s",
+                        msm_prog + 1,
+                        rate
+                    );
+                }
+                
+                (pair_id, h_acc)
+            })
+            .filter(|(_, h_acc)| !h_acc.is_zero())
+            .collect();
+        
+        total_msms_processed += batch_results.len();
+        for (pair_id, h_acc) in batch_results {
+            all_point_accs.push(h_acc);
+            all_point_ids.push(pair_id);
+        }
+    }
     
     let msm_elapsed = msm_start.elapsed();
-    if num_msms > 0 {
+    if total_msms_processed > 0 {
         eprintln!(
             "[Quotient] Global MSM complete: {} MSMs, {} total points, {:.2}ms ({:.0} MSM/s, {:.0} points/s)",
-            num_msms,
-            total_points,
+            total_msms_processed,
+            total_points_processed,
             msm_elapsed.as_secs_f64() * 1000.0,
-            num_msms as f64 / msm_elapsed.as_secs_f64(),
-            total_points as f64 / msm_elapsed.as_secs_f64()
+            total_msms_processed as f64 / msm_elapsed.as_secs_f64(),
+            total_points_processed as f64 / msm_elapsed.as_secs_f64()
         );
     }
 
-    // Phase 3: Batch normalize all results (single batch normalization for all results)
-    let mut point_accs = Vec::with_capacity(msm_results.len());
-    let mut point_ids = Vec::with_capacity(msm_results.len());
-    
-    for (pair_id, h_acc) in msm_results {
-        point_accs.push(h_acc);
-        point_ids.push(pair_id);
-    }
-    
-    // Batch normalize to save inversions (significant for small MSMs)
-    // 158M inversions -> ~26 mins. Batch norm -> ~20 secs.
-    let h_wit: Vec<_> = if !point_accs.is_empty() {
-        let affines = <C::OuterE as Pairing>::G1::normalize_batch(&point_accs);
+    // Batch normalize all results
+    let h_wit: Vec<_> = if !all_point_accs.is_empty() {
+        let affines = <C::OuterE as Pairing>::G1::normalize_batch(&all_point_accs);
         affines.into_iter()
             .enumerate()
-            .map(|(idx, affine)| (point_ids[idx].0, point_ids[idx].1, affine))
+            .map(|(idx, affine)| (all_point_ids[idx].0, all_point_ids[idx].1, affine))
             .collect()
     } else {
         Vec::new()
