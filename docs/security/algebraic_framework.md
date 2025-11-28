@@ -15,14 +15,28 @@ Every group element $g$ held by the adversary is represented by a handle. Intern
 *   $\rho$: The fresh arming randomness (per instance).
 
 **Available Handles (The Basis):**
-The adversary starts with handles for the public parameters and the specific arming instance.
+The adversary starts with handles for the public parameters (Lean CRS + Verification Key) and the specific arming instance. We list the explicit algebraic labels because the poisoning is the source of every security invariant.
 
-*   **Public CRS (Lean):**
-    *   $\mathbb{G}_1$: $\{ [\tau^i]_1 \}_{i \in \text{Legal}}$ (Restricted set, no Full Span $H$).
-    *   $\mathbb{G}_2$: $\{ [\beta]_2, [\delta]_2, [v_j(\tau)]_2 \}$.
-*   **Arming Instance:**
-    *   $\mathbb{G}_2$ (Masked): $\{ D_{pub} = (\beta + \sum x_i v_i(\tau))^\rho, D_\delta = \delta^\rho, D_j = v_j(\tau)^\rho \}_{j > \ell}$.
-    *   **Note:** The adversary does **not** possess handles for $[1]_2^\rho$ or $[H(\tau)]_2^\rho$.
+*   **Public CRS / VK (unarmed):**
+    *   $\mathbb{G}_1$ — circuit queries
+        *   $A_k$ ($k > \ell$): $u_k(\tau)$ (clean witness-column bases, no $\rho$)
+        *   $B^{(1)}_k$ ($k > \ell$): $v_k(\tau)$ in $\mathbb{G}_1$
+        *   $L_k$ ($k > \ell$): $\frac{\beta v_k(\tau) + \alpha u_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, still poisoned)
+        *   $IC_i$ ($i \le \ell$): $\frac{u_i(\tau)}{\gamma}$ (**note the inverse $\gamma$**)
+        *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
+    *   $\mathbb{G}_2$ — verification key elements
+        *   $[\beta]_2, [\gamma]_2, [\delta]_2$
+        *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
+*   **Explicit Exclusions (Lean CRS):**
+    *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
+    *   No public-only $H$ bases (the constant quotient)
+    *   No armed $[\gamma]_2^\rho$, $[1]_2^\rho$, or $[H(\tau)]_2^\rho$
+*   **Arming Instance (masked by $\rho$):**
+    *   $D_{pub} = \rho \cdot (\beta + \sum_{i=0}^\ell x_i v_i(\tau))$
+    *   $D_\delta = \rho \cdot \delta$
+    *   $D_j = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
+
+Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core “span separation” used later in §2.2–§2.3.
 
 ### 1.2 Adversary Capabilities
 The adversary can construct new handles via:
@@ -30,32 +44,50 @@ The adversary can construct new handles via:
 2.  **Pairing:** Given $h_1 \in \mathbb{G}_1, h_2 \in \mathbb{G}_2$, compute $e(h_1, h_2)$. Label: $L(h_1) \cdot L(h_2)$.
 
 **Goal:** Construct a handle with label equal to the Target Label:
-$$ L_{Target} = \rho \cdot (\alpha \beta + \sum x_i u_i(\tau)\beta + \gamma \sum x_i u_i(\tau)) - T_{const} $$
+$$ L_{Target} = \rho \cdot \left(\alpha \beta + \sum_{i=0}^{\ell} x_i u_i(\tau)\right) - T_{const} $$
+
+*Why no $\gamma$ term?* The IC bases in the Lean CRS are $u_i(\tau)/\gamma$. Honest decapsulation pairs $\sum x_i \cdot IC_i$ with the unarmed $[\gamma]_2$, so the $\gamma$ cancels before arming with $\rho$. Adversaries still never obtain an armed $[\gamma]_2^\rho$, but the monomial enforced in the protocol is $\rho \cdot \sum x_i u_i(\tau)$.
 
 ## 2. Security Invariants (The "Impossibility" Proofs)
 
+We argue security entirely inside the Algebraic Generic Bilinear Group Model. A WE adversary may issue arbitrary linear-combination and pairing queries—it is not constrained to produce Groth16-style $(A,B,C)$ tuples. Consequently we do **not** rely on Rank-1 structure; instead we show that the target decapsulation label lies outside the algebraic span reachable from the Lean CRS handles. The argument proceeds along two axes:
+
+1. **Span analysis:** anything involving public-only quotient terms or clean polynomial bases is simply missing from the CRS.
+2. **Degree analysis:** the trapdoor indeterminates $\rho$ (arming) and $\gamma$ (Groth16) never cohabit a handle, so monomials that require both are unreachable.
+
+The first two invariants below—§2.2 (Linearity) and §2.3 (Baked Quotient)—form the primary defense. They guarantee the public-only quotient term lives outside the Lean CRS span regardless of any $\gamma$-related arguments. The $\gamma$ barrier (§2.1) is a belt-and-suspenders separation that further blocks direct attempts to arm the IC bases.
+
 Security holds because the Target Label lies outside the linear span of the labels reachable by the adversary.
 
-### 2.1 The Gamma Invariant (Blocks GT-Slicing)
-**Claim:** The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS.
+### 2.1 The Gamma Invariant (Supplementary Barrier)
+**Claim:** (Supplementary) The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS. This barrier is not relied upon for the main baked-quotient argument but it provides an additional algebraic separation.
 
-*   **Proof:**
-    *   The only source of $\gamma$ is the IC-correction term $K_i = [\frac{1-\gamma}{\delta} f_i]_1$.
-    *   Pairing $K_i$ with $D_\delta = \delta^\rho$ yields $\rho(1-\gamma)f_i = \rho f_i - \rho \gamma f_i$.
-    *   This term is "polluted" by $\rho f_i$.
-    *   To isolate $-\rho \gamma f_i$, the adversary must subtract $\rho f_i$.
-    *   This requires a handle for $[1]_2^\rho$ or $[f_i]_2^\rho$.
-    *   **Constraint:** The scheme strictly withholds $[1]_2^\rho$. The available handles ($D_{pub}, D_j, D_\delta$) are all linearly independent of $[1]_2^\rho$.
-    *   **Result:** The pollution cannot be cleaned. The Target (which has "clean" $\gamma$ terms) is unreachable.
+**Proof (degree argument):**
+
+We track the degrees of the independent indeterminates $\rho$ (arming secret) and $\gamma$ (Groth16 trapdoor) inside every handle. Although the baked target used in PVUGC involves only $\rho$ (the $\gamma$ factors cancel for honest users), it is useful to note that any adversarial attempt to recreate a $\rho \cdot \gamma$ term—by arming the IC bases themselves—fails for algebraic reasons.
+
+| Handle Type | Group | $Deg_\rho$ | $Deg_\gamma$ | Notes |
+|-------------|:-----:|:----------:|:------------:|-------|
+| $A_k$, $L_k$, $H_{wit}$ | $\mathbb{G}_1$ | 0 | 0 | witness-column bases (no $\gamma$ factor) |
+| $IC_i$ | $\mathbb{G}_1$ | 0 | -1 | only source with $\gamma^{-1}$ |
+| VK constants $[\beta]_2, [\gamma]_2, [\delta]_2$ | $\mathbb{G}_2$ | 0 | $\le 1$ | unarmed |
+| Armed handles $D_{pub}, D_\delta, D_j$ | $\mathbb{G}_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
+
+When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
+
+1. If $H_2$ is armed ($Deg_\rho = 1$), then $Deg_\gamma(E) = Deg_\gamma(H_1) \le 0$ because no $\mathbb{G}_1$ handle has positive $\gamma$ degree.
+2. If $H_2$ is unarmed ($Deg_\rho = 0$), then $Deg_\rho(E) = Deg_\rho(H_1) = 0$.
+
+Thus no pairing (nor any linear combination thereof) can yield a handle with $Deg_\rho = 1$ **and** $Deg_\gamma = 1$. Even if an adversary tried to arm the IC bases directly, the $\rho \cdot \gamma$ monomial would remain algebraically unreachable.
 
 ### 2.2 The Linearity Invariant (Blocks Full Span / Public-Public)
-**Claim:** The adversary cannot forge the public residual $\Delta_{pub}$ using witness handles.
+**Claim:** The adversary cannot forge the public residual $\Delta_{pub}$ using witness handles—even though it may possess clean witness-column bases from the CRS.
 
 *   **Proof:**
     *   The public residual $\Delta_{pub}$ depends on the public inputs $x$.
-    *   The adversary has witness handles $D_j$ corresponding to witness columns.
-    *   **Constraint:** The **Trapdoor-Aware Audit** (and the Linearity property of the Outer Circuit) guarantees that the subspace spanned by the public residual is orthogonal to the subspace spanned by the witness columns.
-    *   **Result:** No linear combination of $D_j$ can equal $\Delta_{pub}$ (unless the R1CS is satisfied).
+    *   The adversary has witness handles $A_k$, $B_k$, $H_{wit}$ and the armed $D_j$—all tied solely to witness columns.
+    *   **Constraint:** The **Trapdoor-Aware Audit** (and the Linearity property of the Outer Circuit) guarantees that the subspace spanned by the public residual is orthogonal to the subspace spanned by the witness columns (no pub×pub or pub×wit constraints).
+    *   **Result:** No linear combination of the available witness handles can equal $\Delta_{pub}$ (unless the R1CS is satisfied).
 
 ### 2.3 The Baked Quotient Invariant (Blocks Remainder Forging)
 **Claim:** The adversary cannot use the CRS to forge the quotient polynomial $H(x)$.
