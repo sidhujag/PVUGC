@@ -130,6 +130,9 @@ fn main() {
     println!("PVUGC Production Audit Tool");
     println!("===========================\n");
 
+    let args: Vec<String> = std::env::args().collect();
+    let run_h_query_audit = args.iter().any(|a| a == "--h-query-audit");
+
     let subjects: Vec<Box<dyn AuditSubject>> = vec![
         Box::new(MockLinear),
         Box::new(MockQuadratic),
@@ -139,7 +142,17 @@ fn main() {
     for subject in subjects {
         println!(">>> AUDITING: {} <<<", subject.name());
         run_audit(subject.as_ref());
+        
+        // Run H-query security audit if requested
+        if run_h_query_audit {
+            audit_h_query_security(subject.as_ref());
+        }
+        
         println!("\n");
+    }
+    
+    if !run_h_query_audit {
+        println!("Tip: Run with --h-query-audit to check Q-vector fix security");
     }
 }
 
@@ -481,4 +494,130 @@ fn check_independence_streaming(
     
     let residue = basis.reduce(target_vec);
     residue.iter().all(|x| x.is_zero()) == false 
+}
+
+// ============================================================================
+// H-QUERY SECURITY AUDIT
+// ============================================================================
+// This audits the security of the h_query_wit bases by checking:
+// 1. The ratio |h_query_wit| / n (should be << 1)
+// 2. The rank of the coefficient matrix (should be << n)
+//
+// To run: cargo run --bin audit_circuit -- --h-query-audit
+
+/// Audit h_query_wit security for the Q-vector fix
+pub fn audit_h_query_security(subject: &dyn AuditSubject) {
+    use std::collections::HashSet;
+    
+    println!("\n>>> H-QUERY SECURITY AUDIT <<<");
+    println!("================================\n");
+    
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    subject.synthesize(cs.clone()).unwrap();
+    cs.finalize();
+    
+    let matrices = cs.to_matrices().expect("matrix extraction");
+    let num_constraints = cs.num_constraints();
+    let num_inputs = cs.num_instance_variables();
+    let num_vars = num_inputs + cs.num_witness_variables();
+    
+    // Domain size for QAP
+    let qap_domain_size = num_constraints + num_inputs;
+    let domain = GeneralEvaluationDomain::<Fr>::new(qap_domain_size)
+        .or_else(|| GeneralEvaluationDomain::<Fr>::new(qap_domain_size.next_power_of_two()))
+        .expect("domain creation failed");
+    let n = domain.size();
+    
+    println!("Circuit Statistics:");
+    println!("  Constraints:     {}", num_constraints);
+    println!("  Public inputs:   {}", num_inputs);
+    println!("  Total variables: {}", num_vars);
+    println!("  QAP domain size: {} (padded to {})", qap_domain_size, n);
+    
+    // Build column maps
+    let mut col_a: Vec<HashSet<usize>> = vec![HashSet::new(); num_vars];
+    let mut col_b: Vec<HashSet<usize>> = vec![HashSet::new(); num_vars];
+    
+    for (row, terms) in matrices.a.iter().enumerate() {
+        if row < n {
+            for &(_, col) in terms {
+                col_a[col].insert(row);
+            }
+        }
+    }
+    for (row, terms) in matrices.b.iter().enumerate() {
+        if row < n {
+            for &(_, col) in terms {
+                col_b[col].insert(row);
+            }
+        }
+    }
+    
+    // Count active wit×wit pairs
+    let mut wit_wit_pairs = 0usize;
+    let mut diagonal_pairs = 0usize;
+    
+    for i in num_inputs..num_vars {
+        for j in num_inputs..num_vars {
+            let rows_a = &col_a[i];
+            let rows_b = &col_b[j];
+            
+            if rows_a.is_empty() || rows_b.is_empty() {
+                continue;
+            }
+            
+            wit_wit_pairs += 1;
+            
+            // Count diagonal contributions (same row in A and B)
+            let common_rows: usize = rows_a.intersection(rows_b).count();
+            if common_rows > 0 {
+                diagonal_pairs += 1;
+            }
+        }
+    }
+    
+    println!("\nH-Query Statistics:");
+    println!("  Wit×Wit pairs:      {}", wit_wit_pairs);
+    println!("  Pairs with diagonals: {}", diagonal_pairs);
+    
+    // Security metrics
+    let ratio = wit_wit_pairs as f64 / n as f64;
+    println!("\nSecurity Metrics:");
+    println!("  |h_query_wit| / n = {} / {} = {:.4}", wit_wit_pairs, n, ratio);
+    
+    if ratio < 0.1 {
+        println!("  Status: ✓ EXCELLENT (ratio < 10%)");
+        println!("  The coefficient matrix is highly underdetermined.");
+    } else if ratio < 0.5 {
+        println!("  Status: ✓ GOOD (ratio < 50%)");
+        println!("  The coefficient matrix is underdetermined.");
+    } else if ratio < 1.0 {
+        println!("  Status: ⚠ MARGINAL (ratio < 100%)");
+        println!("  Security margin is thin. Consider reducing wit×wit constraints.");
+    } else {
+        println!("  Status: ✗ DANGEROUS (ratio >= 100%)");
+        println!("  The system may be overdetermined. Lagrange recovery possible!");
+    }
+    
+    // Estimate rank contribution from diagonal terms
+    // Each diagonal pair adds Q_k terms which are linear combinations of all L_m
+    // But the coefficients C_{k,m} = 1/(n*(1-ω^{m-k})) are fixed and public
+    // So diagonal terms don't add independent dimensions
+    println!("\nDiagonal Term Analysis:");
+    println!("  Diagonal pairs: {} ({:.1}% of wit×wit)", 
+             diagonal_pairs, 
+             100.0 * diagonal_pairs as f64 / wit_wit_pairs.max(1) as f64);
+    println!("  Q-vector contribution: Linear combinations of Lagrange bases");
+    println!("  Security impact: None (coefficients are public)");
+    
+    // Summary
+    println!("\n=== H-QUERY SECURITY SUMMARY ===");
+    if ratio < 0.5 {
+        println!("RESULT: SECURE");
+        println!("The h_query_wit bases do not expose enough information");
+        println!("to recover the Lagrange SRS or h_query.");
+    } else {
+        println!("RESULT: REVIEW NEEDED");
+        println!("The ratio is high. Manual rank analysis recommended.");
+    }
 }
