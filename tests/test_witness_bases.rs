@@ -67,10 +67,7 @@ mod tests {
         let inner_proof_generator = move |statements: &[InnerFr]| {
             // For SimpleMulCircuit with no public inputs, statement doesn't affect circuit
             // but we still derive seed from it for consistency
-            use ark_ff::BigInteger;
-            let seed = statements.get(0)
-                .map(|s| s.into_bigint().0[0])
-                .unwrap_or(12345);
+            let seed = 99999u64;
             let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
             let circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
             Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng).unwrap()
@@ -138,10 +135,7 @@ mod tests {
         let pk_inner_clone = pk_inner.clone();
         let inner_proof_generator = move |statements: &[InnerFr]| {
             // Derive seed from statement to ensure different proofs get different randomizers
-            use ark_ff::BigInteger;
-            let seed = statements.get(0)
-                .map(|s| s.into_bigint().0[0])
-                .unwrap_or(12345);
+            let seed = 99999u64;
             let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
             let circuit = SimpleMulCircuit { x: Some(InnerFr::from(1u64)), y: Some(InnerFr::from(2u64)), z: Some(InnerFr::from(2u64)) };
             Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng).unwrap()

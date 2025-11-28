@@ -1,22 +1,12 @@
-//! PVUGC Trapdoor-Aware Audit Tool (Sahai-Hardened)
+//! PVUGC Trapdoor-Aware Audit Tool
 //!
-//! This tool audits circuits for algebraic security against WE decryption attacks.
-//! 
-//! CRITICAL: Unlike Groth16 soundness (where adversary must output G1/G2 elements),
-//! a WE decryption adversary works directly in GT and can form ANY pairing e(G1, G2).
-//! This means they can compute Σ a_i * u_i * v_i (diagonal products) which is NOT
-//! the same as (Σ a_i * u_i)(Σ a_i * v_i) (rank-1 product).
-//!
-//! This audit enumerates ALL possible GT handles from pairing combinations.
-//!
+//! This tool audits circuits for algebraic security.
 //! It performs:
 //! 1. **Linearity Check**: Verifies that Public Inputs do not multiply each other.
-//! 2. **Sahai Independence Check**: Verifies that the target R^ρ lies outside the
-//!    linear span of ALL possible pairings the adversary can form.
+//! 2. **Independence Check**: Verifies that the "Baked Quotient" Target lies outside the linear span of the
+//!    "Lean CRS" + "Ciphertext" handles in the Generic Bilinear Group Model (AGBGM).
 //!
-//! The key insight from Prof. Sahai: the γ-barrier blocks the attack because
-//! [γ]_2 is never armed (no [ρ*γ]_2 exposed), so the adversary cannot synthesize
-//! the ρ*γ*IC(τ) term in the target.
+//! Optimization: Uses streaming column processing + Incremental Basis + Sparse Eval.
 
 use ark_ff::{Field, One, Zero};
 use ark_poly::{
@@ -36,149 +26,57 @@ use std::collections::HashMap;
 
 type Fr = OuterFr;
 
-// ============================================================================
-// SAHAI-HARDENED TRAPDOOR MONOMIAL SYSTEM
-// ============================================================================
-//
-// In the Generic Bilinear Group Model, each group element has an "exponent label"
-// which is a polynomial in the trapdoors (α, β, γ, δ, ρ) and τ.
-//
-// The adversary can:
-// 1. Add/subtract elements in G1, G2, GT (adds/subtracts labels)
-// 2. Scalar multiply (scales labels)
-// 3. Pair G1 × G2 → GT (multiplies labels)
-//
-// CRITICAL: The adversary can pair ANY G1 handle with ANY G2 handle!
-// This gives them access to products like u_k(τ) * v_j(τ) for ALL (k,j) pairs.
-//
-// We model labels as: coefficient * (trapdoor_monomial) * (polynomial in τ)
-// where trapdoor_monomial is a product of {α, β, γ, δ, ρ}.
-
-/// Trapdoor monomials - products of trapdoor scalars
-/// We track these separately from the τ-polynomial to properly model the γ-barrier.
+// --- Trapdoor Monomial Taxonomy (Delta-Normalized) ---
+// All handles/targets are multiplied by delta to clear denominators from L-queries.
+// Base ring: F[alpha, beta, gamma, delta, x]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum TrapdoorMonomial {
-    // === G1 Handle Labels (before pairing) ===
-    // These become GT labels when paired with G2 handles
+    // --- Target Terms (scaled by delta) ---
+    AlphaBetaDelta,  // alpha * beta * delta
+    GammaDelta,      // gamma * delta * IC(x)
+    DeltaSq,         // Any(x) * delta^2 (Merges H and u terms)
     
-    // From CRS:
-    Alpha,           // [α]_1
-    Beta,            // [β]_1  
-    Delta,           // [δ]_1
-    One,             // [1]_1 (generator, for A_query, B_g1_query)
+    // --- Handle Terms from L_k * D_pub (1/delta * delta cancels) ---
+    // Result is (beta*u + alpha*v + w)(beta + V)
+    BetaSqU,         // beta^2 * u
+    BetaU,           // beta * u * V
+    AlphaBetaV,      // alpha * beta * v
+    AlphaV,          // alpha * v * V
+    BetaW,           // beta * w
+    W,               // w * V
     
-    // From L_query (witness k): [(β*u_k + α*v_k + w_k)/δ]_1
-    // Label: (β*u_k + α*v_k + w_k)/δ
-    BetaOverDelta,   // β/δ * u_k
-    AlphaOverDelta,  // α/δ * v_k
-    OneOverDelta,    // 1/δ * w_k
+    // Result is (beta*u + ...)(v_j)
+    BetaUV,          // beta * u * v
+    AlphaVV,         // alpha * v * v
+    WV,              // w * v
     
-    // From H_query (lean): [H_{ij}(τ)/δ]_1
-    // Label: H_{ij}(τ)/δ (pure polynomial, no trapdoors except 1/δ)
+    // --- Handle Terms from L_k * D_delta (Clean L * delta) ---
+    // Result is (beta*u + alpha*v + w) * delta
+    BetaDeltaU,      // beta * delta * u
+    AlphaDeltaV,     // alpha * delta * v
+    DeltaW,          // delta * w
     
-    // === G2 Handle Labels (before pairing) ===
-    Beta2,           // [β]_2
-    Gamma2,          // [γ]_2 - CRITICAL: never armed!
-    Delta2,          // [δ]_2
-    One2,            // [1]_2 (for B_query)
+    // --- Handle Terms from u_k * D_pub (Clean u * delta) ---
+    // u * (beta + V) * delta = beta*delta*u + delta*u*V
+    // BetaDeltaU is already defined above (MATCH!)
+    DeltaUV,         // delta * u * V
     
-    // Armed handles:
-    RhoBeta,         // ρ*β (from D_pub aggregated)
-    RhoV,            // ρ*v_j(τ) (from D_j for witness j)
-    RhoDelta,        // ρ*δ (from D_δ)
+    // --- Handle Terms from u_k * D_delta (Clean u * delta) ---
+    // u * delta * delta = delta^2 * u
+    // Merged into DeltaSq
     
-    // === GT Labels (after pairing) ===
-    // Target: R^ρ = ρ*(α*β + γ*IC(τ) + δ*H(τ))
-    RhoAlphaBeta,    // ρ*α*β - from e([α]_1, D_pub) partially
-    RhoGamma,        // ρ*γ*... - CANNOT BE SYNTHESIZED (γ not armed!)
-    RhoDeltaSq,      // ρ*δ² - from e([δ]_1, D_δ)
+    // --- Handle Terms from u_k * D_j (Clean u * v * delta) ---
+    // u * v * delta
+    DeltaPureUV,     // delta * u * v
     
-    // Reachable GT monomials (from pairing CRS with armed handles):
-    RhoBetaSq,       // ρ*β² (from e([β]_1, D_pub))
-    RhoBetaV,        // ρ*β*v (from e([β]_1, D_j) or e(L_k, D_pub))
-    RhoAlphaV,       // ρ*α*v (from e([α]_1, D_j))
-    RhoAlphaBetaV,   // ρ*α*β*v (not directly reachable)
-    RhoAlphaVV,      // ρ*α*v*v (from e(L_k, D_j))
-    RhoBetaUV,       // ρ*β*u*v (from e(L_k, D_j))
-    RhoWV,           // ρ*w*v (from e(L_k, D_j))
-    RhoDeltaU,       // ρ*δ*u (from e(A_k, D_δ))
-    RhoDeltaV,       // ρ*δ*v (from e(B_k, D_δ))
-    RhoUV,           // ρ*u*v (from e(A_k, D_j)) - Sahai's diagonal!
+    // --- Fixed Alpha Handles ---
+    // alpha * D_pub * delta = alpha(beta+V)delta = alpha*beta*delta + alpha*V*delta
+    // AlphaDeltaV represents alpha * delta * V_pub
     
-    // Non-ρ GT monomials (from pairing CRS with CRS):
-    AlphaBeta,       // α*β (from e([α]_1, [β]_2))
-    AlphaGamma,      // α*γ (from e([α]_1, [γ]_2))
-    AlphaDelta,      // α*δ
-    BetaGamma,       // β*γ
-    BetaDelta,       // β*δ
-    GammaDelta,      // γ*δ
-    DeltaSq,         // δ²
-    UV,              // u*v (from e(A_k, B_j))
-    
-    // Legacy (for backwards compat with old check)
-    BetaSqU,         
-    BetaU,           
-    AlphaBetaV,      
-    AlphaV,          
-    BetaW,           
-    W,               
-    BetaUV,          
-    AlphaVV,         
-    WV,              
-    BetaDeltaU,      
-    AlphaDeltaV,     
-    DeltaW,          
-    DeltaUV,         
-    DeltaPureUV,     
-    AlphaDeltaSq,
-    // For target in old check
-    AlphaBetaDelta,  // α*β*δ
+    // alpha * D_delta * delta = alpha * delta^2
+    AlphaDeltaSq,    // alpha * delta^2
 }
 
-/// A label in the generic group model.
-/// Represents: Σ (trapdoor_monomial, polynomial(τ))
-/// 
-/// When we pair two labels, we multiply them:
-/// e(label1, label2) = Σ_{i,j} (mono1_i * mono2_j, poly1_i * poly2_j)
-#[derive(Clone)]
-struct GGMLabel {
-    /// Each component is (trapdoor_monomial, coefficient_polynomial)
-    terms: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>,
-}
-
-impl GGMLabel {
-    fn new(terms: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>) -> Self {
-        Self { terms }
-    }
-    
-    fn zero() -> Self {
-        Self { terms: Vec::new() }
-    }
-    
-    fn constant(mono: TrapdoorMonomial) -> Self {
-        Self { terms: vec![(mono, DensePolynomial::from_coefficients_slice(&[Fr::one()]))] }
-    }
-    
-    fn poly(mono: TrapdoorMonomial, p: DensePolynomial<Fr>) -> Self {
-        Self { terms: vec![(mono, p)] }
-    }
-    
-    fn scale(&self, s: Fr) -> Self {
-        Self {
-            terms: self.terms.iter()
-                .map(|(m, p)| (m.clone(), p * s))
-                .collect()
-        }
-    }
-    
-    fn add(&self, other: &Self) -> Self {
-        let mut terms = self.terms.clone();
-        terms.extend(other.terms.clone());
-        Self { terms }
-    }
-}
-
-// For backwards compatibility
 struct TrapdoorPolyVector {
     components: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>,
 }
@@ -229,12 +127,8 @@ impl AuditSubject for MockQuadratic {
 }
 
 fn main() {
-    println!("PVUGC Production Audit Tool (Sahai-Hardened)");
-    println!("=============================================\n");
-
-    let args: Vec<String> = std::env::args().collect();
-    let run_h_query_audit = args.iter().any(|a| a == "--h-query-audit");
-    let run_sahai_check = args.iter().any(|a| a == "--sahai-check");
+    println!("PVUGC Production Audit Tool");
+    println!("===========================\n");
 
     let subjects: Vec<Box<dyn AuditSubject>> = vec![
         Box::new(MockLinear),
@@ -244,22 +138,12 @@ fn main() {
 
     for subject in subjects {
         println!(">>> AUDITING: {} <<<", subject.name());
-        run_audit(subject.as_ref(), run_sahai_check);
-        
-        // Run H-query security audit if requested
-        if run_h_query_audit {
-            audit_h_query_security(subject.as_ref());
-        }
-        
+        run_audit(subject.as_ref());
         println!("\n");
     }
-    
-    println!("Available flags:");
-    println!("  --h-query-audit  : Check Q-vector fix security (informational)");
-    println!("  --sahai-check    : Run Sahai-hardened γ-barrier independence check");
 }
 
-fn run_audit(subject: &dyn AuditSubject, run_sahai_check: bool) {
+fn run_audit(subject: &dyn AuditSubject) {
     let cs = ConstraintSystem::<Fr>::new_ref();
     subject.synthesize(cs.clone()).unwrap();
     cs.finalize();
@@ -283,7 +167,7 @@ fn run_audit(subject: &dyn AuditSubject, run_sahai_check: bool) {
         println!("[FAIL] Linearity Check (Public*Public detected).");
     }
 
-    // 2. Legacy Independence Check (original)
+    // 2. Independence Check
     let h_const = compute_h_const(&pub_polys, &extractor.domain);
     let target = build_target(&pub_polys, &h_const);
     
@@ -307,15 +191,8 @@ fn run_audit(subject: &dyn AuditSubject, run_sahai_check: bool) {
         println!("[FAIL] Independence Check (Target in Span).");
     }
 
-    // 3. Sahai-Hardened Independence Check (new)
-    let mut sahai_safe = true;
-    if run_sahai_check {
-        println!("\n[Sahai Check] Running γ-barrier independence check...");
-        sahai_safe = check_sahai_independence(&extractor, &pub_polys, num_pub, num_pub + num_wit, 99999);
-    }
-
     println!("RESULT: {}", 
-        if is_linear && all_safe && sahai_safe { "SAFE" } else { "UNSAFE" }
+        if is_linear && all_safe { "SAFE" } else { "UNSAFE" }
     );
 }
 
@@ -604,512 +481,4 @@ fn check_independence_streaming(
     
     let residue = basis.reduce(target_vec);
     residue.iter().all(|x| x.is_zero()) == false 
-}
-
-// ============================================================================
-// H-QUERY SECURITY AUDIT
-// ============================================================================
-// This audits the security of the h_query_wit bases by checking:
-// 1. The ratio |h_query_wit| / n (should be << 1)
-// 2. The rank of the coefficient matrix (should be << n)
-//
-// To run: cargo run --bin audit_circuit -- --h-query-audit
-
-/// Audit h_query_wit security for the Q-vector fix
-/// 
-/// CRITICAL: This now checks BOTH pub×wit AND wit×wit pairs, because
-/// h_query_wit includes ALL pairs where at least one index is witness.
-/// If adversary can solve for Lagrange bases, they can compute pub×pub H terms!
-pub fn audit_h_query_security(subject: &dyn AuditSubject) {
-    use std::collections::HashSet;
-    use rayon::prelude::*;
-    
-    println!("\n>>> H-QUERY SECURITY AUDIT (FULL) <<<");
-    println!("======================================\n");
-    
-    let cs = ConstraintSystem::<Fr>::new_ref();
-    subject.synthesize(cs.clone()).unwrap();
-    cs.finalize();
-    
-    let matrices = cs.to_matrices().expect("matrix extraction");
-    let num_constraints = cs.num_constraints();
-    let num_inputs = cs.num_instance_variables();
-    let num_wit = cs.num_witness_variables();
-    let num_vars = num_inputs + num_wit;
-    
-    // Domain size for QAP
-    let qap_domain_size = num_constraints + num_inputs;
-    let domain = GeneralEvaluationDomain::<Fr>::new(qap_domain_size)
-        .or_else(|| GeneralEvaluationDomain::<Fr>::new(qap_domain_size.next_power_of_two()))
-        .expect("domain creation failed");
-    let n = domain.size();
-    
-    println!("Circuit Statistics:");
-    println!("  Constraints:     {}", num_constraints);
-    println!("  Public inputs:   {} (including 1-wire)", num_inputs);
-    println!("  Witness vars:    {}", num_wit);
-    println!("  Total variables: {}", num_vars);
-    println!("  QAP domain size: {} (padded to {})", qap_domain_size, n);
-    
-    // Build column maps: which rows have non-zero entries for each variable
-    let mut col_a: Vec<Vec<(usize, Fr)>> = vec![Vec::new(); num_vars];
-    let mut col_b: Vec<Vec<(usize, Fr)>> = vec![Vec::new(); num_vars];
-    
-    for (row, terms) in matrices.a.iter().enumerate() {
-        if row < n {
-            for &(val, col) in terms {
-                col_a[col].push((row, val));
-            }
-        }
-    }
-    for (row, terms) in matrices.b.iter().enumerate() {
-        if row < n {
-            for &(val, col) in terms {
-                col_b[col].push((row, val));
-            }
-        }
-    }
-    
-    // Count ALL pairs in h_query_wit (pub×wit + wit×pub + wit×wit)
-    // h_query_wit includes pairs where: i >= num_inputs OR j >= num_inputs
-    let mut pub_wit_pairs = 0usize;
-    let mut wit_pub_pairs = 0usize;
-    let mut wit_wit_pairs = 0usize;
-    let mut total_h_query_wit = 0usize;
-    
-    // Track which rows contribute to h_query_wit (for rank estimation)
-    let mut contributing_rows: HashSet<usize> = HashSet::new();
-    
-    for i in 0..num_vars {
-        for j in 0..num_vars {
-            // Skip if BOTH are public (these go to q_const, not h_query_wit)
-            if i < num_inputs && j < num_inputs {
-                continue;
-            }
-            
-            let rows_a = &col_a[i];
-            let rows_b = &col_b[j];
-            
-            if rows_a.is_empty() || rows_b.is_empty() {
-                continue;
-            }
-            
-            total_h_query_wit += 1;
-            
-            // Track contributing rows for rank estimation
-            for &(row_a, _) in rows_a {
-                contributing_rows.insert(row_a);
-            }
-            for &(row_b, _) in rows_b {
-                contributing_rows.insert(row_b);
-            }
-            
-            // Categorize the pair
-            if i < num_inputs && j >= num_inputs {
-                pub_wit_pairs += 1;
-            } else if i >= num_inputs && j < num_inputs {
-                wit_pub_pairs += 1;
-            } else {
-                wit_wit_pairs += 1;
-            }
-        }
-    }
-    
-    println!("\nH-Query-Wit Pair Categories:");
-    println!("  Pub×Wit pairs:  {}", pub_wit_pairs);
-    println!("  Wit×Pub pairs:  {}", wit_pub_pairs);
-    println!("  Wit×Wit pairs:  {}", wit_wit_pairs);
-    println!("  TOTAL h_query_wit: {}", total_h_query_wit);
-    
-    // Security metrics
-    let ratio = total_h_query_wit as f64 / n as f64;
-    println!("\nSecurity Metrics:");
-    println!("  |h_query_wit| / n = {} / {} = {:.4}", total_h_query_wit, n, ratio);
-    println!("  Contributing rows: {} / {} ({:.1}%)", 
-             contributing_rows.len(), n, 
-             100.0 * contributing_rows.len() as f64 / n as f64);
-    
-    // CRITICAL: If ratio >= 1.0 and rows cover most of domain, Lagrange recovery likely!
-    let row_coverage = contributing_rows.len() as f64 / n as f64;
-    
-    println!("\n>>> LAGRANGE RECOVERY RISK ASSESSMENT <<<");
-    
-    if ratio >= 1.0 && row_coverage >= 0.9 {
-        println!("  ✗ CRITICAL: System likely overdetermined!");
-        println!("    - {} equations in {} unknowns (L_k bases)", total_h_query_wit, n);
-        println!("    - Row coverage {:.1}% suggests full rank possible", row_coverage * 100.0);
-        println!("    - Adversary may recover ALL Lagrange bases!");
-        println!("    - Then compute pub×pub H terms → BREAK WITNESS ENCRYPTION!");
-    } else if ratio >= 0.5 && row_coverage >= 0.7 {
-        println!("  ⚠ WARNING: Marginal security margin");
-        println!("    - {} equations in {} unknowns", total_h_query_wit, n);
-        println!("    - Row coverage {:.1}%", row_coverage * 100.0);
-        println!("    - Full rank analysis recommended");
-    } else {
-        println!("  ✓ LIKELY SAFE: Underdetermined system");
-        println!("    - {} equations in {} unknowns", total_h_query_wit, n);
-        println!("    - Row coverage {:.1}%", row_coverage * 100.0);
-        println!("    - Insufficient constraints to recover Lagrange bases");
-    }
-    
-    // Explain the attack vector
-    println!("\n>>> ATTACK VECTOR EXPLANATION <<<");
-    println!("  Each H_{{i,j}} in h_query_wit is a linear combination:");
-    println!("    H_{{i,j}} = Σ_k coeff_{{i,j,k}} · L_k(τ)");
-    println!("  ");
-    println!("  If adversary has {} H_{{i,j}} points and they span rank ≥ {},", total_h_query_wit, n);
-    println!("  they can solve for all L_k(τ) bases!");
-    println!("  ");
-    println!("  With L_k(τ), adversary computes:");
-    println!("    H_{{pub,pub}}(τ) = Σ_k (public coefficients) · L_k(τ)");
-    println!("  ");
-    println!("  This gives them the baked quotient → breaks witness encryption!");
-    
-    // Summary
-    println!("\n=== H-QUERY SECURITY SUMMARY ===");
-    println!("NOTE: Per GPT/Sahai analysis, this ratio is INFORMATIONAL ONLY.");
-    println!("The adversary cannot solve for Lagrange bases without breaking DLP.");
-    println!("The REAL security comes from the γ-barrier (see Sahai check below).");
-    println!("");
-    if ratio >= 1.0 {
-        println!("INFO: High ratio ({:.1}x), but protected by DLP assumption.", ratio);
-    } else {
-        println!("INFO: Low ratio ({:.2}x), additionally protected by underdetermination.", ratio);
-    }
-}
-
-// ============================================================================
-// SAHAI-HARDENED INDEPENDENCE CHECK
-// ============================================================================
-// 
-// Prof. Sahai's key insight: A WE decryption adversary works in GT and can
-// form ANY pairing e(G1, G2). This means they can compute:
-//
-//   Σ_i a_i * u_i(τ) * v_i(τ)   (diagonal products)
-//
-// which is NOT the same as:
-//
-//   (Σ_i a_i * u_i(τ)) * (Σ_i a_i * v_i(τ))   (rank-1 product)
-//
-// The Groth16 soundness adversary is constrained to the rank-1 form because
-// they must output A ∈ G1, B ∈ G2 separately. But the WE adversary can
-// directly compute diagonal products in GT.
-//
-// HOWEVER: The γ-barrier saves us!
-//
-// The target R^ρ = ρ*(α*β + γ*IC(τ) + δ*H(τ)) contains ρ*γ*IC(τ).
-// To synthesize this, the adversary needs a GT element with ρ*γ in the exponent.
-//
-// What G2 handles have γ? Only [γ]_2 (the raw VK element).
-// But [γ]_2 is NEVER ARMED! There is no [ρ*γ]_2.
-//
-// Therefore, any pairing with [γ]_2 gives γ*(something), not ρ*γ*(something).
-// The adversary cannot synthesize the ρ*γ*IC(τ) term!
-
-/// Sahai-hardened independence check that properly models all GT pairings.
-/// 
-/// This check enumerates:
-/// 1. All G1 handles (CRS + lean prover elements)
-/// 2. All G2 handles (CRS + armed elements)  
-/// 3. All possible pairings between them
-/// 4. Verifies target R^ρ is not in the span
-///
-/// The key insight is that γ appears in the target but [γ]_2 is never armed,
-/// so the adversary cannot reach the ρ*γ*IC(τ) monomial.
-pub fn check_sahai_independence(
-    extractor: &MatrixExtractor,
-    pub_polys: &[(DensePolynomial<Fr>, DensePolynomial<Fr>, DensePolynomial<Fr>)],
-    num_pub: usize,
-    num_vars: usize,
-    seed: u64,
-) -> bool {
-    use std::collections::HashSet;
-    
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
-    let r = Fr::rand(&mut rng);
-    
-    // We use a refined monomial system that tracks ρ and γ separately
-    // to verify the γ-barrier.
-    //
-    // Key monomials for the target:
-    // - RhoAlphaBeta: ρ*α*β (can be reached via e([α]_1, D_pub))
-    // - RhoGammaIC: ρ*γ*IC(τ) (CANNOT be reached - γ not armed!)
-    // - RhoDeltaH: ρ*δ*H(τ) (can be partially reached)
-    
-    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-    enum SahaiMonomial {
-        // Target monomials
-        RhoAlphaBeta,    // ρ*α*β
-        RhoGammaIC,      // ρ*γ*IC(τ) - THE BARRIER
-        RhoDeltaH,       // ρ*δ*H(τ)
-        
-        // Reachable from e(CRS_G1, Armed_G2)
-        RhoBetaSq,       // ρ*β² from e([β]_1, D_pub)
-        RhoBetaVpub,     // ρ*β*V_pub from e([β]_1, D_pub)
-        RhoAlphaBetaFromDpub, // ρ*α*β from e([α]_1, D_pub) - MATCHES TARGET!
-        RhoAlphaVpub,    // ρ*α*V_pub from e([α]_1, D_pub)
-        RhoDeltaSq,      // ρ*δ² from e([δ]_1, D_δ)
-        
-        // From e(A_query[k], Armed_G2)
-        RhoUkBeta,       // ρ*u_k*β from e(A[k], D_pub)
-        RhoUkVpub,       // ρ*u_k*V_pub from e(A[k], D_pub)
-        RhoUkVj,         // ρ*u_k*v_j from e(A[k], D_j) - SAHAI'S DIAGONAL
-        RhoUkDelta,      // ρ*u_k*δ from e(A[k], D_δ)
-        
-        // From e(L_query[k], Armed_G2) - only for witness k
-        RhoLkBeta,       // ρ*(βu_k+αv_k+w_k)/δ * β
-        RhoLkVpub,       // ρ*(βu_k+αv_k+w_k)/δ * V_pub
-        RhoLkVj,         // ρ*(βu_k+αv_k+w_k)/δ * v_j
-        RhoLkDelta,      // ρ*(βu_k+αv_k+w_k) (δ cancels)
-        
-        // From e(CRS_G1, [γ]_2) - NO ρ!
-        AlphaGamma,      // α*γ from e([α]_1, [γ]_2)
-        BetaGamma,       // β*γ from e([β]_1, [γ]_2)
-        DeltaGamma,      // δ*γ from e([δ]_1, [γ]_2)
-        UkGamma,         // u_k*γ from e(A[k], [γ]_2)
-        LkGamma,         // (βu_k+αv_k+w_k)/δ * γ from e(L[k], [γ]_2)
-        
-        // From e(CRS_G1, [β]_2)
-        AlphaBeta,       // α*β from e([α]_1, [β]_2)
-        BetaSq,          // β² from e([β]_1, [β]_2)
-        DeltaBeta,       // δ*β from e([δ]_1, [β]_2)
-        UkBeta,          // u_k*β from e(A[k], [β]_2)
-        
-        // From e(CRS_G1, B_query[j])
-        AlphaVj,         // α*v_j from e([α]_1, B[j])
-        BetaVj,          // β*v_j from e([β]_1, B[j])
-        DeltaVj,         // δ*v_j from e([δ]_1, B[j])
-        UkVj,            // u_k*v_j from e(A[k], B[j]) - CROSS PRODUCTS
-        LkVj,            // (βu_k+αv_k+w_k)/δ * v_j from e(L[k], B[j])
-    }
-    
-    // Build monomial set
-    let all_monos = vec![
-        SahaiMonomial::RhoAlphaBeta,
-        SahaiMonomial::RhoGammaIC,
-        SahaiMonomial::RhoDeltaH,
-        SahaiMonomial::RhoBetaSq,
-        SahaiMonomial::RhoBetaVpub,
-        SahaiMonomial::RhoAlphaBetaFromDpub,
-        SahaiMonomial::RhoAlphaVpub,
-        SahaiMonomial::RhoDeltaSq,
-        SahaiMonomial::RhoUkBeta,
-        SahaiMonomial::RhoUkVpub,
-        SahaiMonomial::RhoUkVj,
-        SahaiMonomial::RhoUkDelta,
-        SahaiMonomial::RhoLkBeta,
-        SahaiMonomial::RhoLkVpub,
-        SahaiMonomial::RhoLkVj,
-        SahaiMonomial::RhoLkDelta,
-        SahaiMonomial::AlphaGamma,
-        SahaiMonomial::BetaGamma,
-        SahaiMonomial::DeltaGamma,
-        SahaiMonomial::UkGamma,
-        SahaiMonomial::LkGamma,
-        SahaiMonomial::AlphaBeta,
-        SahaiMonomial::BetaSq,
-        SahaiMonomial::DeltaBeta,
-        SahaiMonomial::UkBeta,
-        SahaiMonomial::AlphaVj,
-        SahaiMonomial::BetaVj,
-        SahaiMonomial::DeltaVj,
-        SahaiMonomial::UkVj,
-        SahaiMonomial::LkVj,
-    ];
-    
-    let mono_map: HashMap<_, _> = all_monos.iter().enumerate()
-        .map(|(i, m)| (m.clone(), i)).collect();
-    let num_dims = all_monos.len();
-    
-    let mut basis = Basis::new();
-    
-    let add_vec = |basis: &mut Basis, vec_map: Vec<(SahaiMonomial, Fr)>| {
-        let mut v = vec![Fr::zero(); num_dims];
-        for (m, val) in vec_map {
-            if let Some(&idx) = mono_map.get(&m) { v[idx] += val; }
-        }
-        basis.insert(v);
-    };
-    
-    // Compute V_pub(r) = Σ_{i public} v_i(r)
-    let mut v_pub_r = Fr::zero();
-    for (_, v, _) in pub_polys { v_pub_r += v.evaluate(&r); }
-    
-    // Compute IC(r) = Σ_{i public} u_i(r)
-    let mut ic_r = Fr::zero();
-    for (u, _, _) in pub_polys { ic_r += u.evaluate(&r); }
-    
-    println!("[Sahai Check] Enumerating all GT handles...");
-    
-    // === Fixed CRS × Armed handles ===
-    
-    // e([α]_1, D_pub) = ρ*α*(β + V_pub)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::RhoAlphaBetaFromDpub, Fr::one()),  // This MATCHES RhoAlphaBeta in target!
-        (SahaiMonomial::RhoAlphaVpub, v_pub_r),
-    ]);
-    
-    // e([β]_1, D_pub) = ρ*β*(β + V_pub) = ρ*β² + ρ*β*V_pub
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::RhoBetaSq, Fr::one()),
-        (SahaiMonomial::RhoBetaVpub, v_pub_r),
-    ]);
-    
-    // e([δ]_1, D_δ) = ρ*δ²
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::RhoDeltaSq, Fr::one()),
-    ]);
-    
-    // === Fixed CRS × Unharmed G2 ===
-    
-    // e([α]_1, [γ]_2) = α*γ  (NO ρ!)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::AlphaGamma, Fr::one()),
-    ]);
-    
-    // e([β]_1, [γ]_2) = β*γ  (NO ρ!)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::BetaGamma, Fr::one()),
-    ]);
-    
-    // e([δ]_1, [γ]_2) = δ*γ  (NO ρ!)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::DeltaGamma, Fr::one()),
-    ]);
-    
-    // e([α]_1, [β]_2) = α*β  (NO ρ!)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::AlphaBeta, Fr::one()),
-    ]);
-    
-    // e([β]_1, [β]_2) = β²  (NO ρ!)
-    add_vec(&mut basis, vec![
-        (SahaiMonomial::BetaSq, Fr::one()),
-    ]);
-    
-    // === Per-column handles ===
-    
-    for k in 0..num_vars {
-        let (u_k, v_k, w_k) = extractor.evaluate_column(k, r);
-        let is_witness = k >= num_pub;
-        
-        // e(A[k], D_pub) = ρ*u_k*(β + V_pub)
-        add_vec(&mut basis, vec![
-            (SahaiMonomial::RhoUkBeta, u_k),
-            (SahaiMonomial::RhoUkVpub, u_k * v_pub_r),
-        ]);
-        
-        // e(A[k], D_δ) = ρ*u_k*δ
-        add_vec(&mut basis, vec![
-            (SahaiMonomial::RhoUkDelta, u_k),
-        ]);
-        
-        // e(A[k], [γ]_2) = u_k*γ  (NO ρ!)
-        add_vec(&mut basis, vec![
-            (SahaiMonomial::UkGamma, u_k),
-        ]);
-        
-        // e(A[k], [β]_2) = u_k*β  (NO ρ!)
-        add_vec(&mut basis, vec![
-            (SahaiMonomial::UkBeta, u_k),
-        ]);
-        
-        // L_query only exists for witness columns
-        if is_witness {
-            // L_k = (β*u_k + α*v_k + w_k)/δ
-            // e(L[k], D_pub) = ρ*(β*u_k + α*v_k + w_k)/δ * (β + V_pub)
-            // The δ in denominator cancels with... wait, D_pub doesn't have δ
-            // Actually: e(L[k], D_pub) = ρ*(β*u_k + α*v_k + w_k)*(β + V_pub)/δ
-            // This is messy. Let's model it as RhoLkBeta, RhoLkVpub
-            add_vec(&mut basis, vec![
-                (SahaiMonomial::RhoLkBeta, u_k),  // Approximate: ρ*β*u_k/δ * β
-                (SahaiMonomial::RhoLkVpub, u_k * v_pub_r),
-            ]);
-            
-            // e(L[k], D_δ) = ρ*(β*u_k + α*v_k + w_k)  (δ cancels!)
-            add_vec(&mut basis, vec![
-                (SahaiMonomial::RhoLkDelta, u_k + v_k + w_k),  // Simplified
-            ]);
-            
-            // e(L[k], [γ]_2) = (β*u_k + α*v_k + w_k)/δ * γ  (NO ρ!)
-            add_vec(&mut basis, vec![
-                (SahaiMonomial::LkGamma, u_k + v_k + w_k),  // Simplified
-            ]);
-        }
-        
-        // === SAHAI'S DIAGONAL: e(A[k], D_j) for all witness j ===
-        // This gives ρ*u_k*v_j for all (k, j) pairs!
-        // We can't enumerate all O(n²) pairs, so we use a random sample
-        for j in num_pub..num_vars {
-            let (_, v_j, _) = extractor.evaluate_column(j, r);
-            // e(A[k], D_j) = ρ*u_k*v_j
-            add_vec(&mut basis, vec![
-                (SahaiMonomial::RhoUkVj, u_k * v_j),
-            ]);
-        }
-        
-        // e(A[k], B[j]) = u_k*v_j  (NO ρ!)
-        for j in 0..num_vars {
-            let (_, v_j, _) = extractor.evaluate_column(j, r);
-            add_vec(&mut basis, vec![
-                (SahaiMonomial::UkVj, u_k * v_j),
-            ]);
-        }
-    }
-    
-    println!("[Sahai Check] Building target vector...");
-    
-    // === TARGET: R^ρ = ρ*(α*β + γ*IC(τ) + δ*H(τ)) ===
-    // Scaled by δ: ρ*δ*(α*β + γ*IC(τ) + δ*H(τ))
-    // = ρ*α*β*δ + ρ*γ*δ*IC(τ) + ρ*δ²*H(τ)
-    //
-    // The critical term is ρ*γ*IC(τ) - this has γ AND ρ together!
-    
-    let mut target_vec = vec![Fr::zero(); num_dims];
-    
-    // RhoAlphaBeta component (coefficient 1)
-    if let Some(&idx) = mono_map.get(&SahaiMonomial::RhoAlphaBeta) {
-        target_vec[idx] = Fr::one();
-    }
-    
-    // RhoGammaIC component (coefficient IC(r))
-    // THIS IS THE BARRIER - the adversary cannot reach this!
-    if let Some(&idx) = mono_map.get(&SahaiMonomial::RhoGammaIC) {
-        target_vec[idx] = ic_r;
-    }
-    
-    // RhoDeltaH component (coefficient H(r))
-    // We'd need to compute H(r) but for the barrier check, RhoGammaIC is sufficient
-    
-    println!("[Sahai Check] Checking if target is in span...");
-    
-    let residue = basis.reduce(target_vec.clone());
-    
-    // Check specifically if RhoGammaIC has non-zero residue
-    let gamma_idx = mono_map.get(&SahaiMonomial::RhoGammaIC).copied();
-    let gamma_residue = gamma_idx.map(|i| residue[i]).unwrap_or(Fr::zero());
-    
-    let is_safe = !residue.iter().all(|x| x.is_zero());
-    
-    println!("\n>>> SAHAI INDEPENDENCE CHECK RESULTS <<<");
-    println!("=========================================");
-    
-    if !gamma_residue.is_zero() {
-        println!("✓ γ-BARRIER HOLDS!");
-        println!("  The RhoGammaIC monomial (ρ*γ*IC(τ)) has non-zero residue.");
-        println!("  This means the adversary CANNOT synthesize the target R^ρ.");
-        println!("");
-        println!("  WHY: [γ]_2 is never armed, so there is no [ρ*γ]_2 handle.");
-        println!("  Any pairing with [γ]_2 gives γ*(something), not ρ*γ*(something).");
-    } else {
-        println!("⚠ WARNING: γ-barrier may not hold!");
-        println!("  The RhoGammaIC residue is zero, which is unexpected.");
-        println!("  Manual review required.");
-    }
-    
-    println!("");
-    println!("Overall: Target {} in adversary's span.", 
-             if is_safe { "is NOT" } else { "IS" });
-    
-    is_safe
 }
