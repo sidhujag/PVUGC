@@ -11,7 +11,9 @@
 
 use core::marker::PhantomData;
 use crate::api::enforce_public_inputs_are_outputs;
+use crate::ppe::PvugcVk;
 use ark_ec::pairing::Pairing;
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::{
@@ -261,9 +263,24 @@ pub fn verify_outer_for<C: RecursionCycle>(
     vk_outer: &OuterVk<C>,
     compressed_public_inputs: &[OuterScalar<C>],
     proof_outer: &OuterProof<C>,
+    pvugc_vk: Option<&PvugcVk<C::OuterE>>,
 ) -> Result<bool, SynthesisError> {
     let pvk = Groth16::<C::OuterE>::process_vk(vk_outer)?;
-    Groth16::<C::OuterE>::verify_with_processed_vk(&pvk, compressed_public_inputs, proof_outer)
+    let proof_to_check = if let Some(pvugc_vk) = pvugc_vk {
+        let mut q_sum = pvugc_vk.q_const_points[0].into_group();
+        for (i, x_i) in compressed_public_inputs.iter().enumerate() {
+            q_sum += pvugc_vk.q_const_points[i + 1].into_group() * x_i;
+        }
+        let c_standard = (proof_outer.c.into_group() + q_sum).into_affine();
+        ark_groth16::Proof {
+            a: proof_outer.a,
+            b: proof_outer.b,
+            c: c_standard,
+        }
+    } else {
+        proof_outer.clone()
+    };
+    Groth16::<C::OuterE>::verify_with_processed_vk(&pvk, compressed_public_inputs, &proof_to_check)
 }
 
 /// Default-cycle convenience wrapper around [`verify_outer_for`].
@@ -274,8 +291,9 @@ pub fn verify_outer(
     vk_outer: &OuterVkDefault,
     compressed_public_inputs: &[OuterFr],
     proof_outer: &OuterProofDefault,
+    pvugc_vk: Option<&PvugcVk<OuterE>>,
 ) -> Result<bool, SynthesisError> {
-    verify_outer_for::<DefaultCycle>(vk_outer, compressed_public_inputs, proof_outer)
+    verify_outer_for::<DefaultCycle>(vk_outer, compressed_public_inputs, proof_outer, pvugc_vk)
 }
 
 #[cfg(test)]
@@ -346,8 +364,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_pvugc_on_outer_proof_e2e() {
-        e2e_outer_proof_for::<DefaultCycle>(get_fixture(), 99999);
-        //e2e_outer_proof_for::<Mnt4Mnt6Cycle>(get_fixture_mnt(), 99999);
+        e2e_outer_proof_for::<Bls12Bw6Cycle>(get_fixture_bls(), 99999);
     }
 
     fn e2e_outer_proof_for<C: RecursionCycle>(fixture: GlobalFixture<C>, rng_seed: u64) {
@@ -435,8 +452,31 @@ mod tests {
             outer_start.elapsed()
         );
 
-        let num_instance = vk_outer.gamma_abc_g1.len();
-        let actual_public_inputs = full_assignment[1..num_instance].to_vec();
+        // Recover the Boolean-compressed public inputs for the outer statement.
+        let circuit_for_extraction = OuterCircuit::<C>::new(
+            fixture.vk_inner.as_ref().clone(),
+            public_x.clone(),
+            proof_inner.clone(),
+        );
+        let cs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<C>>::new_ref();
+        circuit_for_extraction
+            .generate_constraints(cs.clone())
+            .expect("constraint synthesis failed");
+        cs.finalize();
+        let mut instance = cs.borrow().unwrap().instance_assignment.clone();
+        let actual_public_inputs = instance.split_off(1);
+
+        assert!(
+            verify_outer_for::<C>(
+                &*vk_outer,
+                &actual_public_inputs,
+                &proof_outer,
+                Some(&pvugc_vk)
+            )
+            .unwrap(),
+            "Outer proof verification failed for {}",
+            C::name()
+        );
         
         let run_decap = std::env::var("PVUGC_RUN_DECAP")
             .map(|flag| flag == "1" || flag.eq_ignore_ascii_case("true"))
