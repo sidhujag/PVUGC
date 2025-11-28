@@ -417,13 +417,26 @@ mod tests {
             inner_start.elapsed()
         );
 
+        // Extract the actual Boolean-compressed public inputs once so every component
+        // (PVUGC bases, verification, and decap) sees the same vector.
+        let circuit_for_inputs = OuterCircuit::<C>::new(
+            fixture.vk_inner.as_ref().clone(),
+            public_x.clone(),
+            proof_inner.clone(),
+        );
+        let cs_inputs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<C>>::new_ref();
+        circuit_for_inputs
+            .generate_constraints(cs_inputs.clone())
+            .expect("constraint synthesis for public inputs failed");
+        cs_inputs.finalize();
+        let mut instance_inputs = cs_inputs.borrow().unwrap().instance_assignment.clone();
+        let actual_public_inputs = instance_inputs.split_off(1);
+
         let rho = OuterScalar::<C>::rand(&mut rng);
-        let public_x_outer: Vec<OuterScalar<C>> =
-            public_x.iter().map(fr_inner_to_outer_for::<C>).collect();
         let bases = crate::pvugc_outer::build_column_bases_outer_for::<C>(
             &pvugc_vk,
             &vk_outer,
-            &public_x_outer,
+            &actual_public_inputs,
         );
         let col_arms = crate::pvugc_outer::arm_columns_outer_for::<C>(&bases, &rho);
 
@@ -452,20 +465,6 @@ mod tests {
             outer_start.elapsed()
         );
 
-        // Recover the Boolean-compressed public inputs for the outer statement.
-        let circuit_for_extraction = OuterCircuit::<C>::new(
-            fixture.vk_inner.as_ref().clone(),
-            public_x.clone(),
-            proof_inner.clone(),
-        );
-        let cs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<C>>::new_ref();
-        circuit_for_extraction
-            .generate_constraints(cs.clone())
-            .expect("constraint synthesis failed");
-        cs.finalize();
-        let mut instance = cs.borrow().unwrap().instance_assignment.clone();
-        let actual_public_inputs = instance.split_off(1);
-
         assert!(
             verify_outer_for::<C>(
                 &vk_outer,
@@ -488,8 +487,12 @@ mod tests {
             let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
             eprintln!("[timing:{}] decap {:?}", C::name(), decap_start.elapsed());
 
-            let r =
-                crate::pvugc_outer::compute_target_outer_for::<C>(&vk_outer, &pvugc_vk, &public_x);
+            let r = crate::ppe::compute_baked_target::<C::OuterE>(
+                &vk_outer,
+                &pvugc_vk,
+                &actual_public_inputs,
+            )
+            .expect("failed to compute baked target");
             let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<C>(&r, &rho);
 
             assert!(
