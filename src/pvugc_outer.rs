@@ -294,7 +294,6 @@ fn compute_witness_bases<C: RecursionCycle>(
     // We compute this via FFT: Q = IFFT( FFT(u) . FFT(L) ).
     
     let n_field = domain.size_as_field_element();
-    let n_inv = n_field.inverse().expect("n invertible");
     let t0 = (n_field - OuterScalar::<C>::one()) * (n_field + n_field).inverse().expect("2n invertible");
     
     // 1. Build kernel u

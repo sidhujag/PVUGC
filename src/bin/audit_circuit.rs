@@ -177,7 +177,7 @@ fn run_audit(subject: &dyn AuditSubject) {
 
     for i in 0..num_checks {
         let seed = 12345 + i as u64;
-        let is_safe = check_independence_streaming(&extractor, &pub_polys, &target, num_pub, num_pub + num_wit, seed, i + 1, num_checks);
+        let is_safe = check_independence_streaming(&extractor, &pub_polys, &target, num_pub + num_wit, seed, i + 1, num_checks);
         if !is_safe {
             all_safe = false;
             println!("[FAIL] Iteration {} found dependency!", i + 1);
@@ -353,7 +353,6 @@ fn check_independence_streaming(
     extractor: &MatrixExtractor,
     pub_polys: &[(DensePolynomial<Fr>, DensePolynomial<Fr>, DensePolynomial<Fr>)],
     target: &TrapdoorPolyVector,
-    num_pub: usize,
     num_vars: usize,
     seed: u64,
     check_idx: usize,

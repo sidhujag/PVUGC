@@ -17,21 +17,13 @@ use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::{
     alloc::AllocVar,
     eq::EqGadget,
-    fields::fp::FpVar,
     pairing::PairingVar as PairingVarTrait,
 };
 use ark_groth16::constraints::{ProofVar, VerifyingKeyVar, Groth16VerifierGadget};
 use ark_r1cs_std::boolean::Boolean;
 use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
-use ark_relations::{
-    lc,
-    r1cs::{
-        ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
-    },
-};
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
-use ark_std::One;
-// use ark_std::{One, Zero};
 
 /// Trait describing a recursion-friendly pairing cycle.
 ///
