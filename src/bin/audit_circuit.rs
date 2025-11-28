@@ -167,6 +167,14 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("[FAIL] Linearity Check (Public*Public detected).");
     }
 
+    // 1.5 Mixing Check (Public * Witness)
+    let is_unmixed = check_mixing(&extractor, num_pub, num_pub + num_wit);
+    if is_unmixed {
+        println!("[PASS] Mixing Check.");
+    } else {
+        println!("[FAIL] Mixing Check (Public*Witness detected).");
+    }
+
     // 2. Independence Check
     let h_const = compute_h_const(&pub_polys, &extractor.domain);
     let target = build_target(&pub_polys, &h_const);
@@ -192,8 +200,33 @@ fn run_audit(subject: &dyn AuditSubject) {
     }
 
     println!("RESULT: {}", 
-        if is_linear && all_safe { "SAFE" } else { "UNSAFE" }
+        if is_linear && is_unmixed && all_safe { "SAFE" } else { "UNSAFE" }
     );
+}
+
+fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) -> bool {
+    let domain_size = extractor.domain.size();
+    let mut rows_pub_a = vec![false; domain_size];
+    let mut rows_pub_b = vec![false; domain_size];
+
+    // Mark rows where Public Inputs (excluding 1) appear in A and B
+    for i in 1..num_pub {
+        for &(row, _) in &extractor.a_cols[i] { rows_pub_a[row] = true; }
+        for &(row, _) in &extractor.b_cols[i] { rows_pub_b[row] = true; }
+    }
+
+    // Check Witness columns
+    for j in num_pub..num_vars {
+        // If Witness in A, check if Row has Public in B
+        for &(row, _) in &extractor.a_cols[j] {
+            if rows_pub_b[row] { return false; }
+        }
+        // If Witness in B, check if Row has Public in A
+        for &(row, _) in &extractor.b_cols[j] {
+            if rows_pub_a[row] { return false; }
+        }
+    }
+    true
 }
 
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
