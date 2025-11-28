@@ -69,7 +69,8 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let a = self.a.expect("A not recorded");
         let a_g = a.into_group();
         let num_instance = self.instance_variable_count();
-        let public_count = num_instance.saturating_sub(1);
+        // Instance variables include the constant-1 wire; skip all of them when deriving witness columns.
+        let public_count = num_instance;
         assert!(
             public_count <= self.b_coeffs.len(),
             "num_instance_variables exceeds coefficient count"
@@ -177,7 +178,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let b_coeffs = &self.b_coeffs; // Full assignment coeffs
         let s = self.s.expect("s not recorded");
         let num_instance = self.instance_variable_count();
-        let public_count = num_instance.saturating_sub(1);
+        let public_count = num_instance;
         assert!(
             public_count <= b_coeffs.len(),
             "num_instance_variables exceeds coefficient count"
@@ -227,7 +228,7 @@ impl<E: Pairing> SimpleCoeffRecorder<E> {
         let a_g = a.into_group();
         // Columns: [A (B_pub), witness columns...]
         let num_instance = self.instance_variable_count();
-        let public_count = num_instance.saturating_sub(1);
+        let public_count = num_instance;
         assert!(
             public_count <= self.b_coeffs.len(),
             "num_instance_variables exceeds coefficient count"
