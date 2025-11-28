@@ -53,7 +53,7 @@ where
 
     // Sanitize cycle name for filename
     let safe_name = C::name().replace("/", "_").replace(" ", "_");
-    let cache_path = format!("pvugc_setup_{}.bin", safe_name);
+    let cache_path = format!("pvugc_setup_v2_{}.bin", safe_name);
 
     let (lean_pk, q_points) = if std::path::Path::new(&cache_path).exists() {
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
@@ -66,7 +66,7 @@ where
         (pk, q_points)
     } else {
         println!("[Setup] No cache found. Computing witness bases...");
-        let h_query_wit = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
+        let wb_result = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
         println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
 
         let lean_pk = LeanProvingKey {
@@ -76,16 +76,12 @@ where
             a_query: pk_outer.a_query.clone(),
             b_g1_query: pk_outer.b_g1_query.clone(),
             b_g2_query: pk_outer.b_g2_query.clone(),
-            h_query_wit,
+            h_query_wit: wb_result.h_query_wit,
             l_query: pk_outer.l_query.clone(),
         };
 
-        println!(
-            "[Setup] Computing q_points (running {} proofs)...",
-            n_inner_inputs + 1
-        );
-        let q_points =
-            compute_q_const_points_from_gap::<C, F>(pk_outer, &lean_pk, vk_inner, n_inner_inputs, &inner_proof_generator);
+        println!("[Setup] Computing q_points from gap (using fixed coords)...");
+        let q_points = compute_q_const_points_from_gap::<C, F>(pk_outer, &lean_pk, vk_inner, n_inner_inputs, &inner_proof_generator);
         println!("[Setup] q_points computed in {:?}", start.elapsed());
         println!("[Setup] Serializing setup to {}...", cache_path);
         let file = File::create(&cache_path).expect("failed to create cache file");
@@ -147,11 +143,17 @@ pub fn build_column_bases_outer(
     build_column_bases_outer_for::<DefaultCycle>(pvugc_vk, vk_outer, public_inputs_outer)
 }
 
+/// Result of computing witness bases
+struct WitnessBasesResult<E: Pairing> {
+    /// Sparse H_{ij} bases for witness terms (off-diagonal and diagonal contributions)
+    pub h_query_wit: Vec<(u32, u32, E::G1Affine)>,
+}
+
 fn compute_witness_bases<C: RecursionCycle>(
     pk: &Groth16PK<C::OuterE>,
     vk_inner: &InnerVk<C>,
     n_inner_inputs: usize,
-) -> Vec<(u32, u32, <C::OuterE as Pairing>::G1Affine)> {
+) -> WitnessBasesResult<C::OuterE> {
     let start = Instant::now();
     println!("[Quotient] Synthesizing Circuit...");
 
@@ -171,14 +173,23 @@ fn compute_witness_bases<C: RecursionCycle>(
     cs.finalize();
     let matrices = cs.to_matrices().expect("matrix extraction failed");
 
-    let domain = GeneralEvaluationDomain::<OuterScalar<C>>::new(cs.num_constraints())
-        .or_else(|| GeneralEvaluationDomain::<OuterScalar<C>>::new(cs.num_constraints().next_power_of_two()))
+    // CRITICAL: Domain size must match standard Groth16!
+    // Standard Groth16 uses domain of size (num_constraints + num_inputs) to include
+    // the "copy constraints" that encode public inputs into the A polynomial.
+    let num_constraints = cs.num_constraints();
+    let num_inputs = cs.num_instance_variables(); // includes constant 1
+    let qap_domain_size = num_constraints + num_inputs;
+    
+    let domain = GeneralEvaluationDomain::<OuterScalar<C>>::new(qap_domain_size)
+        .or_else(|| GeneralEvaluationDomain::<OuterScalar<C>>::new(qap_domain_size.next_power_of_two()))
         .expect("domain creation failed");
     let domain_size = domain.size();
 
     println!(
-        "[Quotient] Matrix extracted ({} constraints). Domain size: {}. Time: {:?}",
-        cs.num_constraints(),
+        "[Quotient] Matrix extracted ({} constraints + {} inputs = {} QAP size). Domain size: {}. Time: {:?}",
+        num_constraints,
+        num_inputs,
+        qap_domain_size,
         domain_size,
         start.elapsed()
     );
@@ -187,6 +198,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     let mut col_a = vec![Vec::new(); num_vars];
     let mut col_b = vec![Vec::new(); num_vars];
 
+    // Process constraint rows from matrices
     for (row, terms) in matrices.a.iter().enumerate() {
         if row < domain_size {
             for &(val, col) in terms {
@@ -199,6 +211,22 @@ fn compute_witness_bases<C: RecursionCycle>(
             for &(val, col) in terms {
                 col_b[col].push((row, val));
             }
+        }
+    }
+    
+    // CRITICAL: Add the synthetic "copy constraint" rows for public inputs!
+    // In standard Groth16, rows [num_constraints..num_constraints+num_inputs] have:
+    //   A[row] = public_input[row - num_constraints] (i.e., variable index = row - num_constraints)
+    //   B[row] = 0
+    // This encodes the public inputs into the A polynomial.
+    // Since B[row] = 0 for these rows, they don't contribute to A*B products,
+    // but they DO affect the Lagrange basis representation!
+    for i in 0..num_inputs {
+        let row = num_constraints + i;
+        if row < domain_size {
+            // A[row] has coefficient 1 for variable i (the i-th public input)
+            col_a[i].push((row, OuterScalar::<C>::one()));
+            // B[row] = 0, so nothing to add to col_b
         }
     }
 
@@ -245,18 +273,86 @@ fn compute_witness_bases<C: RecursionCycle>(
         active_pairs.len()
     );
 
-    // Diagnostic: Check column density
-    let max_col_a = col_a.iter().map(|c| c.len()).max().unwrap_or(0);
-    let max_col_b = col_b.iter().map(|c| c.len()).max().unwrap_or(0);
-    println!("[Quotient] Max column density: A={}, B={}", max_col_a, max_col_b);
-    
     // Estimate max capacity needed for buffers to avoid reallocation in hot loop
     // Most pairs are sparse-sparse, but dense-sparse pairs (involving one_var) need large buffers.
     // We assume max_sparse ~ 10 (typical R1CS). 
     // Safe upper bound: max(dense_A * 10, dense_B * 10).
+    let max_col_a = col_a.iter().map(|c| c.len()).max().unwrap_or(0);
+    let max_col_b = col_b.iter().map(|c| c.len()).max().unwrap_or(0);
     let buffer_capacity = std::cmp::max(max_col_a, max_col_b) * 20;
     println!("[Quotient] Pre-allocating buffers of size {} to avoid churn", buffer_capacity);
+    
+    // --- Diagonal Terms Computation (Optimized via Convolution) ---
+    println!("[Quotient] Computing Diagonal Correction vector Q...");
+    let diag_start = Instant::now();
+    
+    // We need Q[k] = Q_k(tau) for all k.
+    // Q_k(tau) = sum_m C_{k,m} L_m(tau).
+    // The matrix C is circulant: C_{k,m} depends on (m-k) mod n.
+    // Let u_j = C_{0,j} = Q_0(omega^j).
+    // Then Q = u * L (convolution).
+    // We compute this via FFT: Q = IFFT( FFT(u) . FFT(L) ).
+    
+    let n_field = domain.size_as_field_element();
+    let n_inv = n_field.inverse().expect("n invertible");
+    let t0 = (n_field - OuterScalar::<C>::one()) * (n_field + n_field).inverse().expect("2n invertible");
+    
+    // 1. Build kernel u
+    let mut u = vec![OuterScalar::<C>::zero(); domain_size];
+    u[0] = t0;
+    
+    // u[j] = 1 / (n * (1 - omega^j))
+    // We need to batch invert.
+    let mut denoms = Vec::with_capacity(domain_size - 1);
+    let mut indices = Vec::with_capacity(domain_size - 1);
+    
+    for j in 1..domain_size {
+        let omega_j = domain.element(j);
+        let denom = n_field * (OuterScalar::<C>::one() - omega_j);
+        denoms.push(denom);
+        indices.push(j);
+    }
+    
+    ark_ff::batch_inversion(&mut denoms);
+    for (i, &j) in indices.iter().enumerate() {
+        u[j] = denoms[i];
+    }
+    
+    // Reverse u[1..] to compute correlation via convolution
+    // We want sum_j L_j * u_{j-k} = sum_j L_j * u_{-(k-j)}
+    // Convolution computes sum_j L_j * v_{k-j}. So we need v_x = u_{-x}.
+    if domain_size > 1 {
+        u[1..].reverse();
+    }
+    
+    // 2. FFT(u)
+    parallel_fft_scalar(&mut u, &domain);
+    
+    // 3. FFT(L)
+    // lagrange_srs is currently [L_0, ..., L_{n-1}].
+    // We need to convert to Projective for FFT
+    let mut l_fft: Vec<_> = lagrange_srs.iter().map(|p| p.into_group()).collect();
+    parallel_fft_g1(&mut l_fft, &domain);
+    
+    // 4. Pointwise Product in Frequency Domain
+    // Q_hat[i] = u_hat[i] * L_hat[i]
+    l_fft.par_iter_mut()
+         .zip(u.par_iter())
+         .for_each(|(l_val, &u_val)| {
+             *l_val *= u_val;
+         });
+         
+    // 5. IFFT to get Q
+    parallel_ifft_g1(&mut l_fft, &domain);
+    
+    // Convert back to Affine for storage/use
+    let q_vector: Vec<_> = l_fft.into_par_iter().map(|p| p.into_affine()).collect();
+    
+    println!("[Quotient] Diagonal Q-vector computed in {:?}", diag_start.elapsed());
 
+    // --- Main Loop with Q-Vector Support ---
+    // We rewrite the main loop to use q_vector for diagonal terms (k==m)
+    
     let wit_start = Instant::now();
     let mut sorted_pairs: Vec<(usize, usize)> = active_pairs.into_iter().collect();
     sorted_pairs.sort();
@@ -266,38 +362,25 @@ fn compute_witness_bases<C: RecursionCycle>(
     let total_pairs = sorted_pairs.len();
     let progress_counter = std::sync::atomic::AtomicUsize::new(0);
 
-
-    // Chunk size for batching to reduce overhead and allow buffer reuse
+    // Chunk size for batching
     const CHUNK_SIZE: usize = 512; 
 
     let h_wit: Vec<_> = sorted_pairs
         .par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
-            // Thread-local buffers to reuse across the chunk
             let mut denominators = Vec::with_capacity(buffer_capacity);
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
-            
-            // Collect all MSM tasks first, then process in parallel for better CPU utilization
             let mut msm_tasks: Vec<(Vec<<C::OuterE as Pairing>::G1Affine>, Vec<OuterScalar<C>>, (u32, u32))> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
-                if (i as usize) < num_pub && (j as usize) < num_pub {
-                    continue;
-                }
+                if (i as usize) < num_pub && (j as usize) < num_pub { continue; }
                 
-                // Progress logging (approximate)
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if prog == 0 || prog % 100000 == 0 {
                      let elapsed = wit_start.elapsed().as_secs_f64();
                      let rate = prog as f64 / elapsed;
-                     
-                     // Read timers (convert micros to ms for readability)
-                     
-                     println!(
-                        "[Quotient] {}/{} ({:.1}%) | {:.0} pair/s",
-                        prog, total_pairs, (prog as f64 / total_pairs as f64) * 100.0, rate
-                    );
+                     println!("[Quotient] {}/{} ({:.1}%) | {:.0} pair/s", prog, total_pairs, (prog as f64 / total_pairs as f64) * 100.0, rate);
                 }
 
                 let i_idx = i as usize;
@@ -305,40 +388,37 @@ fn compute_witness_bases<C: RecursionCycle>(
                 let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
                 let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
                 
-                if rows_u.is_empty() || rows_v.is_empty() {
-                    continue;
-                }
+                if rows_u.is_empty() || rows_v.is_empty() { continue; }
 
                 let n_u = rows_u.len();
                 let n_v = rows_v.len();
                 let cap = n_u * n_v;
 
-                // 1. Compute denominators
+                // 1. Compute denominators for off-diagonal
                 denominators.clear();
                 if denominators.capacity() < cap { denominators.reserve(cap - denominators.capacity()); }
                 
                 for &(k, _) in rows_u {
                     for &(m, _) in rows_v {
-                        if k == m {
-                            denominators.push(OuterScalar::<C>::one());
-                        } else {
+                        if k != m {
                             let diff = domain_elements[k] - domain_elements[m];
                             denominators.push(n_scalar * diff);
+                        } else {
+                            denominators.push(OuterScalar::<C>::one()); // Dummy for index alignment
                         }
                     }
                 }
-
-                if denominators.is_empty() {
-                    continue;
-                }
-
+                
+                // Batch inversion for off-diagonal denominators
                 ark_ff::batch_inversion(&mut denominators);
 
                 // 2. Accumulate coefficients
-                acc_u.clear();
-                acc_u.resize(n_u, OuterScalar::<C>::zero());
-                acc_v.clear();
-                acc_v.resize(n_v, OuterScalar::<C>::zero());
+                acc_u.clear(); acc_u.resize(n_u, OuterScalar::<C>::zero());
+                acc_v.clear(); acc_v.resize(n_v, OuterScalar::<C>::zero());
+                
+                // Extra bases for diagonal contributions (using q_vector)
+                let mut diag_bases = Vec::new();
+                let mut diag_scalars = Vec::new();
 
                 let mut denom_idx = 0;
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
@@ -348,21 +428,28 @@ fn compute_witness_bases<C: RecursionCycle>(
                         let inv_denom = denominators[denom_idx];
                         denom_idx += 1;
 
-                        if k == m { continue; }
+                        let prod = val_u * val_v;
 
-                        let wm = domain_elements[m];
-                        let wk = domain_elements[k];
-                        let common = val_u * val_v * inv_denom;
-                        acc_u[idx_u] += common * wm;
-                        acc_v[idx_v] -= common * wk;
+                        if k == m { 
+                            // Diagonal term: prod * Q[k]
+                            diag_bases.push(q_vector[k]);
+                            diag_scalars.push(prod);
+                        } else {
+                            // Off-diagonal term
+                            let wm = domain_elements[m];
+                            let wk = domain_elements[k];
+                            let common = prod * inv_denom;
+                            acc_u[idx_u] += common * wm;
+                            acc_v[idx_v] -= common * wk;
+                        }
                     }
                 }
 
-                // 3. Collect bases for MSM (store for parallel processing)
-                // Create new vectors for each pair to avoid move issues
-                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b);
-                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b);
+                // 3. Collect bases for MSM
+                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
+                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
                 
+                // Add off-diagonal contributions (Lagrange bases)
                 for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
                     if !acc_u[idx_u].is_zero() {
                         pair_bases.push(lagrange_srs[k]);
@@ -375,13 +462,17 @@ fn compute_witness_bases<C: RecursionCycle>(
                         pair_scalars.push(acc_v[idx_v]);
                     }
                 }
+                
+                // Add diagonal contributions (Q bases)
+                pair_bases.extend(diag_bases);
+                pair_scalars.extend(diag_scalars);
 
                 if !pair_bases.is_empty() {
                     msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
                 }
             }
 
-            // Process MSMs in parallel for better CPU utilization
+            // Process MSMs
             let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
                 .into_par_iter()
                 .map(|(bases, scalars, pair_id)| {
@@ -391,18 +482,13 @@ fn compute_witness_bases<C: RecursionCycle>(
                 .filter(|(_, h_acc)| !h_acc.is_zero())
                 .collect();
             
-
-            // SoA layout to avoid intermediate tuple allocations and copies for normalization
             let mut point_accs = Vec::with_capacity(msm_results.len());
             let mut point_ids = Vec::with_capacity(msm_results.len());
-            
             for (pair_id, h_acc) in msm_results {
                 point_accs.push(h_acc);
                 point_ids.push(pair_id);
             }
             
-            // Batch normalize to save inversions (significant for small MSMs)
-            // 158M inversions -> ~26 mins. Batch norm -> ~20 secs.
             let mut affine_results = Vec::with_capacity(point_accs.len());
             if !point_accs.is_empty() {
                  let affines = <C::OuterE as Pairing>::G1::normalize_batch(&point_accs);
@@ -414,17 +500,51 @@ fn compute_witness_bases<C: RecursionCycle>(
             affine_results
         })
         .collect();
-
     let count = h_wit.len();
     println!(
         "[Quotient] Witness Bases done. Found {} non-zero bases. Time: {:?}",
         count,
         wit_start.elapsed()
     );
-
-    h_wit
+    WitnessBasesResult {
+        h_query_wit: h_wit,
+    }
 }
 // --- Group FFT Helpers ---
+
+fn parallel_fft_scalar<F: PrimeField>(
+    a: &mut [F],
+    domain: &GeneralEvaluationDomain<F>,
+) {
+    let n = a.len();
+    if n <= 1 { return; }
+    let log_n = n.trailing_zeros();
+    
+    for k in 0..n {
+        let rk = k.reverse_bits() >> (usize::BITS - log_n);
+        if k < rk { a.swap(k, rk); }
+    }
+    
+    let mut m = 1;
+    while m < n {
+        let omega_m = domain.element(domain.size() / (2 * m));
+        
+        // chunk_size = 2*m
+        // We can process in parallel if chunks are large enough
+        // For scalars, rayon might add overhead for small chunks, but let's stick to pattern
+        a.par_chunks_mut(2 * m).for_each(|chunk| {
+            let mut w = F::one();
+            for j in 0..m {
+                let t = chunk[j + m] * w;
+                let u = chunk[j];
+                chunk[j] = u + t;
+                chunk[j + m] = u - t;
+                w *= omega_m;
+            }
+        });
+        m *= 2;
+    }
+}
 
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a: &mut [G],
@@ -471,6 +591,7 @@ fn parallel_ifft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     // Parallel scaling
     a.par_iter_mut().for_each(|x| *x *= n_inv);
 }
+
 
 fn compute_q_const_points_from_gap<C, F>(
     pk_outer: &Groth16PK<C::OuterE>,
@@ -575,3 +696,5 @@ pub fn arm_columns_outer_for<C: RecursionCycle>(
 pub fn arm_columns_outer(bases: &ColumnBases<OuterE>, rho: &OuterFr) -> ColumnArms<OuterE> {
     arm_columns_outer_for::<DefaultCycle>(bases, rho)
 }
+
+
