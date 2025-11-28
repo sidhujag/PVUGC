@@ -378,14 +378,14 @@ mod tests {
         use std::time::Instant;
 
         let mut rng = StdRng::seed_from_u64(rng_seed);
+        let setup_start = Instant::now();
+        let (pk_outer, vk_outer) =
+            setup_outer_params_for::<C>(&fixture.vk_inner, 1, &mut rng).unwrap();
         eprintln!(
-            "[timing:{}] outer setup cached in {:?}",
+            "[timing:{}] outer setup (runtime) {:?}",
             C::name(),
-            fixture.outer_setup_time
+            setup_start.elapsed()
         );
-
-        let pk_outer = Arc::clone(&fixture.pk_outer_recursive);
-        let vk_outer = Arc::clone(&fixture.vk_outer_recursive);
         
         // Create a closure that generates valid inner proofs for any statement vector
         // This is needed because q_const computation samples at x=0 and x=1,
