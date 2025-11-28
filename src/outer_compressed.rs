@@ -14,7 +14,6 @@ use crate::api::enforce_public_inputs_are_outputs;
 use ark_ec::pairing::Pairing;
 use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
-
 use ark_r1cs_std::{
     alloc::AllocVar,
     eq::EqGadget,
@@ -158,161 +157,31 @@ impl<C: RecursionCycle> OuterCircuit<C> {
             _cycle: PhantomData,
         }
     }
-    /// Allocate bits as witnesses WITHOUT booleanity constraints.
-    /// 
-    /// The Groth16 verifier gadget implicitly enforces booleanity:
-    /// - If bits are not boolean, the reconstructed inner public input will be wrong
-    /// - The pairing check will fail because the proof was for a different input
-    /// 
-    /// This avoids witness×witness quadratic terms from booleanity constraints,
-    /// keeping the quotient polynomial affine in the public input.
-    fn allocate_packed_boolean_inputs(
-        cs: ConstraintSystemRef<OuterScalar<C>>,
-        x_inner: &[InnerScalar<C>],
-    ) -> Result<
-        (
-            BooleanInputVar<InnerScalar<C>, OuterScalar<C>>,
-            Vec<Vec<Boolean<OuterScalar<C>>>>,
-        ),
-        SynthesisError,
-    > {
-        use ark_r1cs_std::boolean::AllocatedBool;
-        
-        let mut per_input_bits = Vec::with_capacity(x_inner.len());
-        let mut raw_bits = Vec::with_capacity(x_inner.len());
-        for scalar in x_inner {
-            let bits_const = normalized_inner_bits_le::<C>(scalar);
-            let mut bit_vars = Vec::with_capacity(bits_const.len());
-            for bit in bits_const {
-                // Use new_witness_without_booleanity_check to avoid b*(1-b)=0 constraint.
-                // 
-                // WHY THIS IS NECESSARY FOR LEAN PROVER:
-                // The booleanity constraint b*(1-b)=0 creates wit×wit terms where the
-                // coefficients depend on the actual bit values. Since bits are derived
-                // from public input x, different x values produce different H-term
-                // contributions, making H(x) = H_const + H_wit(w(x)) non-affine in x.
-                //
-                // WHY THIS IS STILL SECURE:
-                // 1. The linear packing constraint x = Σ 2^i * bit_i binds the bits to x
-                // 2. The inner Groth16 verifier gadget computes g_ic from these bits
-                // 3. Any non-boolean bits that sum to x would produce wrong g_ic
-                // 4. The inner proof only verifies if g_ic matches the statement
-                // 5. The inner circuit (STARK verifier) enforces booleanity internally
-                let alloc_bool = AllocatedBool::new_witness_without_booleanity_check(
-                    cs.clone(),
-                    || Ok(bit),
-                )?;
-                bit_vars.push(Boolean::from(alloc_bool));
-            }  
-            per_input_bits.push(bit_vars.clone());
-            raw_bits.push(bit_vars);
-        }
-        Ok((BooleanInputVar::new(per_input_bits), raw_bits))
-    }
+    
 }
-fn fpvar_to_lc<C: RecursionCycle>(
-    var: &FpVar<OuterScalar<C>>,
-) -> LinearCombination<OuterScalar<C>> {
-    match var {
-        FpVar::Constant(c) => lc!() + (*c, Variable::One),
-        FpVar::Var(v) => lc!() + v.variable,
-    }
-}
-
-fn boolean_linear_term<F: PrimeField>(
-    bit: &Boolean<F>,
-    coeff: F,
-) -> LinearCombination<F> {
-    match bit {
-        Boolean::Constant(true) => lc!() + (coeff, Variable::One),
-        Boolean::Constant(false) => lc!(),
-        Boolean::Var(v) => lc!() + (coeff, v.variable()),
-    }
-}
-/*
-impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C> {
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<OuterScalar<C>>,
-    ) -> Result<(), SynthesisError> {
-        let one_var = FpVar::constant(OuterScalar::<C>::one());
-        let mut has_witness = false;
-        // Mock linear constraint: x * 1 = x for each public input, and mirror it with a
-        // private witness copy so PVUGC sees non-empty witness columns without
-        // instantiating the full verifier gadget yet.
-        for x_inner in &self.x_inner {
-            let x_outer = fr_inner_to_outer_for::<C>(x_inner);
-            let x_var = FpVar::new_input(cs.clone(), || Ok(x_outer))?;
-            x_var.mul_equals(&one_var, &x_var)?;
-            let witness_var = FpVar::new_witness(cs.clone(), || Ok(x_outer))?;
-            witness_var.enforce_equal(&x_var)?;
-            has_witness = true;
-        }
-        if !has_witness {
-            let dummy_witness = FpVar::new_witness(cs.clone(), || Ok(OuterScalar::<C>::one()))?;
-            dummy_witness.mul_equals(&one_var, &dummy_witness)?;
-        }
-
-        // Add a few dummy constraints to keep matrices non-trivial
-        let zero_var = FpVar::constant(OuterScalar::<C>::zero());
-        for _ in 0..300 {
-            zero_var.enforce_equal(&zero_var)?;
-        }
-
-        enforce_public_inputs_are_outputs(cs)?;
-        Ok(())
-    }
-}*/
-
 
 impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C> {
     fn generate_constraints(
         self,
         cs: ConstraintSystemRef<OuterScalar<C>>,
     ) -> Result<(), SynthesisError> {
-        // 1. Allocate the inner verifying key as a constant
         let vk_var = VerifyingKeyVar::<C::InnerE, C::InnerPairingVar>::new_constant(
             cs.clone(),
             &self.vk_inner,
         )?;
+        let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+            Ok(self.proof_inner)
+        })?;
 
-        // 2. Allocate the inner proof as a witness
-        let proof_var =
-            ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
-                Ok(self.proof_inner.clone())
+        // BooleanInputVar handles field element conversion for recursion
+        // It converts inner field elements to the outer constraint field
+        let input_var =
+            BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_input(cs.clone(), || {
+                Ok(self.x_inner.clone())
             })?;
 
-        // 3. Allocate packed boolean inputs (bits as witnesses, returns BooleanInputVar for verifier)
-        let (input_var, input_bits) =
-            Self::allocate_packed_boolean_inputs(cs.clone(), &self.x_inner)?;
-
-        // 4. For each inner scalar, allocate ONE packed public FpVar and enforce linear packing
-        for (scalar, bits) in self.x_inner.iter().zip(input_bits.iter()) {
-            let x_outer = fr_inner_to_outer_for::<C>(scalar);
-            let x_var = FpVar::<OuterScalar<C>>::new_input(cs.clone(), || Ok(x_outer))?;
-
-            // Build linear combination: Σ 2^i * bit_i
-            let mut lc_bits = lc!();
-            let mut coeff = OuterScalar::<C>::one();
-            for bit in bits {
-                lc_bits = lc_bits + boolean_linear_term(bit, coeff);
-                coeff = coeff + coeff;
-            }
-
-            // Enforce: x_outer = Σ 2^i * bit_i (linear constraint)
-            let x_lc = fpvar_to_lc::<C>(&x_var);
-            cs.enforce_constraint(
-                x_lc - lc_bits,
-                lc!() + Variable::One,
-                lc!(),
-            )?;
-        }
-
-        // 5. Verify the inner Groth16 proof using the verifier gadget
         let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
-            &vk_var,
-            &input_var,
-            &proof_var,
+            &vk_var, &input_var, &proof_var,
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;
 
