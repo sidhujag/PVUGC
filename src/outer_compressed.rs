@@ -276,20 +276,11 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &self.vk_inner,
         )?;
 
-        // 2. Allocate the inner proof as a witness (without on-curve/subgroup checks)
-        // 
-        // SECURITY NOTE: We use new_proof_unchecked to avoid ~14k witness variables
-        // from on-curve checks. This is safe because:
-        // 1. The inner proof was already verified by the inner Groth16 verifier
-        // 2. The outer prover is honest (it's the encryptor in PVUGC)
-        // 3. The pairing check will fail if the points are malformed
-        //
-        // This reduces h_query_wit from 156M to ~10k entries, making lean CRS secure.
-        let proof_var = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::new_proof_unchecked(
-            cs.clone(),
-            || Ok(self.proof_inner.clone()),
-            ark_r1cs_std::alloc::AllocationMode::Witness,
-        )?;
+        // 2. Allocate the inner proof as a witness
+        let proof_var =
+            ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+                Ok(self.proof_inner.clone())
+            })?;
 
         // 3. Allocate packed boolean inputs (bits as witnesses, returns BooleanInputVar for verifier)
         let (input_var, input_bits) =
@@ -317,13 +308,13 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             )?;
         }
 
+        // 5. Verify the inner Groth16 proof using the verifier gadget
         let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var,
             &input_var,
             &proof_var,
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;
-        
 
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
