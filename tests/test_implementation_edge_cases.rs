@@ -4,12 +4,12 @@ use ark_bls12_381::{Bls12_381 as E, Fr};
 use ark_ec::pairing::Pairing;
 use ark_ff::{One, Zero};
 use ark_groth16::Groth16;
-use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
-};
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
+};
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::ppe::{compute_groth16_target, extract_y_bases, PvugcVk};
 
@@ -56,7 +56,7 @@ fn test_constant_one_is_public() {
     };
 
     let y_bases = extract_y_bases(&pvugc_vk);
-    
+
     assert!(y_bases.len() > 1);
     assert_eq!(y_bases[0], vk.beta_g2);
 }
@@ -96,7 +96,7 @@ fn test_degenerate_target_rejected() {
     let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let r = compute_groth16_target(&vk, &vec![Fr::from(49u64)]).unwrap();
-    
+
     assert!(!r.0.is_zero());
     assert!(!r.0.is_one());
 }
@@ -138,4 +138,3 @@ fn test_gamma_g2_rejection() {
         assert_ne!(*y, vk.gamma_g2);
     }
 }
-

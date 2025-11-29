@@ -6,6 +6,7 @@ use ark_crypto_primitives::sponge::{
     poseidon::{constraints::PoseidonSpongeVar, PoseidonSponge as PoseidonSpongeNative},
     CryptographicSponge,
 };
+use ark_ec::AffineRepr;
 use ark_groth16::r1cs_to_qap::LibsnarkReduction;
 use ark_groth16::{Groth16, ProvingKey as Groth16ProvingKey, VerifyingKey as Groth16VerifyingKey};
 use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar, uint8::UInt8};
@@ -17,8 +18,7 @@ use bitcoin::{secp256k1::SecretKey, Address, Network, PrivateKey};
 use k256::elliptic_curve::{bigint::ArrayEncoding, ops::Reduce, Field};
 use k256::{Scalar, U256};
 use rand_core::OsRng;
-use sha2::{Digest, Sha256};
-use ark_ec::AffineRepr; // Added for .zero()
+use sha2::{Digest, Sha256}; // Added for .zero()
 
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::poseidon_fr381_t3::{
@@ -238,8 +238,12 @@ fn arm(passphrase: &str, ctx: &str, path: PathBuf) {
     // Use pairing::Pairing trait to access G1Affine type
     use ark_ec::pairing::Pairing;
     let q_dummy = vec![<E as Pairing>::G1Affine::zero(); vk.gamma_abc_g1.len()];
-    let pvugc_vk =
-        PvugcVk::new_with_all_witnesses_isolated(vk.beta_g2, vk.delta_g2, pk.b_g2_query.clone(), q_dummy);
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        q_dummy,
+    );
 
     let statement_x = vec![h];
 

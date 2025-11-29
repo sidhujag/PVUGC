@@ -27,6 +27,9 @@ pub use inner_stark_full::{
     AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness,
 };
 
+#[cfg(test)]
+pub mod test_utils;
+
 // Tests module (internal tests for STARK components)
 #[cfg(test)]
 mod tests {

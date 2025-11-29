@@ -1,15 +1,19 @@
 //! Global test fixtures with disk caching
 
 use once_cell::sync::Lazy;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use ark_ec::pairing::Pairing;
+use ark_ec::AffineRepr;
 use ark_groth16::Groth16;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
-use ark_std::rand::SeedableRng;
-use ark_ec::pairing::Pairing;
-use ark_ec::AffineRepr; // Import AffineRepr for .zero()
+use ark_std::rand::SeedableRng; // Import AffineRepr for .zero()
 
 use crate::outer_compressed::{
     self,
@@ -65,7 +69,8 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     // Build PvugcVk from the outer proving key (Manually, no baking for AddCircuit)
     // AddCircuit is used for basic tests, baking logic is specific to OuterCircuit
     use crate::ppe::PvugcVk;
-    let q_points_dummy = vec![<C::OuterE as Pairing>::G1Affine::zero(); pk_outer.vk.gamma_abc_g1.len()];
+    let q_points_dummy =
+        vec![<C::OuterE as Pairing>::G1Affine::zero(); pk_outer.vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
@@ -76,14 +81,14 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     // Outer-recursive keys: reuse setup_outer_params once per process
     let setup_start = Instant::now();
     let (pk_outer_recursive, vk_outer_recursive) =
-        outer_compressed::setup_outer_params_for::<C>(&vk_inner, 1, &mut rng).unwrap();
+        load_or_build_outer_recursive_crs::<C>(&vk_inner, 1);
     let outer_setup_time = setup_start.elapsed();
     eprintln!(
         "[fixture:{}] setup_outer_params (outer recursion) took {:?}",
         C::name(),
         outer_setup_time
     );
-    
+
     GlobalFixture {
         pk_inner: Arc::new(pk_inner),
         vk_inner: Arc::new(vk_inner),
@@ -94,6 +99,36 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         vk_outer_recursive: Arc::new(vk_outer_recursive),
         outer_setup_time,
     }
+}
+
+fn load_or_build_outer_recursive_crs<C: RecursionCycle>(
+    vk_inner: &ark_groth16::VerifyingKey<C::InnerE>,
+    num_inputs: usize,
+) -> (
+    ark_groth16::ProvingKey<C::OuterE>,
+    ark_groth16::VerifyingKey<C::OuterE>,
+) {
+    let safe_name = C::name().replace('/', "_").replace(' ', "_");
+    let cache_path = format!("outer_crs_{}_{}.bin", safe_name, num_inputs);
+    if Path::new(&cache_path).exists() {
+        let file = File::open(&cache_path).expect("failed to open cached outer CRS");
+        let reader = BufReader::new(file);
+        return CanonicalDeserialize::deserialize_uncompressed(reader)
+            .expect("failed to deserialize outer CRS");
+    }
+
+    let mut rng = StdRng::seed_from_u64(999999);
+    let (pk, vk) =
+        outer_compressed::setup_outer_params_for::<C>(vk_inner, num_inputs, &mut rng).unwrap();
+
+    let file = File::create(&cache_path).expect("failed to create outer CRS cache file");
+    let mut writer = BufWriter::new(file);
+    (pk.clone(), vk.clone())
+        .serialize_uncompressed(&mut writer)
+        .expect("failed to serialize outer CRS");
+    writer.flush().expect("failed to flush outer CRS cache");
+
+    (pk, vk)
 }
 
 static GLOBAL_FIXTURE_DEFAULT: Lazy<Mutex<DefaultFixture>> =

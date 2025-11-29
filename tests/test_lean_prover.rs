@@ -6,17 +6,17 @@
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{Field, One, PrimeField};
 use ark_groth16::Groth16;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
-use ark_relations::r1cs::{ConstraintSystem, ConstraintSynthesizer};
 use ark_std::{rand::SeedableRng, Zero};
 use arkworks_groth16::outer_compressed::{
-    OuterCircuit, InnerScalar, DefaultCycle, InnerE, OuterScalar,
+    DefaultCycle, InnerE, InnerScalar, OuterCircuit, OuterScalar,
 };
-use arkworks_groth16::test_fixtures::get_fixture;
-use arkworks_groth16::test_circuits::AddCircuit;
-use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
-use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers, LeanProvingKey};
 use arkworks_groth16::ppe::{compute_baked_target, PvugcVk};
+use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers, LeanProvingKey};
+use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
+use arkworks_groth16::test_circuits::AddCircuit;
+use arkworks_groth16::test_fixtures::get_fixture;
 use arkworks_groth16::RecursionCycle;
 
 /// Circuit that simulates proof point allocation:
@@ -31,30 +31,34 @@ use arkworks_groth16::RecursionCycle;
 ///    (using zeros for setup but real values for proving causes mismatch!)
 #[derive(Clone)]
 struct ProofPointSimCircuit<F: ark_ff::PrimeField> {
-    pub x: F,                    // Public input (packed scalar)
-    pub proof_coords: Vec<F>,    // Simulated proof point coordinates (passed in, not generated)
-    pub bits: Vec<bool>,         // Bits for packing constraint
+    pub x: F,                 // Public input (packed scalar)
+    pub proof_coords: Vec<F>, // Simulated proof point coordinates (passed in, not generated)
+    pub bits: Vec<bool>,      // Bits for packing constraint
 }
 
 impl<F: ark_ff::PrimeField> ProofPointSimCircuit<F> {
     /// Create circuit with specific proof coordinates (for testing dummy vs real)
     fn with_coords(x: F, num_bits: usize, proof_coords: Vec<F>) -> Self {
         use ark_ff::BigInteger;
-        
+
         // Bits are derived from x (like in real OuterCircuit)
         let mut bits = x.into_bigint().to_bits_le();
         bits.truncate(num_bits);
         bits.resize(num_bits, false);
-        
-        Self { x, proof_coords, bits }
+
+        Self {
+            x,
+            proof_coords,
+            bits,
+        }
     }
-    
+
     /// Create circuit with dummy (zero) proof coordinates - simulates old buggy behavior
     fn with_dummy_coords(x: F, num_bits: usize, num_proof_coords: usize) -> Self {
         let proof_coords = vec![F::zero(); num_proof_coords];
         Self::with_coords(x, num_bits, proof_coords)
     }
-    
+
     /// Create circuit with real (non-zero) proof coordinates - simulates correct behavior
     /// Uses FIXED coords regardless of x (same proof structure for all statements)
     fn with_real_coords(x: F, num_bits: usize, num_proof_coords: usize) -> Self {
@@ -67,7 +71,7 @@ impl<F: ark_ff::PrimeField> ProofPointSimCircuit<F> {
         }
         Self::with_coords(x, num_bits, proof_coords)
     }
-    
+
     /// Create circuit with statement-dependent proof coordinates
     /// Different x values produce different coords (simulates real inner proofs)
     fn with_statement_dependent_coords(x: F, num_bits: usize, num_proof_coords: usize) -> Self {
@@ -90,8 +94,8 @@ impl<F: ark_ff::PrimeField> ConstraintSynthesizer<F> for ProofPointSimCircuit<F>
         use ark_r1cs_std::alloc::AllocVar;
         use ark_r1cs_std::boolean::AllocatedBool;
         use ark_r1cs_std::boolean::Boolean;
-        use ark_r1cs_std::fields::fp::FpVar;
         use ark_r1cs_std::eq::EqGadget;
+        use ark_r1cs_std::fields::fp::FpVar;
         use ark_r1cs_std::fields::FieldVar;
         use ark_relations::lc;
         use ark_relations::r1cs::Variable;
@@ -102,10 +106,8 @@ impl<F: ark_ff::PrimeField> ConstraintSynthesizer<F> for ProofPointSimCircuit<F>
         // 2. Witness bits: NO booleanity constraint (like our fix)
         let mut bit_vars = Vec::with_capacity(self.bits.len());
         for bit in &self.bits {
-            let alloc_bool = AllocatedBool::new_witness_without_booleanity_check(
-                cs.clone(),
-                || Ok(*bit),
-            )?;
+            let alloc_bool =
+                AllocatedBool::new_witness_without_booleanity_check(cs.clone(), || Ok(*bit))?;
             bit_vars.push(Boolean::from(alloc_bool));
         }
 
@@ -137,7 +139,7 @@ impl<F: ark_ff::PrimeField> ConstraintSynthesizer<F> for ProofPointSimCircuit<F>
             let v = FpVar::new_witness(cs.clone(), || Ok(*coord))?;
             coord_vars.push(v);
         }
-        
+
         // 5. Create wit × wit constraints that depend on proof coord values
         // We use trivial equations that are always satisfiable: a * b = a * b
         // This still creates the H-term pairs we need to test
@@ -146,17 +148,17 @@ impl<F: ark_ff::PrimeField> ConstraintSynthesizer<F> for ProofPointSimCircuit<F>
             let x2 = &coord_vars[0] * &coord_vars[0];
             let y2 = &coord_vars[1] * &coord_vars[1];
             let z2 = &coord_vars[2] * &coord_vars[2];
-            
+
             // Enforce trivial equations (always satisfiable)
             x2.enforce_equal(&x2)?;
             y2.enforce_equal(&y2)?;
             z2.enforce_equal(&z2)?;
-            
+
             // More products
             let xy = &coord_vars[0] * &coord_vars[1];
             let yz = &coord_vars[1] * &coord_vars[2];
             let xz = &coord_vars[0] * &coord_vars[2];
-            
+
             xy.enforce_equal(&xy)?;
             yz.enforce_equal(&yz)?;
             xz.enforce_equal(&xz)?;
@@ -175,13 +177,13 @@ impl<F: ark_ff::PrimeField> ConstraintSynthesizer<F> for ProofPointSimCircuit<F>
 
 /// Test: Demonstrates the bug when q_const is computed with dummy (zero) proof coords
 /// but real proving uses non-zero coords. This causes a sparsity mismatch in H-terms.
-/// 
+///
 /// The fix is to use the SAME proof coords for q_const computation as for real proving.
 /// Test the lean prover with statement-dependent witness coordinates.
-/// 
+///
 /// This test verifies that the Q-vector convolution fix correctly handles
 /// diagonal L_k(τ)² terms, making the gap linear in public inputs.
-/// 
+///
 /// Key parts:
 /// - D3: Verify gap linearity with statement-dependent coords (THE KEY CHECK)
 /// - D4: Compare with linear-only circuit (confirms wit×wit is the issue)
@@ -197,7 +199,8 @@ fn test_lean_prover_proof_point_simulation() {
     const NUM_PROOF_COORDS: usize = 6; // Simulate 2 G1 points (x,y,z each)
 
     // 1. Setup
-    let setup_circuit = ProofPointSimCircuit::with_dummy_coords(OuterFr::from(0u64), NUM_BITS, NUM_PROOF_COORDS);
+    let setup_circuit =
+        ProofPointSimCircuit::with_dummy_coords(OuterFr::from(0u64), NUM_BITS, NUM_PROOF_COORDS);
     let (pk_outer, vk_outer) =
         Groth16::<OuterE>::circuit_specific_setup(setup_circuit.clone(), &mut _rng)
             .expect("setup failed");
@@ -209,7 +212,10 @@ fn test_lean_prover_proof_point_simulation() {
     let lean_pk = build_lean_pk_with_witness_bases(&pk_outer, || {
         ProofPointSimCircuit::with_dummy_coords(OuterFr::from(0u64), NUM_BITS, NUM_PROOF_COORDS)
     });
-    println!("Lean PK built. h_query_wit len: {}", lean_pk.h_query_wit.len());
+    println!(
+        "Lean PK built. h_query_wit len: {}",
+        lean_pk.h_query_wit.len()
+    );
 
     let x_test_2 = OuterFr::from(2u64);
     let x_test_42 = OuterFr::from(42u64);
@@ -219,67 +225,98 @@ fn test_lean_prover_proof_point_simulation() {
     // This is the KEY check - if the gap is linear, the Q-vector fix works!
     // ========================================================================
     println!("\n--- PART D3: CHECK GAP LINEARITY with STATEMENT-DEPENDENT coords ---");
-    
-    let circuit_0_dep = ProofPointSimCircuit::with_statement_dependent_coords(OuterFr::zero(), NUM_BITS, NUM_PROOF_COORDS);
-    let proof_std_0_dep = Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_0_dep.clone(), &pk_outer).unwrap();
-    let (proof_lean_0_dep, _) = prove_lean_with_randomizers(&lean_pk, circuit_0_dep, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_0_dep = (proof_std_0_dep.c.into_group() - proof_lean_0_dep.c.into_group()).into_affine();
-    
-    let circuit_1_dep = ProofPointSimCircuit::with_statement_dependent_coords(OuterFr::one(), NUM_BITS, NUM_PROOF_COORDS);
-    let proof_std_1_dep = Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_1_dep.clone(), &pk_outer).unwrap();
-    let (proof_lean_1_dep, _) = prove_lean_with_randomizers(&lean_pk, circuit_1_dep, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_1_dep = (proof_std_1_dep.c.into_group() - proof_lean_1_dep.c.into_group()).into_affine();
-    
-    let circuit_2_dep = ProofPointSimCircuit::with_statement_dependent_coords(x_test_2, NUM_BITS, NUM_PROOF_COORDS);
-    let proof_std_2_dep = Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_2_dep.clone(), &pk_outer).unwrap();
-    let (proof_lean_2_dep, _) = prove_lean_with_randomizers(&lean_pk, circuit_2_dep, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_2_dep = (proof_std_2_dep.c.into_group() - proof_lean_2_dep.c.into_group()).into_affine();
-    
+
+    let circuit_0_dep = ProofPointSimCircuit::with_statement_dependent_coords(
+        OuterFr::zero(),
+        NUM_BITS,
+        NUM_PROOF_COORDS,
+    );
+    let proof_std_0_dep =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_0_dep.clone(), &pk_outer)
+            .unwrap();
+    let (proof_lean_0_dep, _) =
+        prove_lean_with_randomizers(&lean_pk, circuit_0_dep, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_0_dep =
+        (proof_std_0_dep.c.into_group() - proof_lean_0_dep.c.into_group()).into_affine();
+
+    let circuit_1_dep = ProofPointSimCircuit::with_statement_dependent_coords(
+        OuterFr::one(),
+        NUM_BITS,
+        NUM_PROOF_COORDS,
+    );
+    let proof_std_1_dep =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_1_dep.clone(), &pk_outer)
+            .unwrap();
+    let (proof_lean_1_dep, _) =
+        prove_lean_with_randomizers(&lean_pk, circuit_1_dep, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_1_dep =
+        (proof_std_1_dep.c.into_group() - proof_lean_1_dep.c.into_group()).into_affine();
+
+    let circuit_2_dep =
+        ProofPointSimCircuit::with_statement_dependent_coords(x_test_2, NUM_BITS, NUM_PROOF_COORDS);
+    let proof_std_2_dep =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_2_dep.clone(), &pk_outer)
+            .unwrap();
+    let (proof_lean_2_dep, _) =
+        prove_lean_with_randomizers(&lean_pk, circuit_2_dep, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_2_dep =
+        (proof_std_2_dep.c.into_group() - proof_lean_2_dep.c.into_group()).into_affine();
+
     // Check linearity: gap(2) == 2*gap(1) - gap(0)?
-    let expected_gap_2_dep = (gap_1_dep.into_group() * OuterFr::from(2u64) - gap_0_dep.into_group()).into_affine();
+    let expected_gap_2_dep =
+        (gap_1_dep.into_group() * OuterFr::from(2u64) - gap_0_dep.into_group()).into_affine();
     let gap_is_linear_dep = gap_2_dep == expected_gap_2_dep;
-    
+
     println!("gap(0) = {:?}", gap_0_dep);
     println!("gap(1) = {:?}", gap_1_dep);
     println!("gap(2) actual   = {:?}", gap_2_dep);
     println!("gap(2) expected = {:?}", expected_gap_2_dep);
-    println!("Gap is LINEAR with STATEMENT-DEPENDENT coords: {}", gap_is_linear_dep);
-    
-    assert!(gap_is_linear_dep, "Gap must be linear for Q-vector fix to work!");
+    println!(
+        "Gap is LINEAR with STATEMENT-DEPENDENT coords: {}",
+        gap_is_linear_dep
+    );
+
+    assert!(
+        gap_is_linear_dep,
+        "Gap must be linear for Q-vector fix to work!"
+    );
     println!("*** GAP IS LINEAR! Q-vector fix is working. ***");
 
     // ========================================================================
     // PART D4: Test with LINEAR-ONLY circuit (no wit×wit) for comparison
     // ========================================================================
     println!("\n--- PART D4: Test with LINEAR-ONLY circuit (no wit×wit) ---");
-    
+
     #[derive(Clone)]
     struct LinearOnlyCircuit {
         x: OuterFr,
         num_bits: usize,
     }
-    
+
     impl ConstraintSynthesizer<OuterFr> for LinearOnlyCircuit {
         fn generate_constraints(
             self,
             cs: ark_relations::r1cs::ConstraintSystemRef<OuterFr>,
         ) -> Result<(), ark_relations::r1cs::SynthesisError> {
-            use ark_r1cs_std::prelude::*;
             use ark_r1cs_std::fields::fp::FpVar;
-            
+            use ark_r1cs_std::prelude::*;
+
             let x_var = FpVar::new_input(cs.clone(), || Ok(self.x))?;
             let mut bit_vars = Vec::new();
             let x_bits: Vec<bool> = (0..self.num_bits)
                 .map(|i| ((self.x.into_bigint().as_ref()[0] >> i) & 1) == 1)
                 .collect();
-            
+
             for bit in x_bits {
                 let bit_var = FpVar::new_witness(cs.clone(), || {
                     Ok(if bit { OuterFr::one() } else { OuterFr::zero() })
                 })?;
                 bit_vars.push(bit_var);
             }
-            
+
             let mut sum = FpVar::zero();
             let mut coeff = OuterFr::one();
             for bit_var in &bit_vars {
@@ -287,45 +324,74 @@ fn test_lean_prover_proof_point_simulation() {
                 coeff = coeff + coeff;
             }
             x_var.enforce_equal(&sum)?;
-            
+
             Ok(())
         }
     }
-    
-    let linear_circuit = LinearOnlyCircuit { x: OuterFr::zero(), num_bits: 16 };
-    let (pk_linear, _vk_linear) = Groth16::<OuterE>::circuit_specific_setup(linear_circuit, &mut _rng)
-        .expect("linear setup");
-    
-    let lean_pk_linear = build_lean_pk_with_witness_bases(&pk_linear, || {
-        LinearOnlyCircuit { x: OuterFr::zero(), num_bits: 16 }
+
+    let linear_circuit = LinearOnlyCircuit {
+        x: OuterFr::zero(),
+        num_bits: 16,
+    };
+    let (pk_linear, _vk_linear) =
+        Groth16::<OuterE>::circuit_specific_setup(linear_circuit, &mut _rng).expect("linear setup");
+
+    let lean_pk_linear = build_lean_pk_with_witness_bases(&pk_linear, || LinearOnlyCircuit {
+        x: OuterFr::zero(),
+        num_bits: 16,
     });
-    
-    println!("Linear circuit: h_query_wit has {} bases", lean_pk_linear.h_query_wit.len());
-    
-    let linear_0 = LinearOnlyCircuit { x: OuterFr::zero(), num_bits: 16 };
-    let proof_std_lin_0 = Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_0.clone(), &pk_linear).unwrap();
-    let (proof_lean_lin_0, _) = prove_lean_with_randomizers(&lean_pk_linear, linear_0, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_lin_0 = (proof_std_lin_0.c.into_group() - proof_lean_lin_0.c.into_group()).into_affine();
-    
-    let linear_1 = LinearOnlyCircuit { x: OuterFr::one(), num_bits: 16 };
-    let proof_std_lin_1 = Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_1.clone(), &pk_linear).unwrap();
-    let (proof_lean_lin_1, _) = prove_lean_with_randomizers(&lean_pk_linear, linear_1, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_lin_1 = (proof_std_lin_1.c.into_group() - proof_lean_lin_1.c.into_group()).into_affine();
-    
-    let linear_2 = LinearOnlyCircuit { x: OuterFr::from(2u64), num_bits: 16 };
-    let proof_std_lin_2 = Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_2.clone(), &pk_linear).unwrap();
-    let (proof_lean_lin_2, _) = prove_lean_with_randomizers(&lean_pk_linear, linear_2, OuterFr::zero(), OuterFr::zero()).unwrap();
-    let gap_lin_2 = (proof_std_lin_2.c.into_group() - proof_lean_lin_2.c.into_group()).into_affine();
-    
-    let expected_gap_lin_2 = (gap_lin_1.into_group() * OuterFr::from(2u64) - gap_lin_0.into_group()).into_affine();
+
+    println!(
+        "Linear circuit: h_query_wit has {} bases",
+        lean_pk_linear.h_query_wit.len()
+    );
+
+    let linear_0 = LinearOnlyCircuit {
+        x: OuterFr::zero(),
+        num_bits: 16,
+    };
+    let proof_std_lin_0 =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_0.clone(), &pk_linear).unwrap();
+    let (proof_lean_lin_0, _) =
+        prove_lean_with_randomizers(&lean_pk_linear, linear_0, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_lin_0 =
+        (proof_std_lin_0.c.into_group() - proof_lean_lin_0.c.into_group()).into_affine();
+
+    let linear_1 = LinearOnlyCircuit {
+        x: OuterFr::one(),
+        num_bits: 16,
+    };
+    let proof_std_lin_1 =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_1.clone(), &pk_linear).unwrap();
+    let (proof_lean_lin_1, _) =
+        prove_lean_with_randomizers(&lean_pk_linear, linear_1, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_lin_1 =
+        (proof_std_lin_1.c.into_group() - proof_lean_lin_1.c.into_group()).into_affine();
+
+    let linear_2 = LinearOnlyCircuit {
+        x: OuterFr::from(2u64),
+        num_bits: 16,
+    };
+    let proof_std_lin_2 =
+        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_2.clone(), &pk_linear).unwrap();
+    let (proof_lean_lin_2, _) =
+        prove_lean_with_randomizers(&lean_pk_linear, linear_2, OuterFr::zero(), OuterFr::zero())
+            .unwrap();
+    let gap_lin_2 =
+        (proof_std_lin_2.c.into_group() - proof_lean_lin_2.c.into_group()).into_affine();
+
+    let expected_gap_lin_2 =
+        (gap_lin_1.into_group() * OuterFr::from(2u64) - gap_lin_0.into_group()).into_affine();
     let gap_lin_is_linear = gap_lin_2 == expected_gap_lin_2;
-    
+
     println!("Linear circuit gap(0) = {:?}", gap_lin_0);
     println!("Linear circuit gap(1) = {:?}", gap_lin_1);
     println!("Linear circuit gap(2) actual   = {:?}", gap_lin_2);
     println!("Linear circuit gap(2) expected = {:?}", expected_gap_lin_2);
     println!("Linear circuit gap is LINEAR: {}", gap_lin_is_linear);
-    
+
     assert!(gap_lin_is_linear, "Linear circuit gap must be linear!");
     println!("*** LINEAR CIRCUIT GAP IS LINEAR! ***");
 
@@ -334,7 +400,7 @@ fn test_lean_prover_proof_point_simulation() {
     // This is THE FIX - gap-based q_const works for ANY statement!
     // ========================================================================
     println!("\n--- PART F: GAP-BASED q_const (fixed coords) + STATEMENT-DEPENDENT proving ---");
-    
+
     // Compute q_const with FIXED coords (using statements 0 and 1)
     let q_const_fixed_all = compute_q_const_with_coords(
         &pk_outer,
@@ -343,41 +409,62 @@ fn test_lean_prover_proof_point_simulation() {
         NUM_PROOF_COORDS,
         true, // use_real_coords = true (FIXED, not statement-dependent)
     );
-    
+
     let pvugc_vk_gap: PvugcVk<OuterE> = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
         q_const_fixed_all.clone(),
     );
-    
+
     // Test x=2 with STATEMENT-DEPENDENT coords using GAP-BASED q_const
-    let circuit_2_gap = ProofPointSimCircuit::with_statement_dependent_coords(x_test_2, NUM_BITS, NUM_PROOF_COORDS);
-    let (proof_lean_2_gap, _) = prove_lean_with_randomizers(&lean_pk, circuit_2_gap, OuterFr::zero(), OuterFr::zero())
-        .expect("lean proof 2 gap");
-    let r_baked_2_gap = compute_baked_target(&vk_outer, &pvugc_vk_gap, &vec![x_test_2]).expect("baked 2 gap");
+    let circuit_2_gap =
+        ProofPointSimCircuit::with_statement_dependent_coords(x_test_2, NUM_BITS, NUM_PROOF_COORDS);
+    let (proof_lean_2_gap, _) =
+        prove_lean_with_randomizers(&lean_pk, circuit_2_gap, OuterFr::zero(), OuterFr::zero())
+            .expect("lean proof 2 gap");
+    let r_baked_2_gap =
+        compute_baked_target(&vk_outer, &pvugc_vk_gap, &vec![x_test_2]).expect("baked 2 gap");
     let lhs_2_gap = OuterE::pairing(proof_lean_2_gap.a, proof_lean_2_gap.b);
     let rhs_2_gap = r_baked_2_gap + OuterE::pairing(proof_lean_2_gap.c, vk_outer.delta_g2);
     let x2_gap_passes = lhs_2_gap == rhs_2_gap;
-    println!("x=2 with STATEMENT-DEPENDENT coords + GAP-BASED q_const: lhs == rhs = {}", x2_gap_passes);
-    
+    println!(
+        "x=2 with STATEMENT-DEPENDENT coords + GAP-BASED q_const: lhs == rhs = {}",
+        x2_gap_passes
+    );
+
     // Test x=42 with STATEMENT-DEPENDENT coords using GAP-BASED q_const
-    let circuit_42_gap = ProofPointSimCircuit::with_statement_dependent_coords(x_test_42, NUM_BITS, NUM_PROOF_COORDS);
-    let (proof_lean_42_gap, _) = prove_lean_with_randomizers(&lean_pk, circuit_42_gap, OuterFr::zero(), OuterFr::zero())
-        .expect("lean proof 42 gap");
-    let r_baked_42_gap = compute_baked_target(&vk_outer, &pvugc_vk_gap, &vec![x_test_42]).expect("baked 42 gap");
+    let circuit_42_gap = ProofPointSimCircuit::with_statement_dependent_coords(
+        x_test_42,
+        NUM_BITS,
+        NUM_PROOF_COORDS,
+    );
+    let (proof_lean_42_gap, _) =
+        prove_lean_with_randomizers(&lean_pk, circuit_42_gap, OuterFr::zero(), OuterFr::zero())
+            .expect("lean proof 42 gap");
+    let r_baked_42_gap =
+        compute_baked_target(&vk_outer, &pvugc_vk_gap, &vec![x_test_42]).expect("baked 42 gap");
     let lhs_42_gap = OuterE::pairing(proof_lean_42_gap.a, proof_lean_42_gap.b);
     let rhs_42_gap = r_baked_42_gap + OuterE::pairing(proof_lean_42_gap.c, vk_outer.delta_g2);
     let x42_gap_passes = lhs_42_gap == rhs_42_gap;
-    println!("x=42 with STATEMENT-DEPENDENT coords + GAP-BASED q_const: lhs == rhs = {}", x42_gap_passes);
-    
+    println!(
+        "x=42 with STATEMENT-DEPENDENT coords + GAP-BASED q_const: lhs == rhs = {}",
+        x42_gap_passes
+    );
+
     println!("\n--- PART F RESULTS ---");
-    println!("x=2 GAP-BASED:  {}", if x2_gap_passes { "PASS ✓" } else { "FAIL" });
-    println!("x=42 GAP-BASED: {}", if x42_gap_passes { "PASS ✓" } else { "FAIL" });
-    
+    println!(
+        "x=2 GAP-BASED:  {}",
+        if x2_gap_passes { "PASS ✓" } else { "FAIL" }
+    );
+    println!(
+        "x=42 GAP-BASED: {}",
+        if x42_gap_passes { "PASS ✓" } else { "FAIL" }
+    );
+
     assert!(x2_gap_passes, "x=2 must pass with Q-vector fix!");
     assert!(x42_gap_passes, "x=42 must pass with Q-vector fix!");
-    
+
     println!("\n*** Q-VECTOR FIX WORKS! ***");
     println!("Statement-dependent coords now work because:");
     println!("  1. The Q-vector convolution correctly handles diagonal L_k² terms");
@@ -394,24 +481,27 @@ fn compute_q_const_algebraic<E: Pairing>(
     num_proof_coords: usize,
 ) -> Vec<E::G1Affine> {
     use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
-    use ark_relations::r1cs::{ConstraintSystem, OptimizationGoal, ConstraintSynthesizer};
+    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
     use std::collections::HashMap;
-    
+
     println!("[q_const ALGEBRAIC] Computing from constraint matrices...");
-    
+
     // Synthesize circuit to get matrices (witness values don't matter!)
-    let circuit = ProofPointSimCircuit::with_dummy_coords(E::ScalarField::zero(), num_bits, num_proof_coords);
-    
+    let circuit =
+        ProofPointSimCircuit::with_dummy_coords(E::ScalarField::zero(), num_bits, num_proof_coords);
+
     let cs = ConstraintSystem::<E::ScalarField>::new_ref();
     cs.set_optimization_goal(OptimizationGoal::Constraints);
-    circuit.generate_constraints(cs.clone()).expect("synthesis failed");
+    circuit
+        .generate_constraints(cs.clone())
+        .expect("synthesis failed");
     cs.finalize();
     let matrices = cs.to_matrices().expect("matrix extraction failed");
-    
+
     let num_pub = cs.num_instance_variables();
     let num_vars = cs.num_instance_variables() + cs.num_witness_variables();
     let num_constraints = cs.num_constraints();
-    
+
     // CRITICAL: Domain size must match standard Groth16!
     // Standard Groth16 uses domain of size (num_constraints + num_inputs)
     let qap_domain_size = num_constraints + num_pub;
@@ -420,11 +510,13 @@ fn compute_q_const_algebraic<E: Pairing>(
     let domain_size = domain.size();
     let n_scalar = domain.size_as_field_element();
     let domain_elements: Vec<_> = (0..domain_size).map(|i| domain.element(i)).collect();
-    
-    println!("[q_const ALGEBRAIC] QAP domain: {} constraints + {} inputs = {} (padded to {})", 
-             num_constraints, num_pub, qap_domain_size, domain_size);
+
+    println!(
+        "[q_const ALGEBRAIC] QAP domain: {} constraints + {} inputs = {} (padded to {})",
+        num_constraints, num_pub, qap_domain_size, domain_size
+    );
     println!("[q_const ALGEBRAIC] h_query length: {}", pk.h_query.len());
-    
+
     // Check C matrix for public columns
     let mut col_c: Vec<Vec<(usize, E::ScalarField)>> = vec![Vec::new(); num_vars];
     for (row, terms) in matrices.c.iter().enumerate() {
@@ -434,13 +526,16 @@ fn compute_q_const_algebraic<E: Pairing>(
             }
         }
     }
-    println!("[q_const ALGEBRAIC] C matrix: col_c[0] has {} entries, col_c[1] has {} entries",
-             col_c[0].len(), col_c[1].len());
-    
+    println!(
+        "[q_const ALGEBRAIC] C matrix: col_c[0] has {} entries, col_c[1] has {} entries",
+        col_c[0].len(),
+        col_c[1].len()
+    );
+
     // Build column maps for A and B
     let mut col_a: Vec<Vec<(usize, E::ScalarField)>> = vec![Vec::new(); num_vars];
     let mut col_b: Vec<Vec<(usize, E::ScalarField)>> = vec![Vec::new(); num_vars];
-    
+
     for (row, terms) in matrices.a.iter().enumerate() {
         if row < domain_size {
             for &(val, col) in terms {
@@ -455,7 +550,7 @@ fn compute_q_const_algebraic<E: Pairing>(
             }
         }
     }
-    
+
     // Add synthetic "copy constraint" rows for public inputs
     for i in 0..num_pub {
         let row = num_constraints + i;
@@ -463,7 +558,7 @@ fn compute_q_const_algebraic<E: Pairing>(
             col_a[i].push((row, E::ScalarField::one()));
         }
     }
-    
+
     // Compute Lagrange SRS using group IFFT
     // Note: domain.ifft_in_place is for scalars. For group elements, we need:
     // 1. FFT
@@ -476,7 +571,7 @@ fn compute_q_const_algebraic<E: Pairing>(
         h_query_proj.truncate(domain_size);
     }
     let mut lagrange_srs = h_query_proj;
-    
+
     // FFT on group elements
     domain.fft_in_place(&mut lagrange_srs);
     // Reverse [1..n]
@@ -488,18 +583,18 @@ fn compute_q_const_algebraic<E: Pairing>(
     for p in lagrange_srs.iter_mut() {
         *p *= n_inv;
     }
-    
+
     let lagrange_srs: Vec<_> = lagrange_srs.into_iter().map(|p| p.into_affine()).collect();
-    
+
     // The gap is (A*B - C) / Z for pub×pub terms.
-    // 
+    //
     // For public inputs [1, x], the gap is:
     //   gap(x) = (A_0*B_0 - C_0)/Z * 1*1 + (A_0*B_1 - 0)/Z * 1*x + (A_1*B_0 - 0)/Z * x*1 + (A_1*B_1 - C_1)/Z * x*x
     //          = H_{0,0} + x*(H_{0,1} + H_{1,0}) + x²*H_{1,1}
     //
     // But wait - C_i is only subtracted when i == j (diagonal of the quadratic form).
     // Actually, the -C term is NOT quadratic. It's linear: -Σ_i w_i * C_i(x) / Z(x).
-    // 
+    //
     // So the full quotient is:
     //   H(x) = Σ_{i,j} w_i*w_j * A_i*B_j/Z - Σ_i w_i * C_i/Z
     //        = Σ_{i,j} w_i*w_j * A_i*B_j/Z - Σ_i w_i * C_i/Z
@@ -514,61 +609,61 @@ fn compute_q_const_algebraic<E: Pairing>(
     // At x=0: w_0=1, w_1=0, so gap(0) = A_0*B_0/Z - C_0/Z
     // At x=1: w_0=1, w_1=1, so gap(1) = (A_0+A_1)*(B_0+B_1)/Z - (C_0+C_1)/Z
     //                                 = A_0*B_0/Z + A_0*B_1/Z + A_1*B_0/Z + A_1*B_1/Z - C_0/Z - C_1/Z
-    
+
     // Compute A*B/Z contribution for pub×pub pairs
     let mut h_ab_pub_pub: HashMap<(usize, usize), E::G1> = HashMap::new();
-    
+
     for i in 0..num_pub {
         for j in 0..num_pub {
             let rows_u = &col_a[i];
             let rows_v = &col_b[j];
-            
+
             if rows_u.is_empty() || rows_v.is_empty() {
                 continue;
             }
-            
+
             let mut acc = E::G1::zero();
-            
+
             for &(k, val_u) in rows_u {
                 for &(m, val_v) in rows_v {
                     if k == m {
                         continue; // Skip diagonal (handled by L-query)
                     }
-                    
+
                     let wk = domain_elements[k];
                     let wm = domain_elements[m];
                     let denom = n_scalar * (wk - wm);
                     let inv_denom = denom.inverse().expect("denom non-zero for k != m");
-                    
+
                     let common = val_u * val_v * inv_denom;
-                    
+
                     acc += lagrange_srs[k].into_group() * (common * wm);
                     acc -= lagrange_srs[m].into_group() * (common * wk);
                 }
             }
-            
+
             if !acc.is_zero() {
                 h_ab_pub_pub.insert((i, j), acc);
             }
         }
     }
-    
+
     // Compute -C/Z contribution for public variables
     // This is linear, not quadratic, so it contributes to gap(x) as:
     //   -C_0/Z * 1 - C_1/Z * x
     let mut h_c_pub: Vec<E::G1> = vec![E::G1::zero(); num_pub];
-    
+
     for i in 0..num_pub {
         let rows_c = &col_c[i];
         if rows_c.is_empty() {
             continue;
         }
-        
+
         // C_i(x) / Z(x) contribution
         // This is tricky because C/Z is not in the H-query directly.
         // Actually, the -C term is absorbed into the L-query for witness variables,
         // but for public variables, it's part of the IC (input commitment).
-        // 
+        //
         // Wait - the IC handles the public input contribution to the verification equation,
         // not the quotient polynomial. Let me re-think this.
         //
@@ -593,7 +688,7 @@ fn compute_q_const_algebraic<E: Pairing>(
         //
         // Actually, looking at the standard prover code, the H polynomial is computed as:
         //   h = IFFT(FFT(a) * FFT(b) - FFT(c)) / Z
-        // 
+        //
         // This is done in evaluation form, not coefficient form. The -c is subtracted
         // before dividing by Z.
         //
@@ -624,19 +719,19 @@ fn compute_q_const_algebraic<E: Pairing>(
         // Wait, that can't be right. The L-query handles the -C term for witness variables.
         // Let me re-check the Groth16 prover...
     }
-    
+
     // For now, just use the A*B/Z contribution (ignoring -C)
     // This is what the current code does, and we know it doesn't match the gap.
     // The mismatch is likely due to the -C term.
-    
+
     // Build q_const points from A*B/Z only
     let mut q_points = vec![E::G1Affine::zero(); 2];
-    
+
     // q_const[0] = H_{0,0} (A*B/Z part only)
     if let Some(h00) = h_ab_pub_pub.get(&(0, 0)) {
         q_points[0] = h00.into_affine();
     }
-    
+
     // q_const[1] = H_{0,1} + H_{1,0} (A*B/Z part only)
     let mut sum = E::G1::zero();
     if let Some(h01) = h_ab_pub_pub.get(&(0, 1)) {
@@ -646,18 +741,29 @@ fn compute_q_const_algebraic<E: Pairing>(
         sum += h10;
     }
     q_points[1] = sum.into_affine();
-    
-    println!("[q_const ALGEBRAIC] Computed {} pub×pub H-bases (A*B/Z only, missing -C/Z)", h_ab_pub_pub.len());
-    
+
+    println!(
+        "[q_const ALGEBRAIC] Computed {} pub×pub H-bases (A*B/Z only, missing -C/Z)",
+        h_ab_pub_pub.len()
+    );
+
     // Debug: show which pub×pub pairs have non-zero H-bases
     for ((i, j), h) in &h_ab_pub_pub {
         println!("  H_{{{},{}}} (A*B/Z) = {:?}", i, j, h.into_affine());
     }
-    
+
     // Debug: show column 0 and 1 appearances in A and B
-    println!("  col_a[0] has {} entries, col_b[0] has {} entries", col_a[0].len(), col_b[0].len());
-    println!("  col_a[1] has {} entries, col_b[1] has {} entries", col_a[1].len(), col_b[1].len());
-    
+    println!(
+        "  col_a[0] has {} entries, col_b[0] has {} entries",
+        col_a[0].len(),
+        col_b[0].len()
+    );
+    println!(
+        "  col_a[1] has {} entries, col_b[1] has {} entries",
+        col_a[1].len(),
+        col_b[1].len()
+    );
+
     q_points
 }
 
@@ -672,25 +778,37 @@ fn compute_q_const_statement_dependent<E: Pairing>(
 
     // Probe at x = 0 with statement-dependent coords
     let circuit_0 = ProofPointSimCircuit::with_statement_dependent_coords(
-        E::ScalarField::zero(), num_bits, num_proof_coords
+        E::ScalarField::zero(),
+        num_bits,
+        num_proof_coords,
     );
     let proof_std_0 =
         Groth16::<E>::create_proof_with_reduction_no_zk(circuit_0.clone(), pk).expect("proof 0");
-    let (proof_lean_0, _) =
-        prove_lean_with_randomizers(lean_pk, circuit_0, E::ScalarField::zero(), E::ScalarField::zero())
-            .expect("lean 0");
+    let (proof_lean_0, _) = prove_lean_with_randomizers(
+        lean_pk,
+        circuit_0,
+        E::ScalarField::zero(),
+        E::ScalarField::zero(),
+    )
+    .expect("lean 0");
     let gap_0 = proof_std_0.c.into_group() - proof_lean_0.c.into_group();
     q_points[0] = gap_0.into_affine();
 
     // Probe at x = 1 with statement-dependent coords
     let circuit_1 = ProofPointSimCircuit::with_statement_dependent_coords(
-        E::ScalarField::one(), num_bits, num_proof_coords
+        E::ScalarField::one(),
+        num_bits,
+        num_proof_coords,
     );
     let proof_std_1 =
         Groth16::<E>::create_proof_with_reduction_no_zk(circuit_1.clone(), pk).expect("proof 1");
-    let (proof_lean_1, _) =
-        prove_lean_with_randomizers(lean_pk, circuit_1, E::ScalarField::zero(), E::ScalarField::zero())
-            .expect("lean 1");
+    let (proof_lean_1, _) = prove_lean_with_randomizers(
+        lean_pk,
+        circuit_1,
+        E::ScalarField::zero(),
+        E::ScalarField::zero(),
+    )
+    .expect("lean 1");
     let gap_1 = proof_std_1.c.into_group() - proof_lean_1.c.into_group();
     q_points[1] = (gap_1 - gap_0).into_affine();
 
@@ -719,9 +837,13 @@ fn compute_q_const_with_coords<E: Pairing>(
     let circuit_0 = make_circuit(E::ScalarField::zero());
     let proof_std_0 =
         Groth16::<E>::create_proof_with_reduction_no_zk(circuit_0.clone(), pk).expect("proof 0");
-    let (proof_lean_0, _) =
-        prove_lean_with_randomizers(lean_pk, circuit_0, E::ScalarField::zero(), E::ScalarField::zero())
-            .expect("lean 0");
+    let (proof_lean_0, _) = prove_lean_with_randomizers(
+        lean_pk,
+        circuit_0,
+        E::ScalarField::zero(),
+        E::ScalarField::zero(),
+    )
+    .expect("lean 0");
     let gap_0 = proof_std_0.c.into_group() - proof_lean_0.c.into_group();
     q_points[0] = gap_0.into_affine();
 
@@ -729,9 +851,13 @@ fn compute_q_const_with_coords<E: Pairing>(
     let circuit_1 = make_circuit(E::ScalarField::one());
     let proof_std_1 =
         Groth16::<E>::create_proof_with_reduction_no_zk(circuit_1.clone(), pk).expect("proof 1");
-    let (proof_lean_1, _) =
-        prove_lean_with_randomizers(lean_pk, circuit_1, E::ScalarField::zero(), E::ScalarField::zero())
-            .expect("lean 1");
+    let (proof_lean_1, _) = prove_lean_with_randomizers(
+        lean_pk,
+        circuit_1,
+        E::ScalarField::zero(),
+        E::ScalarField::zero(),
+    )
+    .expect("lean 1");
     let gap_1 = proof_std_1.c.into_group() - proof_lean_1.c.into_group();
     q_points[1] = (gap_1 - gap_0).into_affine();
 
@@ -740,7 +866,11 @@ fn compute_q_const_with_coords<E: Pairing>(
 
 // Helper functions for the tests
 
-fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynthesizer<E::ScalarField>>(
+fn build_lean_pk_with_witness_bases<
+    E: Pairing,
+    F: Fn() -> C,
+    C: ConstraintSynthesizer<E::ScalarField>,
+>(
     pk: &ark_groth16::ProvingKey<E>,
     circuit_fn: F,
 ) -> LeanProvingKey<E> {
@@ -750,7 +880,9 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
 
     // Synthesize to get matrices
     let cs = ConstraintSystem::<E::ScalarField>::new_ref();
-    circuit_fn().generate_constraints(cs.clone()).expect("synthesis");
+    circuit_fn()
+        .generate_constraints(cs.clone())
+        .expect("synthesis");
     cs.finalize();
     let matrices = cs.to_matrices().expect("matrices");
 
@@ -758,13 +890,14 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
     let num_constraints = cs.num_constraints();
     let num_inputs = cs.num_instance_variables();
     let qap_domain_size = num_constraints + num_inputs;
-    
-    let domain = GeneralEvaluationDomain::<E::ScalarField>::new(qap_domain_size)
-        .expect("domain");
+
+    let domain = GeneralEvaluationDomain::<E::ScalarField>::new(qap_domain_size).expect("domain");
     let domain_size = domain.size();
-    
-    println!("[build_lean_pk] QAP domain: {} constraints + {} inputs = {} (padded to {})",
-             num_constraints, num_inputs, qap_domain_size, domain_size);
+
+    println!(
+        "[build_lean_pk] QAP domain: {} constraints + {} inputs = {} (padded to {})",
+        num_constraints, num_inputs, qap_domain_size, domain_size
+    );
 
     let num_vars = cs.num_instance_variables() + cs.num_witness_variables();
     let mut col_a: Vec<Vec<(usize, E::ScalarField)>> = vec![Vec::new(); num_vars];
@@ -784,7 +917,7 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
             }
         }
     }
-    
+
     // Add synthetic "copy constraint" rows for public inputs
     for i in 0..num_inputs {
         let row = num_constraints + i;
@@ -842,7 +975,7 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
     let t0 = (n_field - E::ScalarField::one()) * (n_field + n_field).inverse().unwrap();
     let mut u = vec![E::ScalarField::zero(); domain_size];
     u[0] = t0;
-    
+
     // Batch invert for other u[j]
     let mut denoms = Vec::with_capacity(domain_size - 1);
     let mut indices = Vec::with_capacity(domain_size - 1);
@@ -856,30 +989,35 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
     for (i, &j) in indices.iter().enumerate() {
         u[j] = denoms[i];
     }
-    
+
     // Reverse u[1..] to compute correlation via convolution
     // We want sum_j L_j * u_{j-k} = sum_j L_j * u_{-(k-j)}
     // Convolution computes sum_j L_j * v_{k-j}. So we need v_x = u_{-x}.
     if domain_size > 1 {
         u[1..].reverse();
     }
-    
+
     // FFT(u)
     domain.fft_in_place(&mut u);
-    
+
     // FFT(L)
     let mut l_fft: Vec<_> = lagrange_srs.iter().map(|p| p.into_group()).collect();
     // Helper needed in test:
-    fn parallel_fft_g1<G: CurveGroup<ScalarField=F>, F: PrimeField>(a: &mut [G], d: &GeneralEvaluationDomain<F>) {
+    fn parallel_fft_g1<G: CurveGroup<ScalarField = F>, F: PrimeField>(
+        a: &mut [G],
+        d: &GeneralEvaluationDomain<F>,
+    ) {
         // Simple serial FFT for test if parallel not available easily, or duplicate logic
-         let n = a.len();
-         let log_n = n.trailing_zeros();
-         for k in 0..n {
+        let n = a.len();
+        let log_n = n.trailing_zeros();
+        for k in 0..n {
             let rk = k.reverse_bits() >> (usize::BITS - log_n);
-            if k < rk { a.swap(k, rk); }
-         }
-         let mut m = 1;
-         while m < n {
+            if k < rk {
+                a.swap(k, rk);
+            }
+        }
+        let mut m = 1;
+        while m < n {
             let omega_m = d.element(d.size() / (2 * m));
             for k in (0..n).step_by(2 * m) {
                 let mut w = F::one();
@@ -892,27 +1030,34 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
                 }
             }
             m *= 2;
-         }
+        }
     }
-    fn parallel_ifft_g1<G: CurveGroup<ScalarField=F>, F: PrimeField>(a: &mut [G], d: &GeneralEvaluationDomain<F>) {
+    fn parallel_ifft_g1<G: CurveGroup<ScalarField = F>, F: PrimeField>(
+        a: &mut [G],
+        d: &GeneralEvaluationDomain<F>,
+    ) {
         parallel_fft_g1(a, d);
-        if a.len() > 1 { a[1..].reverse(); }
+        if a.len() > 1 {
+            a[1..].reverse();
+        }
         let n_inv = d.size_as_field_element().inverse().unwrap();
-        for x in a.iter_mut() { *x *= n_inv; }
+        for x in a.iter_mut() {
+            *x *= n_inv;
+        }
     }
-    
+
     parallel_fft_g1(&mut l_fft, &domain);
     for (l, u_val) in l_fft.iter_mut().zip(u.iter()) {
         *l *= u_val;
     }
     parallel_ifft_g1(&mut l_fft, &domain);
     let q_vector: Vec<_> = l_fft.into_iter().map(|p| p.into_affine()).collect();
-    
+
     // 2. Add diagonal corrections to h_wit
     // Since h_wit is [(i,j, base)], we need to augment it.
     // For test simplicity, we just rebuild h_wit or patch it.
     // Let's rebuild the pair collection to include Q.
-    
+
     let num_pub = cs.num_instance_variables();
     let mut vars_a = HashSet::new();
     let mut vars_b = HashSet::new();
@@ -971,7 +1116,7 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
 
             let mut acc_u = vec![E::ScalarField::zero(); rows_u.len()];
             let mut acc_v = vec![E::ScalarField::zero(); rows_v.len()];
-            
+
             let mut diag_bases = Vec::new();
             let mut diag_scalars = Vec::new();
 
@@ -980,7 +1125,7 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
                 for (idx_v, &(m, val_v)) in rows_v.iter().enumerate() {
                     let inv = denominators[denom_idx];
                     denom_idx += 1;
-                    
+
                     let prod = val_u * val_v;
                     if k == m {
                         diag_bases.push(q_vector[k]);
@@ -1007,7 +1152,7 @@ fn build_lean_pk_with_witness_bases<E: Pairing, F: Fn() -> C, C: ConstraintSynth
                     scalars.push(acc_v[idx_v]);
                 }
             }
-            
+
             bases.extend(diag_bases);
             scalars.extend(diag_scalars);
 
@@ -1044,15 +1189,15 @@ fn test_lean_prover_end_to_end() {
 
     // 1. Get Inner Proof (Fixture)
     let fixture = get_fixture();
-    
+
     // Runtime statement - this would be a hash in production (e.g., Bitcoin UTXO)
-    let x_val = InnerScalar::<DefaultCycle>::from(10u64); 
+    let x_val = InnerScalar::<DefaultCycle>::from(10u64);
     let x_inner = vec![x_val];
 
     // PRODUCTION SIMULATION: Runtime proof can use any seed!
     // With algebraic q_const computation, setup doesn't depend on proof coords.
     const RUNTIME_SEED: u64 = 12345;
-    
+
     let circuit_inner = AddCircuit::with_public_input(x_val);
     let mut runtime_rng = ark_std::rand::rngs::StdRng::seed_from_u64(RUNTIME_SEED);
     let proof_inner = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut runtime_rng)
@@ -1062,17 +1207,16 @@ fn test_lean_prover_end_to_end() {
     let circuit_outer = OuterCircuit::<DefaultCycle>::new(
         (*fixture.vk_inner).clone(),
         x_inner.clone(),
-        proof_inner.clone()
+        proof_inner.clone(),
     );
 
-    // 3. Setup Outer PK
-    let (pk_outer, vk_outer) = Groth16::< <DefaultCycle as RecursionCycle>::OuterE >::circuit_specific_setup(
-        circuit_outer.clone(),
-        &mut rng
-    ).expect("outer setup failed");
+    // 3. Setup or load Outer PK/VK (cache on disk for deterministic reuse)
+    let (pk_outer, vk_outer) =
+        load_or_build_outer_recursive_crs_for_test(circuit_outer.clone())
+            .expect("outer setup failed");
 
     // 4. Convert to Lean PK
-    // 
+    //
     // q_const is computed from the gap between standard and lean proofs.
     // The gap is linear in x when the Q-vector fix is applied.
     // We use fixed coords (from statements 0 and 1) to compute q_const.
@@ -1081,42 +1225,45 @@ fn test_lean_prover_end_to_end() {
     let inner_proof_generator = move |statements: &[InnerScalar<DefaultCycle>]| {
         // Use a fixed seed for reproducibility during q_const computation
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(99999);
-        let statement = statements.get(0).copied().unwrap_or(InnerScalar::<DefaultCycle>::zero());
+        let statement = statements
+            .get(0)
+            .copied()
+            .unwrap_or(InnerScalar::<DefaultCycle>::zero());
         let circuit = AddCircuit::with_public_input(statement);
         Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng)
             .expect("inner proof generation failed")
     };
-    
+
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        build_pvugc_setup_from_pk_for::<DefaultCycle, _>(&pk_outer, &fixture.vk_inner, inner_proof_generator)
+        build_pvugc_setup_from_pk_for::<DefaultCycle, _>(
+            &pk_outer,
+            &fixture.vk_inner,
+            inner_proof_generator,
+        )
     }));
 
     if let Ok((_pvugc_vk, lean_pk)) = result {
         // 5. Prove using Lean Prover
-        let (proof_lean, _assignment) = prove_lean(
-            &lean_pk,
-            circuit_outer.clone(),
-            &mut rng
-        ).expect("lean proving failed");
+        let (proof_lean, _assignment) =
+            prove_lean(&lean_pk, circuit_outer.clone(), &mut rng).expect("lean proving failed");
 
         // 6. Verify
         let public_inputs_outer =
             arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner[0]);
         let inputs_outer = vec![public_inputs_outer];
 
+        let r_baked = compute_baked_target(&vk_outer, &_pvugc_vk, &inputs_outer)
+            .expect("failed to compute baked target");
 
-        let r_baked = compute_baked_target(
-            &vk_outer,
-            &_pvugc_vk,
-            &inputs_outer
-        ).expect("failed to compute baked target");
-        
         let lhs = <DefaultCycle as RecursionCycle>::OuterE::pairing(proof_lean.a, proof_lean.b);
         let pairing_c_delta =
             <DefaultCycle as RecursionCycle>::OuterE::pairing(proof_lean.c, vk_outer.delta_g2);
         let rhs = r_baked + pairing_c_delta;
         assert_eq!(lhs, rhs, "Lean Proof + Baked Target failed verification");
     } else {
-        assert!(false, "Baked Quotient setup panicked as expected for non-linear circuit.");
+        assert!(
+            false,
+            "Baked Quotient setup panicked as expected for non-linear circuit."
+        );
     }
 }

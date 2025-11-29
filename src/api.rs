@@ -156,7 +156,7 @@ impl OneSidedPvugc {
 
         // Use BAKED target computation
         let r_baked = compute_baked_target(vk, pvugc_vk, public_inputs)?;
-        
+
         // Early guard: R must not be identity (spec §6/§7)
         if crate::ct::gt_eq_ct::<E>(&r_baked, &PairingOutput::<E>(One::one())) {
             return Err(Error::Crypto("R_is_identity".to_string()));
@@ -453,7 +453,7 @@ impl OneSidedPvugc {
             Ok(r) => r,
             Err(_) => return false,
         };
-        
+
         // Guard: R must not be identity
         if crate::ct::gt_eq_ct::<E>(&r_baked, &PairingOutput::<E>(One::one())) {
             return false;

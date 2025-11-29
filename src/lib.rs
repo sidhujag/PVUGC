@@ -28,8 +28,8 @@ pub mod io;
 pub mod poce;
 pub mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
-pub mod secp256k1;
-pub mod prover_lean; // Lean Prover module
+pub mod prover_lean;
+pub mod secp256k1; // Lean Prover module
 
 // Recursive demonstration modules (not for production use)
 // These modules demonstrate how PVUGC could work with proof-of-proof recursion
@@ -58,8 +58,10 @@ pub use dlrep::{
     DlrepPerColumnTies,
 };
 pub use poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
-pub use ppe::{build_one_sided_ppe, compute_groth16_target, compute_baked_target, extract_y_bases, PvugcVk};
-pub use prover_lean::{LeanProvingKey, prove_lean};
+pub use ppe::{
+    build_one_sided_ppe, compute_baked_target, compute_groth16_target, extract_y_bases, PvugcVk,
+};
+pub use prover_lean::{prove_lean, LeanProvingKey};
 
 // Recursive demonstration types (not for production use)
 // These are exposed for testing and educational purposes only.

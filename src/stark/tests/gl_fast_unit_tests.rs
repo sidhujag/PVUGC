@@ -1,9 +1,9 @@
 //! Unit tests for fast GL operations
 //! Test each operation in isolation with known values
 
-use crate::stark::StarkInnerFr as InnerFr;
 use crate::stark::gadgets::gl_fast::{self, GlVar};
 use crate::stark::gadgets::gl_range::gl_alloc_u64;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::R1CSVar;
 use ark_relations::r1cs::ConstraintSystem;
 

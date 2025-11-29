@@ -1,13 +1,12 @@
+use crate::error::{Error, Result};
 /// PVUGC Verifying Key wrapper exposed at deposit time
-
 use ark_ec::pairing::Pairing;
+use ark_ec::pairing::PairingOutput;
 use ark_ec::AffineRepr;
+use ark_ff::One; // For is_one()
 use ark_ff::PrimeField;
 use ark_groth16::VerifyingKey as Groth16VK;
-use ark_ec::pairing::PairingOutput;
 use ark_std::Zero; // For is_zero()
-use ark_ff::One; // For is_one()
-use crate::error::{Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct PvugcVk<E: Pairing> {
@@ -101,10 +100,12 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
     if pvugc_vk.b_g2_query.iter().any(|g| !is_good(g)) {
         return false;
     }
-    
+
     // Validate q_const_points
     let is_good_g1 = |g: &E::G1Affine| {
-        if g.is_zero() { return true; }
+        if g.is_zero() {
+            return true;
+        }
         g.mul_bigint(order).is_zero()
     };
     if pvugc_vk.q_const_points.iter().any(|g| !is_good_g1(g)) {
@@ -119,14 +120,14 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
 /// - G2: beta_g2, gamma_g2, delta_g2 must be in the prime-order subgroup
 pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
     let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
-    
+
     let is_good_g1 = |g: &E::G1Affine| {
         if g.is_zero() {
             return true;
         }
         g.mul_bigint(order).is_zero()
     };
-    
+
     let is_good_g2 = |g: &E::G2Affine| {
         if g.is_zero() {
             return true;
@@ -149,7 +150,7 @@ pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
     if vk.gamma_abc_g1.iter().any(|g| !is_good_g1(g)) {
         return false;
     }
-    
+
     true
 }
 
@@ -166,7 +167,6 @@ pub fn compute_groth16_target<E: Pairing>(
     vk: &Groth16VK<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
-    
     let ic_bases = &vk.gamma_abc_g1;
 
     let expected_inputs = ic_bases.len().saturating_sub(1);
@@ -210,26 +210,26 @@ pub fn compute_baked_target<E: Pairing>(
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
     use ark_ec::CurveGroup;
-    
+
     // 1. Compute raw target
     let r_raw = compute_groth16_target(vk, public_inputs)?;
-    
+
     // 2. Compute baked quotient term Q(x)
     if pvugc_vk.q_const_points.len() != public_inputs.len() + 1 {
         return Err(Error::MismatchedSizes); // Should define a better error
     }
-    
+
     let mut q_sum = pvugc_vk.q_const_points[0].into_group();
     for (i, x_i) in public_inputs.iter().enumerate() {
         q_sum += pvugc_vk.q_const_points[i + 1] * x_i;
     }
-    
+
     // 3. Add T_const = e(Q(x), delta)
     // Standard: AB - (C_wit + Q)delta = R_raw
     // AB - C_wit delta = R_raw + Q delta
     // So R_baked = R_raw + T_const
     let t_const = E::pairing(q_sum.into_affine(), pvugc_vk.delta_g2);
-    
+
     Ok(r_raw + t_const)
 }
 

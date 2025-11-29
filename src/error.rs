@@ -16,7 +16,9 @@ pub enum Error {
     Crypto(String),
     #[error("public input length mismatch: expected {expected}, got {actual}")]
     PublicInputLength { expected: usize, actual: usize },
-    #[error("instance commitment IC(x) is zero (security-critical: enables partition of unity attack)")]
+    #[error(
+        "instance commitment IC(x) is zero (security-critical: enables partition of unity attack)"
+    )]
     ZeroInstanceCommitment,
     #[error("target R is degenerate (zero or one) - invalid statement")]
     DegenerateTarget,
