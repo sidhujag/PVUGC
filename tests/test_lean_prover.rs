@@ -1210,10 +1210,13 @@ fn test_lean_prover_end_to_end() {
         proof_inner.clone(),
     );
 
-    // 3. Setup or load Outer PK/VK (cache on disk for deterministic reuse)
+    // 3. Setup Outer PK
     let (pk_outer, vk_outer) =
-        load_or_build_outer_recursive_crs_for_test(circuit_outer.clone())
-            .expect("outer setup failed");
+        Groth16::<<DefaultCycle as RecursionCycle>::OuterE>::circuit_specific_setup(
+            circuit_outer.clone(),
+            &mut rng,
+        )
+        .expect("outer setup failed");
 
     // 4. Convert to Lean PK
     //
