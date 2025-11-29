@@ -17,6 +17,7 @@ use ark_groth16::{Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -51,9 +52,17 @@ where
         n_inner_inputs
     );
 
-    // Sanitize cycle name for filename
-    let safe_name = C::name().replace("/", "_").replace(" ", "_");
-    let cache_path = format!("pvugc_setup_v2_{}.bin", safe_name);
+    // Sanitize cycle name for filename and derive a hash of the proving key so caches
+    // from different PKs never collide.
+    let safe_name = C::name().replace('/', "_").replace(' ', "_");
+    let mut vk_bytes = Vec::new();
+    pk_outer
+        .vk
+        .serialize_uncompressed(&mut vk_bytes)
+        .expect("failed to serialize vk for hashing");
+    let hash = Sha256::digest(&vk_bytes);
+    let hash_prefix: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+    let cache_path = format!("pvugc_setup_{}_{}.bin", safe_name, hash_prefix);
 
     let (lean_pk, q_points) = if std::path::Path::new(&cache_path).exists() {
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
