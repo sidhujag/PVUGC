@@ -25,6 +25,7 @@ pub mod decap;
 pub mod dlrep;
 pub mod error;
 pub mod io;
+pub mod key_consistency;
 pub mod poce;
 pub mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
