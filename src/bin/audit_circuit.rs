@@ -161,6 +161,37 @@ fn run_audit(subject: &dyn AuditSubject) {
 
     let extractor = MatrixExtractor::new(cs.clone());
 
+    // 0. Check public column structure (Lean CRS diagnostic)
+    let mut public_inputs_a_zero = true;  // Columns 1..num_pub (actual public inputs)
+    let constant_one_has_a = !extractor.a_cols[0].is_empty();  // Column 0 (constant "1")
+    
+    for i in 1..num_pub {  // Skip column 0 (constant "1" is expected to have A entries)
+        let a_count = extractor.a_cols[i].len();
+        let b_count = extractor.b_cols[i].len();
+        let c_count = extractor.c_cols[i].len();
+        
+        println!("  [Column {}] A={}, B={}, C={}", i, a_count, b_count, c_count);
+        
+        if a_count > 0 {
+            public_inputs_a_zero = false;
+        }
+        
+        // Check if IC_i would be zero (security issue!)
+        if b_count == 0 && c_count == 0 {
+            println!("  [SECURITY] Column {} has v_i=0 AND w_i=0 → IC_i=0 → PUBLIC INPUT NOT VERIFIED!", i);
+        }
+    }
+    
+    if constant_one_has_a {
+        println!("  [Column 0] Constant '1' has {} A entries (expected, baked into α)", extractor.a_cols[0].len());
+    }
+    
+    if public_inputs_a_zero {
+        println!("[PASS] Public input columns have u_i = 0 → Lean CRS compatible");
+    } else {
+        println!("[FAIL] Public input u_i ≠ 0 → Cannot use witness-only a_query");
+    }
+
     // 1. Linearity Check
     let mut pub_polys = Vec::new();
     for i in 0..num_pub {
