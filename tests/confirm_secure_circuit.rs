@@ -1,11 +1,12 @@
 
+use ark_bls12_381::{Bls12_381, Fr};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_r1cs_std::fields::FieldVar; // Import FieldVar trait
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_r1cs_std::fields::FieldVar;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError, ConstraintSystem};
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
@@ -14,6 +15,7 @@ use arkworks_groth16::outer_compressed::{
     DefaultCycle, InnerScalar, InnerProof, InnerVk, RecursionCycle,
 };
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples;
+use ark_poly::{GeneralEvaluationDomain, EvaluationDomain};
 
 type Cycle = DefaultCycle;
 type E = <Cycle as RecursionCycle>::OuterE;
@@ -47,14 +49,10 @@ impl ConstraintSynthesizer<Fr> for SecureCircuit {
         
         // Enforce: wit_w * 1 = pub_x
         // This puts wit_w in A, 1 in B, pub_x in C.
-        // Public input x ends up ONLY in C (and B for '1' term maybe), but NOT A.
         let one = FpVar::constant(Fr::from(1));
-        
-        // This enforces a * b = c
-        // We want a = wit_w, b = 1, c = pub_x
         wit_w.mul_equals(&one, &pub_x)?;
         
-        // Standard PVUGC constraint
+        // Standard PVUGC constraint (which we just fixed to put public inputs in B, not A)
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
@@ -75,17 +73,69 @@ fn confirm_attack_fails_on_secure_circuit() {
     let mut rng = StdRng::seed_from_u64(0);
 
     // 1. Setup Secure Circuit
-    // w * 1 = x -> 10 * 1 = 10
     let circuit = SecureCircuit {
         public_x: Some(Fr::from(10u64)),
         witness_w: Some(Fr::from(10u64)),
     };
     
+    // -------------------------------------------------------------------------
+    // MATRIX AUDIT (In-Test)
+    // -------------------------------------------------------------------------
+    println!("\n=== Starting Matrix Audit for SecureCircuit ===");
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    circuit.clone().generate_constraints(cs.clone()).unwrap();
+    cs.finalize();
+    
+    let matrices = cs.to_matrices().expect("matrix extraction");
+    let num_constraints = cs.num_constraints();
+    let num_pub = cs.num_instance_variables(); // 0=One, 1=public_x
+    let num_wit = cs.num_witness_variables();
+    
+    println!("Constraints: {}", num_constraints);
+    println!("Public Vars: {} (0=One, 1..=Public)", num_pub);
+    
+    // Extract column counts
+    let mut a_cols = vec![0; num_pub + num_wit];
+    let mut b_cols = vec![0; num_pub + num_wit];
+    let mut c_cols = vec![0; num_pub + num_wit];
+    
+    for row in matrices.a.iter() {
+        for &(_, col) in row { a_cols[col] += 1; }
+    }
+    for row in matrices.b.iter() {
+        for &(_, col) in row { b_cols[col] += 1; }
+    }
+    for row in matrices.c.iter() {
+        for &(_, col) in row { c_cols[col] += 1; }
+    }
+    
+    // Check Public Input (Variable 1)
+    let pub_idx = 1;
+    println!("\n[Column {} (Public Input)]", pub_idx);
+    println!("  A-count: {}", a_cols[pub_idx]);
+    println!("  B-count: {}", b_cols[pub_idx]);
+    println!("  C-count: {}", c_cols[pub_idx]);
+    
+    // VERIFICATION 1: Public Input MUST NOT be in A
+    assert_eq!(a_cols[pub_idx], 0, "SECURITY FAIL: Public Input found in A-matrix!");
+    println!("[PASS] Public Input is NOT in A-matrix.");
+    
+    // VERIFICATION 2: Public Input MUST be in B (due to enforce_public_inputs_are_outputs fix) or C
+    // Our fix puts it in B. SecureCircuit puts it in C. So it should be in both or one.
+    assert!(b_cols[pub_idx] > 0 || c_cols[pub_idx] > 0, "Public Input must be used in B or C");
+    println!("[PASS] Public Input is used in B/C.");
+
+    println!("=== Matrix Audit Complete ===\n");
+
+    // -------------------------------------------------------------------------
+    // ATTACK SIMULATION
+    // -------------------------------------------------------------------------
+    
     // Standard Groth16 Setup
     let (pk_groth, vk_groth) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let public_inputs = vec![Fr::from(10u64)];
 
-    // 2. Generate PVUGC Artifacts
+    // Generate PVUGC Artifacts
     let vk_inner = InnerVk::<Cycle> {
         alpha_g1: Default::default(),
         beta_g2: Default::default(),
@@ -94,7 +144,7 @@ fn confirm_attack_fails_on_secure_circuit() {
         gamma_abc_g1: vec![Default::default(); 2],
     };
     
-    let n_inputs = 1; // 1 public input
+    let n_inputs = 1; 
     let mut samples = Vec::new();
     for _ in 0..=n_inputs {
         samples.push(vec![InnerScalar::<Cycle>::from(0); 1]);
@@ -107,45 +157,24 @@ fn confirm_attack_fails_on_secure_circuit() {
         samples
     );
 
-    // 3. Deposit/Arming Phase
+    // Deposit/Arming Phase
     let rho = Fr::rand(&mut rng);
     let (_, col_arms, _, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk_groth, &public_inputs, &rho).expect("setup_and_arm");
 
-    // -------------------------------------------------------------------------
-    // ADVERSARY ATTACK ATTEMPT
-    // -------------------------------------------------------------------------
-    
-    println!("Adversary performing attack on SecureCircuit...");
-
-    // Attack Step 1: Attempt to reconstruct A_pub using `lean_pk.a_query`
-    // Since the circuit puts public inputs in C, the A-basis for the public input should be ZERO.
-    // A_pub = alpha + A_0 + x * A_x
-    // If A_x is zero, then A_pub = alpha + A_0.
+    // Attack Attempt: Pair constructed A_pub with armed B_pub
+    // A_pub = alpha + A_0 + x*A_x. Since A_x is zero (verified above), A_pub = alpha + A_0.
     
     let mut a_pub_acc = lean_pk.vk.alpha_g1.into_group();
     a_pub_acc += lean_pk.a_query[0].into_group(); // Constant term
     for (i, val) in public_inputs.iter().enumerate() {
-        // We use the same formula as before, blindly trusting a_query
         a_pub_acc += lean_pk.a_query[1 + i].into_group() * val;
     }
     let a_pub = a_pub_acc.into_affine();
 
-    // Attack Step 2: Get Armed B_pub from `col_arms`
     let d_pub = col_arms.y_cols_rho[0];
-
-    // Attack Step 3: Pair them
     let k_forged = E::pairing(a_pub, d_pub);
 
-    // -------------------------------------------------------------------------
-    // VERIFICATION: Attack MUST Fail
-    // -------------------------------------------------------------------------
-    
-    // The True Target K involves the witness term (A_wit * B_pub).
-    // The adversary only computed (A_pub * B_pub)^rho.
-    // If A_pub != A_full (which it isn't, because A_wit exists), these should differ.
-    
-    assert_ne!(k_forged, k_expected, "SAFE: Adversary FAILED to recover K (Attack thwarted by Secure Circuit!)");
-    
-    println!("SUCCESS: The 'No Public A' defense successfully blocked the attack.");
+    assert_ne!(k_forged, k_expected, "SAFE: Adversary FAILED to recover K");
+    println!("SUCCESS: Attack failed as expected.");
 }
