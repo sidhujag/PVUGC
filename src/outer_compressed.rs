@@ -173,7 +173,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &vk_var, &input_var, &proof_var,
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;*/
-
+        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

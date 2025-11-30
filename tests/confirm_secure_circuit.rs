@@ -104,7 +104,8 @@ fn confirm_attack_fails_on_secure_circuit() {
     assert_eq!(a_cols[pub_idx], 0, "SECURITY FAIL: Public Input found in A-matrix!");
     println!("[PASS] Public Input is NOT in A-matrix.");
     
-    assert!(b_cols[pub_idx] > 0 || c_cols[pub_idx] > 0, "Public Input must be used in B or C");
+    // VERIFICATION 2: Public Input MUST be in B (and C)
+    assert!(b_cols[pub_idx] > 0, "Public Input MUST be used in B-matrix for statement dependency!");
     println!("[PASS] Public Input is used in B/C.");
 
     println!("=== Matrix Audit Complete ===\n");
