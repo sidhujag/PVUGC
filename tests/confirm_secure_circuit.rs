@@ -1,5 +1,5 @@
 
-use ark_bls12_381::{Bls12_381, Fr};
+use ark_bls12_381::{Bls12_381};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
@@ -19,7 +19,7 @@ use ark_poly::{GeneralEvaluationDomain, EvaluationDomain};
 
 type Cycle = DefaultCycle;
 type E = <Cycle as RecursionCycle>::OuterE;
-type Fr = <E as Pairing>::ScalarField;
+type OuterFr = <E as Pairing>::ScalarField;
 
 // Use explicit types for the inner curve to avoid ambiguity
 type InnerE = <Cycle as RecursionCycle>::InnerE;
@@ -31,12 +31,12 @@ type InnerG2Affine = <InnerE as Pairing>::G2Affine;
 /// A = witness_w, B = 1, C = public_x
 #[derive(Clone)]
 struct SecureCircuit {
-    pub public_x: Option<Fr>,
-    pub witness_w: Option<Fr>,
+    pub public_x: Option<OuterFr>,
+    pub witness_w: Option<OuterFr>,
 }
 
-impl ConstraintSynthesizer<Fr> for SecureCircuit {
-    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+impl ConstraintSynthesizer<OuterFr> for SecureCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<OuterFr>) -> Result<(), SynthesisError> {
         // Allocate public input (ensure it's not put in A by default logic)
         // We enforce it via a specific constraint structure.
         let pub_x = FpVar::new_input(cs.clone(), || {
@@ -49,7 +49,7 @@ impl ConstraintSynthesizer<Fr> for SecureCircuit {
         
         // Enforce: wit_w * 1 = pub_x
         // This puts wit_w in A, 1 in B, pub_x in C.
-        let one = FpVar::constant(Fr::from(1));
+        let one = FpVar::constant(OuterFr::from(1));
         wit_w.mul_equals(&one, &pub_x)?;
         
         // Standard PVUGC constraint (which we just fixed to put public inputs in B, not A)
@@ -74,15 +74,15 @@ fn confirm_attack_fails_on_secure_circuit() {
 
     // 1. Setup Secure Circuit
     let circuit = SecureCircuit {
-        public_x: Some(Fr::from(10u64)),
-        witness_w: Some(Fr::from(10u64)),
+        public_x: Some(OuterFr::from(10u64)),
+        witness_w: Some(OuterFr::from(10u64)),
     };
     
     // -------------------------------------------------------------------------
     // MATRIX AUDIT (In-Test)
     // -------------------------------------------------------------------------
     println!("\n=== Starting Matrix Audit for SecureCircuit ===");
-    let cs = ConstraintSystem::<Fr>::new_ref();
+    let cs = ConstraintSystem::<OuterFr>::new_ref();
     circuit.clone().generate_constraints(cs.clone()).unwrap();
     cs.finalize();
     
@@ -133,7 +133,7 @@ fn confirm_attack_fails_on_secure_circuit() {
     
     // Standard Groth16 Setup
     let (pk_groth, vk_groth) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let public_inputs = vec![Fr::from(10u64)];
+    let public_inputs = vec![OuterFr::from(10u64)];
 
     // Generate PVUGC Artifacts
     let vk_inner = InnerVk::<Cycle> {
@@ -158,7 +158,7 @@ fn confirm_attack_fails_on_secure_circuit() {
     );
 
     // Deposit/Arming Phase
-    let rho = Fr::rand(&mut rng);
+    let rho = OuterFr::rand(&mut rng);
     let (_, col_arms, _, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk_groth, &public_inputs, &rho).expect("setup_and_arm");
 
