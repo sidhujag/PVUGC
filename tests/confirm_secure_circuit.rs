@@ -55,7 +55,7 @@ fn confirm_attack_fails_on_secure_circuit() {
     
     // We use the actual OuterCircuit from outer_compressed.rs
     // This circuit uses Groth16VerifierGadget which handles public inputs correctly (in C, not A)
-    let circuit = OuterCircuit::new(
+    let circuit = OuterCircuit::<Cycle>::new(
         vk_inner.clone(),
         x_inner.clone(),
         inner_proof
