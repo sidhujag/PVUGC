@@ -5,7 +5,7 @@
 
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
 use ark_ff::{Field, One, PrimeField};
-use ark_groth16::Groth16;
+use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
 use ark_std::{rand::SeedableRng, Zero};
@@ -202,7 +202,7 @@ fn test_lean_prover_proof_point_simulation() {
     let setup_circuit =
         ProofPointSimCircuit::with_dummy_coords(OuterFr::from(0u64), NUM_BITS, NUM_PROOF_COORDS);
     let (pk_outer, vk_outer) =
-        Groth16::<OuterE>::circuit_specific_setup(setup_circuit.clone(), &mut _rng)
+        Groth16::<OuterE, PvugcReduction>::circuit_specific_setup(setup_circuit.clone(), &mut _rng)
             .expect("setup failed");
 
     println!("=== ProofPointSim Test ===");
@@ -232,7 +232,10 @@ fn test_lean_prover_proof_point_simulation() {
         NUM_PROOF_COORDS,
     );
     let proof_std_0_dep =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_0_dep.clone(), &pk_outer)
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            circuit_0_dep.clone(),
+            &pk_outer,
+        )
             .unwrap();
     let (proof_lean_0_dep, _) =
         prove_lean_with_randomizers(&lean_pk, circuit_0_dep, OuterFr::zero(), OuterFr::zero())
@@ -246,7 +249,10 @@ fn test_lean_prover_proof_point_simulation() {
         NUM_PROOF_COORDS,
     );
     let proof_std_1_dep =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_1_dep.clone(), &pk_outer)
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            circuit_1_dep.clone(),
+            &pk_outer,
+        )
             .unwrap();
     let (proof_lean_1_dep, _) =
         prove_lean_with_randomizers(&lean_pk, circuit_1_dep, OuterFr::zero(), OuterFr::zero())
@@ -257,7 +263,10 @@ fn test_lean_prover_proof_point_simulation() {
     let circuit_2_dep =
         ProofPointSimCircuit::with_statement_dependent_coords(x_test_2, NUM_BITS, NUM_PROOF_COORDS);
     let proof_std_2_dep =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(circuit_2_dep.clone(), &pk_outer)
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            circuit_2_dep.clone(),
+            &pk_outer,
+        )
             .unwrap();
     let (proof_lean_2_dep, _) =
         prove_lean_with_randomizers(&lean_pk, circuit_2_dep, OuterFr::zero(), OuterFr::zero())
@@ -334,7 +343,8 @@ fn test_lean_prover_proof_point_simulation() {
         num_bits: 16,
     };
     let (pk_linear, _vk_linear) =
-        Groth16::<OuterE>::circuit_specific_setup(linear_circuit, &mut _rng).expect("linear setup");
+        Groth16::<OuterE, PvugcReduction>::circuit_specific_setup(linear_circuit, &mut _rng)
+            .expect("linear setup");
 
     let lean_pk_linear = build_lean_pk_with_witness_bases(&pk_linear, || LinearOnlyCircuit {
         x: OuterFr::zero(),
@@ -351,7 +361,11 @@ fn test_lean_prover_proof_point_simulation() {
         num_bits: 16,
     };
     let proof_std_lin_0 =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_0.clone(), &pk_linear).unwrap();
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            linear_0.clone(),
+            &pk_linear,
+        )
+        .unwrap();
     let (proof_lean_lin_0, _) =
         prove_lean_with_randomizers(&lean_pk_linear, linear_0, OuterFr::zero(), OuterFr::zero())
             .unwrap();
@@ -363,7 +377,11 @@ fn test_lean_prover_proof_point_simulation() {
         num_bits: 16,
     };
     let proof_std_lin_1 =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_1.clone(), &pk_linear).unwrap();
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            linear_1.clone(),
+            &pk_linear,
+        )
+        .unwrap();
     let (proof_lean_lin_1, _) =
         prove_lean_with_randomizers(&lean_pk_linear, linear_1, OuterFr::zero(), OuterFr::zero())
             .unwrap();
@@ -375,7 +393,11 @@ fn test_lean_prover_proof_point_simulation() {
         num_bits: 16,
     };
     let proof_std_lin_2 =
-        Groth16::<OuterE>::create_proof_with_reduction_no_zk(linear_2.clone(), &pk_linear).unwrap();
+        Groth16::<OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            linear_2.clone(),
+            &pk_linear,
+        )
+        .unwrap();
     let (proof_lean_lin_2, _) =
         prove_lean_with_randomizers(&lean_pk_linear, linear_2, OuterFr::zero(), OuterFr::zero())
             .unwrap();
@@ -1181,7 +1203,7 @@ fn build_lean_pk_with_witness_bases<
         vk: pk.vk.clone(),
         beta_g1: pk.beta_g1,
         delta_g1: pk.delta_g1,
-        a_query: pk.a_query.clone(),
+        a_query_wit: pk.a_query.clone(),
         b_g1_query: pk.b_g1_query.clone(),
         b_g2_query: pk.b_g2_query.clone(),
         h_query_wit: h_wit,
@@ -1218,7 +1240,7 @@ fn test_lean_prover_end_to_end() {
 
     // 3. Setup Outer PK
     let (pk_outer, vk_outer) =
-        Groth16::<<DefaultCycle as RecursionCycle>::OuterE>::circuit_specific_setup(
+        Groth16::<<DefaultCycle as RecursionCycle>::OuterE, PvugcReduction>::circuit_specific_setup(
             circuit_outer.clone(),
             &mut rng,
         )

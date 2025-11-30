@@ -22,7 +22,9 @@ pub struct LeanProvingKey<E: Pairing> {
     pub vk: ark_groth16::VerifyingKey<E>,
     pub beta_g1: E::G1Affine,
     pub delta_g1: E::G1Affine,
-    pub a_query: Vec<E::G1Affine>,
+    /// `enforce_public_input` ensures statement binding (through B and C) and copy constraints are removed from `r1cs_to_qap.rs`,
+    /// so this carries no clean public input handles.
+    pub a_query_wit: Vec<E::G1Affine>,
     pub b_g1_query: Vec<E::G1Affine>,
     pub b_g2_query: Vec<E::G2Affine>,
     /// Sparse H_{ij} bases for witness terms.
@@ -93,17 +95,17 @@ pub fn prove_lean_with_randomizers<E: Pairing, C: ConstraintSynthesizer<E::Scala
     // 3. Compute A = alpha + sum a_i A_i + r delta
     let a_start = Instant::now();
     let mut a_acc = pk.vk.alpha_g1.into_group();
-    if pk.a_query.len() != num_vars {
+    if pk.a_query_wit.len() != num_vars {
         return Err(ark_relations::r1cs::SynthesisError::Unsatisfiable);
     }
     let scalars_bigint: Vec<_> = full_assignment.iter().map(|s| s.into_bigint()).collect();
 
-    let a_linear = <E::G1 as VariableBaseMSM>::msm_bigint(&pk.a_query, &scalars_bigint);
+    let a_linear = <E::G1 as VariableBaseMSM>::msm_bigint(&pk.a_query_wit, &scalars_bigint);
     a_acc += a_linear;
     a_acc += pk.delta_g1.into_group() * r;
     eprintln!(
         "[LeanProver] A-term MSM ({} points) in {:.2}ms",
-        pk.a_query.len(),
+        pk.a_query_wit.len(),
         a_start.elapsed().as_secs_f64() * 1000.0
     );
 

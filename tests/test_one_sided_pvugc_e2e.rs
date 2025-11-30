@@ -2,7 +2,7 @@
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
-use ark_groth16::Groth16;
+use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
@@ -136,16 +136,17 @@ fn test_one_sided_pvugc_proof_agnostic() {
         y: Some(Fr::from(5u64)),
     };
 
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // === DEPOSIT TIME ===
 
     // Build PVUGC VK wrapper
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     // Generate ρ
     let rho = Fr::rand(&mut rng);
@@ -302,12 +303,14 @@ fn test_one_sided_pvugc_proof_agnostic() {
         y: Some(Fr::from(7u64)),
     };
 
-    let (pk2, vk2) = Groth16::<E>::circuit_specific_setup(circuit2.clone(), &mut rng).unwrap();
-    let pvugc_vk2 = PvugcVk {
-        beta_g2: vk2.beta_g2,
-        delta_g2: vk2.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk2.b_g2_query.clone()),
-    };
+    let (pk2, vk2) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit2.clone(), &mut rng).unwrap();
+    let pvugc_vk2 = PvugcVk::new_with_all_witnesses_isolated(
+        vk2.beta_g2,
+        vk2.delta_g2,
+        pk2.b_g2_query.clone(),
+        vec![],
+    );
 
     // Generate proof for vault 2
     let mut recorder_vault2 = SimpleCoeffRecorder::<E>::new();
@@ -375,12 +378,13 @@ fn test_delta_sign_sanity() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
     let rho = Fr::rand(&mut rng);
 
     // Use API for setup and arming
@@ -495,11 +499,12 @@ fn test_witness_independence() {
     // Compute R = e(α,β)·e(L(x),γ) from (vk, public_x)
     let r_statement = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
 
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     let rho = Fr::rand(&mut rng);
 
@@ -567,13 +572,15 @@ fn test_phase1_integration() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     let rho = Fr::rand(&mut rng);
     let (bases_cols, col_arms, _r, k_expected) =

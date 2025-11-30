@@ -23,7 +23,7 @@ use arkworks_groth16::{
     test_circuits::AddCircuit,
     test_fixtures::get_fixture,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type Fr = OuterFr;
 
@@ -199,6 +199,14 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("[FAIL] Public input structure INVALID (Check A=0 and B>0 requirements)");
     }
 
+    // Additional guard: ensure no public column appears in both A and B on the same row
+    let no_pub_ab_overlap = check_public_ab_overlap(&extractor, num_pub);
+    if no_pub_ab_overlap {
+        println!("[PASS] Public columns never share A/B rows.");
+    } else {
+        println!("[FAIL] Public column appears in both A and B on same row.");
+    }
+
     // 1. Linearity Check
     let mut pub_polys = Vec::new();
     for i in 0..num_pub {
@@ -260,12 +268,32 @@ fn run_audit(subject: &dyn AuditSubject) {
 
     println!(
         "RESULT: {}",
-        if is_linear && is_unmixed && all_safe {
+        if is_linear && is_unmixed && all_safe && no_pub_ab_overlap {
             "SAFE"
         } else {
             "UNSAFE"
         }
     );
+}
+
+fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
+    for col in 1..num_pub {
+        if extractor.a_cols[col].is_empty() || extractor.b_cols[col].is_empty() {
+            continue;
+        }
+        let rows_b: HashSet<usize> =
+            extractor.b_cols[col].iter().map(|(row, _)| *row).collect();
+        for (row, _) in &extractor.a_cols[col] {
+            if rows_b.contains(row) {
+                println!(
+                    "  [FAIL] Column {} appears in both A and B on row {}",
+                    col, row
+                );
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) -> bool {

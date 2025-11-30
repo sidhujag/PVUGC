@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use ark_ec::pairing::Pairing;
 use ark_ec::AffineRepr;
-use ark_groth16::Groth16;
+use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
@@ -63,8 +63,11 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
         y: Some(OuterScalar::<C>::from(4u64)),
         z: Some(OuterScalar::<C>::from(7u64)),
     };
-    let (pk_outer, vk_outer) =
-        Groth16::<C::OuterE>::circuit_specific_setup(circuit_outer, &mut rng).unwrap();
+    let (pk_outer, vk_outer) = Groth16::<C::OuterE, PvugcReduction>::circuit_specific_setup(
+        circuit_outer,
+        &mut rng,
+    )
+    .unwrap();
 
     // Build PvugcVk from the outer proving key (Manually, no baking for AddCircuit)
     // AddCircuit is used for basic tests, baking logic is specific to OuterCircuit

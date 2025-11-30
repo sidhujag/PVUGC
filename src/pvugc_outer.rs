@@ -13,7 +13,9 @@ use crate::prover_lean::{prove_lean_with_randomizers, LeanProvingKey};
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, PrimeField, Zero};
-use ark_groth16::{Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK};
+use ark_groth16::{
+    r1cs_to_qap::PvugcReduction, Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK,
+};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -116,11 +118,24 @@ where
         let wb_result = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
         println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
 
+        audit_witness_bases::<C>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
+
         let lean_pk = LeanProvingKey {
             vk: pk_outer.vk.clone(),
             beta_g1: pk_outer.beta_g1,
             delta_g1: pk_outer.delta_g1,
-            a_query: pk_outer.a_query.clone(),
+            a_query_wit: {
+                let mut q = pk_outer.a_query.clone();
+                let num_public = pk_outer.vk.gamma_abc_g1.len();
+                // Zero out public input slots (1..num_public) to ensure no public input handles are leaked in A.
+                // Index 0 is constant '1', which must be preserved.
+                for i in 1..num_public {
+                    if i < q.len() {
+                        q[i] = <C::OuterE as Pairing>::G1Affine::zero();
+                    }
+                }
+                q
+            },
             b_g1_query: pk_outer.b_g1_query.clone(),
             b_g2_query: pk_outer.b_g2_query.clone(),
             h_query_wit: wb_result.h_query_wit,
@@ -270,21 +285,6 @@ fn compute_witness_bases<C: RecursionCycle>(
         }
     }
 
-    // CRITICAL: Add the synthetic "copy constraint" rows for public inputs!
-    // In standard Groth16, rows [num_constraints..num_constraints+num_inputs] have:
-    //   A[row] = public_input[row - num_constraints] (i.e., variable index = row - num_constraints)
-    //   B[row] = 0
-    // This encodes the public inputs into the A polynomial.
-    // Since B[row] = 0 for these rows, they don't contribute to A*B products,
-    // but they DO affect the Lagrange basis representation!
-    for i in 0..num_inputs {
-        let row = num_constraints + i;
-        if row < domain_size {
-            // A[row] has coefficient 1 for variable i (the i-th public input)
-            col_a[i].push((row, OuterScalar::<C>::one()));
-            // B[row] = 0, so nothing to add to col_b
-        }
-    }
 
     println!("[Quotient] Converting SRS to Lagrange Basis (Parallel Group IFFT)....");
     let fft_start = Instant::now();
@@ -315,9 +315,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
         }
     }
-    for i in 0..num_inputs {
-        vars_a.insert(i);
-    }
 
     for (row, terms) in matrices.b.iter().enumerate() {
         if row < domain_size {
@@ -328,10 +325,12 @@ fn compute_witness_bases<C: RecursionCycle>(
     }
 
     let mut active_pairs = HashSet::new();
-
     for &i in &vars_a {
         for &j in &vars_b {
-            active_pairs.insert((i, j));
+            // Only consider pairs involving at least one witness
+            if i >= num_pub || j >= num_pub {
+                active_pairs.insert((i, j));
+            }
         }
     }
 
@@ -452,6 +451,9 @@ fn compute_witness_bases<C: RecursionCycle>(
             )> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
+                if (i as usize) < num_pub && (j as usize) < num_pub {
+                    continue;
+                }
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if prog == 0 || prog % 100000 == 0 {
                     let elapsed = wit_start.elapsed().as_secs_f64();
@@ -633,6 +635,39 @@ fn parallel_fft_scalar<F: PrimeField>(a: &mut [F], domain: &GeneralEvaluationDom
     }
 }
 
+fn audit_witness_bases<C: RecursionCycle>(
+    wb: &WitnessBasesResult<C::OuterE>,
+    num_public: usize,
+) {
+    // 1. Check for pure public pairs in h_query_wit
+    for &(i, j, _) in &wb.h_query_wit {
+        let i_idx = i as usize;
+        let j_idx = j as usize;
+        let pure_public =
+            i_idx > 0 && i_idx < num_public && j_idx > 0 && j_idx < num_public;
+        assert!(
+            !pure_public,
+            "h_query_wit leaked pure public pair ({}, {})",
+            i,
+            j
+        );
+        
+        // 2. Check that public inputs (columns 1..num_public) do NOT appear in A-side (index i).
+        // In h_query_wit(i, j), 'i' corresponds to A-side and 'j' to B-side (or vice versa depending on impl,
+        // but typically index i is A-side var, index j is B-side var in the product a_i * b_j).
+        // Our 1*x=x constraint puts '1' (index 0) in A, and 'x' (index k) in B.
+        // So pairs are (0, k). 'i' is 0. 'j' is k.
+        // We must forbid 'i' being a public input index (1..num_public).
+        // If 'i' is a public input, it means a public input is in A!
+        if i_idx > 0 && i_idx < num_public {
+             panic!(
+                "[SECURITY AUDIT FAIL] Public input column {} found in Matrix A (via pair {}, {}). \
+                 Public inputs must only appear in Matrix B (One-Sided Property).",
+                i_idx, i, j
+            );
+        }
+    }
+}
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a: &mut [G],
     domain: &GeneralEvaluationDomain<F>,
@@ -730,9 +765,11 @@ where
 
         let circuit_std =
             OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
-        let proof_std =
-            Groth16::<C::OuterE>::create_proof_with_reduction_no_zk(circuit_std, pk_outer)
-                .expect("standard proof failed");
+        let proof_std = Groth16::<C::OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+            circuit_std,
+            pk_outer,
+        )
+        .expect("standard proof failed");
 
         let circuit_lean =
             OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());

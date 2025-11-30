@@ -5,7 +5,7 @@ mod tests {
     use ark_ec::pairing::Pairing;
     use ark_ec::{AffineRepr, CurveGroup};
     use ark_ff::{Field, UniformRand};
-    use ark_groth16::Groth16;
+use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use ark_snark::SNARK;
     use ark_std::{rand::SeedableRng, test_rng, One, Zero};
@@ -77,7 +77,8 @@ mod tests {
 
         // This generates the PK for the outer circuit (BW6-761)
         let (pk_outer, _vk_outer) =
-            Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
+            Groth16::<BW6_761, PvugcReduction>::circuit_specific_setup(outer_circuit, &mut rng)
+                .unwrap();
 
         // 3. Build PVUGC Setup (Generates h_wit and q_const)
         // Create a closure that generates valid inner proofs for any statement vector
@@ -123,7 +124,7 @@ mod tests {
         );
 
         // 5. Create Standard Groth16 Proof (No ZK => r=0, s=0)
-        let proof_std = Groth16::<BW6_761>::create_proof_with_reduction_no_zk(
+        let proof_std = Groth16::<BW6_761, PvugcReduction>::create_proof_with_reduction_no_zk(
             valid_outer_circuit.clone(),
             &pk_outer,
         )
@@ -169,7 +170,8 @@ mod tests {
         let outer_circuit: OuterCircuit<DefaultCycle> =
             OuterCircuit::new(vk_inner.clone(), vec![], ark_groth16::Proof::default());
         let (pk_outer, _) =
-            Groth16::<BW6_761>::circuit_specific_setup(outer_circuit, &mut rng).unwrap();
+            Groth16::<BW6_761, PvugcReduction>::circuit_specific_setup(outer_circuit, &mut rng)
+                .unwrap();
 
         // Create a closure that generates valid inner proofs for any statement vector
         let pk_inner_clone = pk_inner.clone();

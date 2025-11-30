@@ -177,6 +177,8 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
         Ok(())
     }
 }
+use ark_groth16::r1cs_to_qap::PvugcReduction;
+
 /// Setup outer Groth16 parameters for a given inner VK and public input count.
 pub fn setup_outer_params_for<C: RecursionCycle>(
     vk_inner: &InnerVk<C>,
@@ -192,7 +194,7 @@ pub fn setup_outer_params_for<C: RecursionCycle>(
 
     let circuit = OuterCircuit::<C>::new(vk_inner.clone(), dummy_x, dummy_proof);
 
-    let (pk, vk) = Groth16::<C::OuterE>::circuit_specific_setup(circuit, rng)?;
+    let (pk, vk) = Groth16::<C::OuterE, PvugcReduction>::circuit_specific_setup(circuit, rng)?;
 
     Ok((pk, vk))
 }
@@ -232,7 +234,7 @@ pub fn prove_outer_for<C: RecursionCycle>(
     // Now prove with a fresh circuit instance
     let circuit_for_proving =
         OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
-    let proof_outer = Groth16::<C::OuterE>::prove(pk_outer, circuit_for_proving, rng)?;
+    let proof_outer = Groth16::<C::OuterE, PvugcReduction>::prove(pk_outer, circuit_for_proving, rng)?;
     let vk_outer = pk_outer.vk.clone();
 
     Ok((proof_outer, vk_outer, actual_public_inputs))

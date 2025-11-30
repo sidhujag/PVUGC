@@ -49,7 +49,7 @@ fn test_cannot_compute_k_from_arms_alone() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -112,7 +112,7 @@ fn test_invalid_groth16_rejected() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -171,8 +171,10 @@ fn test_different_witnesses_same_statement() {
     };
 
     let mut rng_crypto = StdRng::seed_from_u64(5);
-    let (_pk1, vk1) = Groth16::<E>::circuit_specific_setup(circuit1, &mut rng_crypto).unwrap();
-    let (_pk2, vk2) = Groth16::<E>::circuit_specific_setup(circuit2, &mut rng_crypto).unwrap();
+    let (_pk1, vk1) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit1, &mut rng_crypto).unwrap();
+    let (_pk2, vk2) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit2, &mut rng_crypto).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -188,7 +190,8 @@ fn test_verify_rejects_mismatched_statement() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
@@ -236,7 +239,8 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
@@ -384,7 +388,8 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
@@ -458,7 +463,8 @@ fn test_r_independence_from_rho() {
         x: Some(x),
         y: Some(y),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
     let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
@@ -531,7 +537,8 @@ fn test_rejects_gamma2_in_statement_bases() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
@@ -575,7 +582,7 @@ fn test_r_is_not_identity_for_typical_statement() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
     let r = compute_groth16_target(&vk, &[Fr::from(25u64)]).expect("compute_groth16_target");
     use ark_std::One;
     assert!(
@@ -592,7 +599,7 @@ fn test_size_caps_enforced_in_verify() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
