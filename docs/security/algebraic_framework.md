@@ -245,6 +245,16 @@ For the DDH reduction to hold, the outer circuit must satisfy:
 
 **Critical Invariant**: No constraint has $x_{outer}$ in **both** A and B columns.
 
+### 5.2 Statement Dependency Requirement
+
+For the derived key $K = R^\rho$ to be **statement-dependent** (binding the arming randomness $\rho$ to the specific public input $x$), the public input $x$ MUST appear in the B-matrix of the constraint system.
+
+*   **Requirement**: The constraint $1 \cdot x = x$ (or equivalent) must place $x$ in the B-matrix column.
+*   **Effect**: The B-polynomial becomes $B(x) = \beta + x \cdot v_{pub}(\tau)$. The armed handle becomes $D_{pub} = \rho \cdot B(x)$.
+*   **Security**: The key becomes $K(x) = e(A, D_{pub}) = e(A, \beta)^\rho \cdot e(A, v_{pub})^{\rho \cdot x}$. This binds $\rho$ to $x$ multiplicatively in the exponent.
+*   **Vulnerability (Avoided)**: If $x$ appears *only* in C (e.g., via $1 \cdot 0 = x$), then $B(x) = \beta$ (constant). The armed handle $D_{pub} = \rho \beta$ yields a constant key $K = e(A, \beta)^\rho$ valid for *any* statement, breaking the KEM property.
+*   **Exclusion**: Public inputs MUST NOT appear in the A-matrix to prevent adversary manipulation of the A-side pairing input. Our Outer Circuit already explemplifies this (see ../../bin/audit_circuit.rs).
+
 ## 6. Conclusion
 
 The algebraic framework confirms that the **Hardened Arming** architecture is secure in the AGBGM. The combination of:

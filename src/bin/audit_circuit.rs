@@ -163,6 +163,7 @@ fn run_audit(subject: &dyn AuditSubject) {
 
     // 0. Check public column structure (Lean CRS diagnostic)
     let mut public_inputs_a_zero = true;  // Columns 1..num_pub (actual public inputs)
+    let mut public_inputs_b_nonzero = true; // Columns 1..num_pub MUST be in B
     let constant_one_has_a = !extractor.a_cols[0].is_empty();  // Column 0 (constant "1")
     
     for i in 1..num_pub {  // Skip column 0 (constant "1" is expected to have A entries)
@@ -174,6 +175,12 @@ fn run_audit(subject: &dyn AuditSubject) {
         
         if a_count > 0 {
             public_inputs_a_zero = false;
+            println!("  [FAIL] Column {} has A entries! Public inputs must be A-free.", i);
+        }
+
+        if b_count == 0 {
+            public_inputs_b_nonzero = false;
+            println!("  [FAIL] Column {} has B=0! Public inputs must be in B for statement dependency.", i);
         }
         
         // Check if IC_i would be zero (security issue!)
@@ -186,10 +193,10 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("  [Column 0] Constant '1' has {} A entries (expected, baked into α)", extractor.a_cols[0].len());
     }
     
-    if public_inputs_a_zero {
-        println!("[PASS] Public input columns have u_i = 0 → Lean CRS compatible");
+    if public_inputs_a_zero && public_inputs_b_nonzero {
+        println!("[PASS] Public input structure valid (A=0, B>0) → Lean CRS compatible & Statement Dependent");
     } else {
-        println!("[FAIL] Public input u_i ≠ 0 → Cannot use witness-only a_query");
+        println!("[FAIL] Public input structure INVALID (Check A=0 and B>0 requirements)");
     }
 
     // 1. Linearity Check
