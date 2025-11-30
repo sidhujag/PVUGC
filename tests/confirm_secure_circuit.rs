@@ -120,11 +120,9 @@ fn confirm_attack_fails_on_secure_circuit() {
     let public_inputs = vec![fr_inner_to_outer_for::<Cycle>(&x_inner[0])];
 
     // Generate PVUGC Artifacts
-    let n_inputs = 1; 
     let mut samples = Vec::new();
-    for _ in 0..=n_inputs {
-        samples.push(vec![InnerScalar::<Cycle>::from(0); 1]);
-    }
+    samples.push(vec![InnerScalar::<Cycle>::from(0); 1]);
+    samples.push(vec![InnerScalar::<Cycle>::from(1); 1]);
 
     let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for_with_samples::<Cycle, _>(
         &pk_groth,
