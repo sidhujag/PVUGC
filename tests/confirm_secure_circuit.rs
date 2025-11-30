@@ -3,6 +3,7 @@ use ark_bls12_381::{Bls12_381};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
+use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
@@ -12,7 +13,8 @@ use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::{OneSidedPvugc, LeanProvingKey};
 use arkworks_groth16::outer_compressed::{
-    DefaultCycle, InnerScalar, InnerProof, InnerVk, RecursionCycle,
+    DefaultCycle, InnerScalar, InnerProof, InnerVk, RecursionCycle, OuterCircuit,
+    fr_inner_to_outer_for
 };
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples;
 use ark_poly::{GeneralEvaluationDomain, EvaluationDomain};
@@ -25,38 +27,6 @@ type OuterFr = <E as Pairing>::ScalarField;
 type InnerE = <Cycle as RecursionCycle>::InnerE;
 type InnerG1Affine = <InnerE as Pairing>::G1Affine;
 type InnerG2Affine = <InnerE as Pairing>::G2Affine;
-
-/// A Secure Circuit that puts Public Input in C, not A.
-/// Constraint: witness_w * 1 = public_x
-/// A = witness_w, B = 1, C = public_x
-#[derive(Clone)]
-struct SecureCircuit {
-    pub public_x: Option<OuterFr>,
-    pub witness_w: Option<OuterFr>,
-}
-
-impl ConstraintSynthesizer<OuterFr> for SecureCircuit {
-    fn generate_constraints(self, cs: ConstraintSystemRef<OuterFr>) -> Result<(), SynthesisError> {
-        // Allocate public input (ensure it's not put in A by default logic)
-        // We enforce it via a specific constraint structure.
-        let pub_x = FpVar::new_input(cs.clone(), || {
-            self.public_x.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        
-        let wit_w = FpVar::new_witness(cs.clone(), || {
-            self.witness_w.ok_or(SynthesisError::AssignmentMissing)
-        })?;
-        
-        // Enforce: wit_w * 1 = pub_x
-        // This puts wit_w in A, 1 in B, pub_x in C.
-        let one = FpVar::constant(OuterFr::from(1));
-        wit_w.mul_equals(&one, &pub_x)?;
-        
-        // Standard PVUGC constraint (which we just fixed to put public inputs in B, not A)
-        enforce_public_inputs_are_outputs(cs)?;
-        Ok(())
-    }
-}
 
 // Mock inner proof generator
 fn mock_inner_proof_generator(_: &[InnerScalar<Cycle>]) -> InnerProof<Cycle> {
@@ -72,23 +42,36 @@ fn mock_inner_proof_generator(_: &[InnerScalar<Cycle>]) -> InnerProof<Cycle> {
 fn confirm_attack_fails_on_secure_circuit() {
     let mut rng = StdRng::seed_from_u64(0);
 
-    // 1. Setup Secure Circuit
-    let circuit = SecureCircuit {
-        public_x: Some(OuterFr::from(10u64)),
-        witness_w: Some(OuterFr::from(10u64)),
+    // 1. Setup REAL Outer Circuit
+    let vk_inner = InnerVk::<Cycle> {
+        alpha_g1: Default::default(),
+        beta_g2: Default::default(),
+        gamma_g2: Default::default(),
+        delta_g2: Default::default(),
+        gamma_abc_g1: vec![Default::default(); 2],
     };
+    let inner_proof = mock_inner_proof_generator(&[]);
+    let x_inner = vec![InnerScalar::<Cycle>::from(1u64)];
+    
+    // We use the actual OuterCircuit from outer_compressed.rs
+    // This circuit uses Groth16VerifierGadget which handles public inputs correctly (in C, not A)
+    let circuit = OuterCircuit::new(
+        vk_inner.clone(),
+        x_inner.clone(),
+        inner_proof
+    );
     
     // -------------------------------------------------------------------------
     // MATRIX AUDIT (In-Test)
     // -------------------------------------------------------------------------
-    println!("\n=== Starting Matrix Audit for SecureCircuit ===");
+    println!("\n=== Starting Matrix Audit for REAL OuterCircuit ===");
     let cs = ConstraintSystem::<OuterFr>::new_ref();
     circuit.clone().generate_constraints(cs.clone()).unwrap();
     cs.finalize();
     
     let matrices = cs.to_matrices().expect("matrix extraction");
     let num_constraints = cs.num_constraints();
-    let num_pub = cs.num_instance_variables(); // 0=One, 1=public_x
+    let num_pub = cs.num_instance_variables(); 
     let num_wit = cs.num_witness_variables();
     
     println!("Constraints: {}", num_constraints);
@@ -110,6 +93,7 @@ fn confirm_attack_fails_on_secure_circuit() {
     }
     
     // Check Public Input (Variable 1)
+    // OuterCircuit public input is the hash of the inner statement (1 field element)
     let pub_idx = 1;
     println!("\n[Column {} (Public Input)]", pub_idx);
     println!("  A-count: {}", a_cols[pub_idx]);
@@ -120,8 +104,6 @@ fn confirm_attack_fails_on_secure_circuit() {
     assert_eq!(a_cols[pub_idx], 0, "SECURITY FAIL: Public Input found in A-matrix!");
     println!("[PASS] Public Input is NOT in A-matrix.");
     
-    // VERIFICATION 2: Public Input MUST be in B (due to enforce_public_inputs_are_outputs fix) or C
-    // Our fix puts it in B. SecureCircuit puts it in C. So it should be in both or one.
     assert!(b_cols[pub_idx] > 0 || c_cols[pub_idx] > 0, "Public Input must be used in B or C");
     println!("[PASS] Public Input is used in B/C.");
 
@@ -133,17 +115,11 @@ fn confirm_attack_fails_on_secure_circuit() {
     
     // Standard Groth16 Setup
     let (pk_groth, vk_groth) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let public_inputs = vec![OuterFr::from(10u64)];
+    
+    // Public input for OuterCircuit is the outer-field representation of x_inner
+    let public_inputs = vec![fr_inner_to_outer_for::<Cycle>(&x_inner[0])];
 
     // Generate PVUGC Artifacts
-    let vk_inner = InnerVk::<Cycle> {
-        alpha_g1: Default::default(),
-        beta_g2: Default::default(),
-        gamma_g2: Default::default(),
-        delta_g2: Default::default(),
-        gamma_abc_g1: vec![Default::default(); 2],
-    };
-    
     let n_inputs = 1; 
     let mut samples = Vec::new();
     for _ in 0..=n_inputs {
@@ -163,7 +139,6 @@ fn confirm_attack_fails_on_secure_circuit() {
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk_groth, &public_inputs, &rho).expect("setup_and_arm");
 
     // Attack Attempt: Pair constructed A_pub with armed B_pub
-    // A_pub = alpha + A_0 + x*A_x. Since A_x is zero (verified above), A_pub = alpha + A_0.
     
     let mut a_pub_acc = lean_pk.vk.alpha_g1.into_group();
     a_pub_acc += lean_pk.a_query[0].into_group(); // Constant term
