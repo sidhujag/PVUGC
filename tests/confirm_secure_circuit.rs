@@ -51,7 +51,7 @@ fn confirm_attack_fails_on_secure_circuit() {
         gamma_abc_g1: vec![Default::default(); 2],
     };
     let inner_proof = mock_inner_proof_generator(&[]);
-    let x_inner = vec![InnerScalar::<Cycle>::from(1u64)];
+    let x_inner = vec![InnerScalar::<Cycle>::from(44u64)];
     
     // We use the actual OuterCircuit from outer_compressed.rs
     // This circuit uses Groth16VerifierGadget which handles public inputs correctly (in C, not A)
@@ -106,7 +106,7 @@ fn confirm_attack_fails_on_secure_circuit() {
     
     // VERIFICATION 2: Public Input MUST be in B (and C)
     assert!(b_cols[pub_idx] > 0, "Public Input MUST be used in B-matrix for statement dependency!");
-    println!("[PASS] Public Input is used in B/C.");
+    println!("[PASS] Public Input is used in B-matrix.");
 
     println!("=== Matrix Audit Complete ===\n");
 
