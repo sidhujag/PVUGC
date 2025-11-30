@@ -410,11 +410,17 @@ fn test_lean_prover_proof_point_simulation() {
         true, // use_real_coords = true (FIXED, not statement-dependent)
     );
 
+    // Convert q_const G1 points to GT by pairing with delta (GT baking)
+    let t_const_gt: Vec<_> = q_const_fixed_all
+        .iter()
+        .map(|q| OuterE::pairing(*q, pk_outer.vk.delta_g2))
+        .collect();
+
     let pvugc_vk_gap: PvugcVk<OuterE> = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
-        q_const_fixed_all.clone(),
+        t_const_gt,
     );
 
     // Test x=2 with STATEMENT-DEPENDENT coords using GAP-BASED q_const
