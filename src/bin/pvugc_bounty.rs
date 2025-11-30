@@ -237,7 +237,9 @@ fn arm(passphrase: &str, ctx: &str, path: PathBuf) {
         Groth16::<E, LibsnarkReduction>::circuit_specific_setup(circuit, &mut os_rng).unwrap();
     // Use pairing::Pairing trait to access G1Affine type
     use ark_ec::pairing::Pairing;
-    let q_dummy = vec![<E as Pairing>::G1Affine::zero(); vk.gamma_abc_g1.len()];
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::{Field, One};
+    let q_dummy = vec![PairingOutput(<<E as Pairing>::TargetField as Field>::ONE); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,

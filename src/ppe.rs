@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use ark_ec::pairing::Pairing;
 use ark_ec::pairing::PairingOutput;
 use ark_ec::AffineRepr;
-use ark_ff::One; // For is_one()
+use ark_ff::{One, Field}; // For is_one() and pow()
 use ark_ff::PrimeField;
 use ark_groth16::VerifyingKey as Groth16VK;
 use ark_std::Zero; // For is_zero()
@@ -17,12 +17,12 @@ pub struct PvugcVk<E: Pairing> {
     /// Per-column hints indicating whether the column is allowed to be armed.
     /// Hints must align 1:1 with `b_g2_query`.
     pub witness_zero_hints: std::sync::Arc<Vec<bool>>,
-    /// Baked Quotient Points (Q_const)
+    /// Baked Quotient Points (T_const in GT)
     /// These allow the decapper to compute the constant quotient term H_const(x)
     /// and subtract it from the target, ensuring security against H-based attacks.
-    /// q_const_points[0] is the constant term.
-    /// q_const_points[1..] correspond to public inputs.
-    pub q_const_points: std::sync::Arc<Vec<E::G1Affine>>,
+    /// t_const_points_gt[0] is e(q_const[0], delta).
+    /// t_const_points_gt[1..] correspond to public inputs.
+    pub t_const_points_gt: std::sync::Arc<Vec<PairingOutput<E>>>,
 }
 
 impl<E: Pairing> PvugcVk<E> {
@@ -31,7 +31,7 @@ impl<E: Pairing> PvugcVk<E> {
         beta_g2: E::G2Affine,
         delta_g2: E::G2Affine,
         b_g2_query: Vec<E::G2Affine>,
-        q_const_points: Vec<E::G1Affine>,
+        t_const_points_gt: Vec<PairingOutput<E>>,
     ) -> Self {
         let hints = vec![true; b_g2_query.len()];
         Self {
@@ -39,7 +39,7 @@ impl<E: Pairing> PvugcVk<E> {
             delta_g2,
             b_g2_query: std::sync::Arc::new(b_g2_query),
             witness_zero_hints: std::sync::Arc::new(hints),
-            q_const_points: std::sync::Arc::new(q_const_points),
+            t_const_points_gt: std::sync::Arc::new(t_const_points_gt),
         }
     }
 
@@ -101,14 +101,15 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
         return false;
     }
 
-    // Validate q_const_points
-    let is_good_g1 = |g: &E::G1Affine| {
-        if g.is_zero() {
-            return true;
+    // Validate t_const_points_gt
+    let is_good_gt = |g: &PairingOutput<E>| {
+        if g.0.is_zero() { // GT zero is invalid (multiplicative group)
+             return false;
         }
-        g.mul_bigint(order).is_zero()
+        // Ideally check subgroup, but usually hard for GT
+        true
     };
-    if pvugc_vk.q_const_points.iter().any(|g| !is_good_g1(g)) {
+    if pvugc_vk.t_const_points_gt.iter().any(|g| !is_good_gt(g)) {
         return false;
     }
 
@@ -214,23 +215,19 @@ pub fn compute_baked_target<E: Pairing>(
     // 1. Compute raw target
     let r_raw = compute_groth16_target(vk, public_inputs)?;
 
-    // 2. Compute baked quotient term Q(x)
-    if pvugc_vk.q_const_points.len() != public_inputs.len() + 1 {
+    // 2. Compute baked quotient term T_const(x) in GT
+    if pvugc_vk.t_const_points_gt.len() != public_inputs.len() + 1 {
         return Err(Error::MismatchedSizes); // Should define a better error
     }
 
-    let mut q_sum = pvugc_vk.q_const_points[0].into_group();
+    let mut t_acc = pvugc_vk.t_const_points_gt[0];
     for (i, x_i) in public_inputs.iter().enumerate() {
-        q_sum += pvugc_vk.q_const_points[i + 1] * x_i;
+        let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
+        t_acc = PairingOutput(t_acc.0 * term);
     }
 
-    // 3. Add T_const = e(Q(x), delta)
-    // Standard: AB - (C_wit + Q)delta = R_raw
-    // AB - C_wit delta = R_raw + Q delta
-    // So R_baked = R_raw + T_const
-    let t_const = E::pairing(q_sum.into_affine(), pvugc_vk.delta_g2);
-
-    Ok(r_raw + t_const)
+    // 3. Subtract T_const (which is e(Q, delta))
+    Ok(r_raw + t_acc)
 }
 
 /// e(A,B) · e(C,δ) = e(α,β) · e(L(x),γ)

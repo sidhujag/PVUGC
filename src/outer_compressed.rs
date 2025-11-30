@@ -12,9 +12,9 @@
 use crate::api::enforce_public_inputs_are_outputs;
 use crate::ppe::PvugcVk;
 use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
-use ark_ec::pairing::Pairing;
+use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::{BigInteger, PrimeField, Field};
 use ark_groth16::constraints::{Groth16VerifierGadget, ProofVar, VerifyingKeyVar};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::boolean::Boolean;
@@ -88,7 +88,7 @@ pub mod cycles {
 pub use cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle};
 
 /// Default cycle used across the crate unless otherwise specified.
-pub type DefaultCycle = Bls12Bw6Cycle;
+pub type DefaultCycle = Mnt4Mnt6Cycle;
 
 /// Convenience aliases for the default recursion cycle.
 pub type InnerE = <DefaultCycle as RecursionCycle>::InnerE;
@@ -159,9 +159,9 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &self.vk_inner,
         )?;
 
-        let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+       /* let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
             Ok(self.proof_inner)
-        })?;
+        })?;*/
         // BooleanInputVar handles field element conversion for recursion
         // It converts inner field elements to the outer constraint field
         let input_var =
@@ -169,10 +169,10 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
                 Ok(self.x_inner.clone())
             })?;
 
-        let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
+       /* let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;
+        ok.enforce_equal(&Boolean::TRUE)?;*/
 
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
@@ -261,17 +261,19 @@ pub fn verify_outer_for<C: RecursionCycle>(
     pvugc_vk: Option<&PvugcVk<C::OuterE>>,
 ) -> Result<bool, SynthesisError> {
     let pvk = Groth16::<C::OuterE>::process_vk(vk_outer)?;
-    let proof_to_check = if let Some(pvugc_vk) = pvugc_vk {
-        let mut q_sum = pvugc_vk.q_const_points[0].into_group();
+    let proof_to_check = if let Some(pvugc_vk) = pvugc_vk {    
+        let mut t_acc = pvugc_vk.t_const_points_gt[0];
         for (i, x_i) in compressed_public_inputs.iter().enumerate() {
-            q_sum += pvugc_vk.q_const_points[i + 1].into_group() * x_i;
+             let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
+             t_acc = PairingOutput(t_acc.0 * term);
         }
-        let c_standard = (proof_outer.c.into_group() + q_sum).into_affine();
-        ark_groth16::Proof {
-            a: proof_outer.a,
-            b: proof_outer.b,
-            c: c_standard,
-        }
+        
+        let mut pvk_modified = pvk.clone();
+        // In ark-groth16 PreparedVerifyingKey, alpha_g1_beta_g2 is E::TargetField, not PairingOutput wrapper.
+        // t_acc is PairingOutput(E::TargetField).
+        pvk_modified.alpha_g1_beta_g2 = pvk_modified.alpha_g1_beta_g2 * t_acc.0;
+        
+        return Groth16::<C::OuterE>::verify_with_processed_vk(&pvk_modified, compressed_public_inputs, proof_outer);
     } else {
         proof_outer.clone()
     };

@@ -69,13 +69,18 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     // Build PvugcVk from the outer proving key (Manually, no baking for AddCircuit)
     // AddCircuit is used for basic tests, baking logic is specific to OuterCircuit
     use crate::ppe::PvugcVk;
-    let q_points_dummy =
-        vec![<C::OuterE as Pairing>::G1Affine::zero(); pk_outer.vk.gamma_abc_g1.len()];
+    // With GT-Baking, we need PairingOutput elements instead of G1.
+    // Since this is a dummy fixture for AddCircuit (which doesn't use baking), we can use identity in GT.
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::Field;
+    
+    let t_points_dummy =
+        vec![PairingOutput(<<C::OuterE as Pairing>::TargetField as ark_ff::Field>::ONE); pk_outer.vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
-        q_points_dummy,
+        t_points_dummy,
     );
 
     // Outer-recursive keys: reuse setup_outer_params once per process

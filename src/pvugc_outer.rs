@@ -100,17 +100,17 @@ where
     let cache_path = format!("outer_lean_setup_pk_vk_{}_{}.bin", safe_name, hash_prefix);
 
     let cache_file = std::path::Path::new(&cache_path);
-    let (lean_pk, q_points) = if cache_file.exists() {
+    let (lean_pk, t_const_gt) = if cache_file.exists() {
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
         let file = File::open(&cache_path).expect("failed to open cached setup");
         let reader = BufReader::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
-        let (pk, q_points): (
+        let (pk, t_gt): (
             LeanProvingKey<C::OuterE>,
-            Vec<<C::OuterE as Pairing>::G1Affine>,
+            Vec<PairingOutput<C::OuterE>>,
         ) = CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
             .expect("failed to deserialize setup");
         println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
-        (pk, q_points)
+        (pk, t_gt)
     } else {
         println!("[Setup] No cache found. Computing witness bases...");
         let wb_result = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
@@ -128,29 +128,29 @@ where
         };
 
         println!("[Setup] Computing q_points from gap (using custom samples)...");
-        let q_points = compute_q_const_points_from_gap::<C, F>(
+        let t_const_gt = compute_t_const_points_gt_from_gap::<C, F>(
             pk_outer,
             &lean_pk,
             vk_inner,
             &sample_statements,
             &inner_proof_generator,
         );
-        println!("[Setup] q_points computed in {:?}", start.elapsed());
+        println!("[Setup] t_const_points_gt computed in {:?}", start.elapsed());
         println!("[Setup] Serializing setup to {}...", cache_path);
         let file = File::create(&cache_path).expect("failed to create cache file");
         let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
-        (lean_pk.clone(), q_points.clone())
+        (lean_pk.clone(), t_const_gt.clone())
             .serialize_uncompressed(&mut writer)
             .expect("failed to serialize setup");
         writer.flush().expect("failed to flush buffer");
-        (lean_pk, q_points)
+        (lean_pk, t_const_gt)
     };
 
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
-        q_points,
+        t_const_gt,
     );
 
     println!("[Setup] Complete.");
@@ -684,6 +684,32 @@ fn parallel_ifft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     let n_inv = domain.size_as_field_element().inverse().unwrap();
     // Parallel scaling
     a.par_iter_mut().for_each(|x| *x *= n_inv);
+}
+
+fn compute_t_const_points_gt_from_gap<C, F>(
+    pk_outer: &Groth16PK<C::OuterE>,
+    lean_pk: &LeanProvingKey<C::OuterE>,
+    vk_inner: &InnerVk<C>,
+    sample_statements: &[StatementVec<C>],
+    inner_proof_generator: &F,
+) -> Vec<PairingOutput<C::OuterE>>
+where
+    C: RecursionCycle,
+    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
+{
+    // Reuse existing logic to find Q points in G1, then map to GT
+    let q_points_g1 = compute_q_const_points_from_gap::<C, F>(
+        pk_outer,
+        lean_pk,
+        vk_inner,
+        sample_statements,
+        inner_proof_generator
+    );
+
+    // Map to GT: T_i = e(Q_i, delta)
+    // We compute this once and then discard q_points_g1.
+    let delta_g2 = pk_outer.vk.delta_g2;
+    q_points_g1.iter().map(|q| C::OuterE::pairing(*q, delta_g2)).collect()
 }
 
 fn compute_q_const_points_from_gap<C, F>(
