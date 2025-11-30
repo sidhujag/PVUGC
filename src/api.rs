@@ -620,7 +620,7 @@ pub fn enforce_public_inputs_are_outputs<F: PrimeField>(
         let var = Variable::Instance(idx);
         let lc_var: LinearCombination<F> = lc!() + var;
         // Enforce 1 * x = x to put x in B and C, but NOT in A
-        cs.enforce_constraint(lc_var.clone(), one_lc.clone(), lc_var)?;
+        cs.enforce_constraint(one_lc.clone(), lc_var.clone(), lc_var)?;
     }
 
     Ok(())

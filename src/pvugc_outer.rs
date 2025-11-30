@@ -315,6 +315,10 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
         }
     }
+    for i in 0..num_inputs {
+        vars_a.insert(i);
+    }
+
     for (row, terms) in matrices.b.iter().enumerate() {
         if row < domain_size {
             for &(_, col) in terms {
@@ -327,10 +331,7 @@ fn compute_witness_bases<C: RecursionCycle>(
 
     for &i in &vars_a {
         for &j in &vars_b {
-            // Only consider pairs involving at least one witness
-            if i >= num_pub || j >= num_pub {
-                active_pairs.insert((i, j));
-            }
+            active_pairs.insert((i, j));
         }
     }
 
@@ -451,10 +452,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             )> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
-                if (i as usize) < num_pub && (j as usize) < num_pub {
-                    continue;
-                }
-
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if prog == 0 || prog % 100000 == 0 {
                     let elapsed = wit_start.elapsed().as_secs_f64();
@@ -782,6 +779,7 @@ fn solve_q_const_from_samples<C: RecursionCycle>(
         !gaps.is_empty(),
         "at least one sample is required to recover q_const"
     );
+
     let num_inputs = gaps[0].0.len();
     assert_eq!(
         gaps.len(),
