@@ -27,9 +27,12 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $\mathbb{G}_2$ — verification key elements
         *   $[\beta]_2, [\gamma]_2, [\delta]_2$
         *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
+    *   $\mathbb{G}_T$ — GT-baked public quotient evaluations
+        *   $T_i = e(H_i(\tau), \delta)$ for $0 \le i \le \ell$, where $H_{pub}(x,\tau) = \sum_{i=0}^{\ell} x_i H_i(\tau)$
+        *   $T_{const}(x) = e(H_{pub}(x,\tau), \delta) = \prod_{i=0}^{\ell} T_i^{x_i}$ is publicly computable in $\mathbb{G}_T$
 *   **Explicit Exclusions (Lean CRS):**
     *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
-    *   No public-only $H$ bases (the constant quotient)
+    *   No public-only $H$ bases in $\mathbb{G}_1$ (the constant quotient polynomials $H_i(\tau)$ never appear as $\mathbb{G}_1$ handles)
     *   No armed $[\gamma]_2^\rho$, $[1]_2^\rho$, or $[H(\tau)]_2^\rho$
 *   **Arming Instance (masked by $\rho$):**
     *   $D_{pub} = \rho \cdot (\beta + \sum_{i=0}^\ell x_i v_i(\tau))$
@@ -90,13 +93,16 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
     *   **Result:** No linear combination of the available witness handles can equal $\Delta_{pub}$ (unless the R1CS is satisfied).
 
 ### 2.3 The Baked Quotient Invariant (Blocks Remainder Forging)
-**Claim:** The adversary cannot use the CRS to forge the quotient polynomial $H(x)$.
+**Claim:** The adversary cannot use the CRS to forge the quotient polynomial $H_{pub}(x)$ or its armed equivalent.
 
-*   **Proof:**
-    *   The Target $R_{baked}$ includes the constant quotient term $T_{const}$.
-    *   The adversary must construct $T_{const}$ or an equivalent quotient contribution.
-    *   **Constraint:** The **Lean CRS** explicitly excludes the $H$-bases (Powers of Tau) required to construct arbitrary quotient terms.
-    *   **Result:** The adversary lacks the basis vectors to "bridge the gap" between an invalid witness equation and the target.
+*   **What the Adversary CAN Do:**
+    *   The adversary **can** compute $T_{const}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $\mathbb{G}_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
+
+*   **What the Adversary CANNOT Do:**
+    *   They have **no $\mathbb{G}_1$ handle** for $H_{pub}(x,\tau)$: the public $H$-bases are missing from the $\mathbb{G}_1$ span (Lean CRS explicitly excludes them).
+    *   They have **no way to apply $\rho$ inside $\mathbb{G}_T$**: the only source of $\rho$ is in the armed $\mathbb{G}_2$ handles, and pairing is $\mathbb{G}_1 \times \mathbb{G}_2 \to \mathbb{G}_T$. There is no operation that takes a $\mathbb{G}_T$ element and multiplies it by $\rho$.
+
+*   **Conclusion:** The adversary cannot synthesize $[H_{pub}(x,\tau)]_1$ in $\mathbb{G}_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
 
 ## 3. Completeness for Honest Prover
 
@@ -152,34 +158,40 @@ The simulator tracks all algebraic relations between handles. For any adversary 
 
 The adversary **cannot distinguish** real from simulated worlds because:
 
-1. **Missing Bases**: The Lean CRS excludes $H_{pub}$ bases $\{[h_i(\tau)]_1\}$ for public-input-dependent quotient terms
-2. **Algebraic Consistency**: All queries return answers consistent with the algebraic structure
-3. **No Information Leakage**: The "gap" between Lean CRS and Full CRS is never queried
+1. **Missing $\mathbb{G}_1$ Bases**: The Lean CRS excludes $H_{pub}$ bases $\{[H_i(\tau)]_1\}$ for public-input-dependent quotient terms
+2. **GT-Baked Projections Only**: The adversary receives only $\mathbb{G}_T$ projections $T_i = e(H_i(\tau), \delta)$, not the underlying $\mathbb{G}_1$ elements
+3. **Algebraic Consistency**: All queries return answers consistent with the algebraic structure
+4. **No $\rho$-Scaling in $\mathbb{G}_T$**: There is no operation to multiply a $\mathbb{G}_T$ element by the arming secret $\rho$
+
+**Adversary's View:**
+- Lean CRS in $\mathbb{G}_1$: witness-only bases (no $H_{pub}$ bases)
+- $\mathbb{G}_2$ VK: includes $[\delta]_2$
+- $\mathbb{G}_T$ handles: $T_i = e(H_i(\tau), \delta)$ for $0 \le i \le \ell$
 
 **Key Insight**: The adversary's reachable span is:
 $$\text{Span}_{adv} = \text{LinComb}(\text{Lean CRS}) + \text{Pairings}(\text{Lean CRS})$$
 
-The target requires:
-$$H_{pub}(\tau) = q_0 + q_1 \cdot \tau$$
-
-Since $H_{pub}$ bases are **not** in the Lean CRS: $H_{pub}(\tau) \notin \text{Span}_{adv}$
+The *polynomial* $f(\tau) = H_{pub}(x,\tau)$ underlying $T_{baked} = e(f(\tau), \delta)$ is still outside the $\mathbb{G}_1$ span. Even though $T_{baked}$ itself is computable in $\mathbb{G}_T$, the adversary cannot compute $T_{baked}^\rho$ because $\rho$ only appears in armed $\mathbb{G}_2$ handles.
 
 ### 4.4 The GT-XPDH / TEP Reduction
 
 Our setting maps directly to **GT-XPDH**:
 
 **The Challenge:**
-- Adversary has Lean CRS: $\{[\tau^i]_1\}_{i \in \text{Lean}}$, $[\delta]_2$
-- Target: $T_{baked} = e([q_0 + q_1 \cdot \tau]_1, [\delta]_2)$
-- $q_0 + q_1 \cdot \tau$ is **outside** the span of Lean CRS elements
+- Adversary has Lean CRS: $\{[\tau^i]_1\}_{i \in \text{Lean}}$ (no $H_{pub}$ bases), $[\delta]_2$
+- Adversary has GT-baked handles: $T_i = e(H_i(\tau), \delta)$ for $0 \le i \le \ell$
+- Target: $T_{baked}^\rho$ where $T_{baked} = e([H_{pub}(x,\tau)]_1, [\delta]_2)$
+- $H_{pub}(x,\tau)$ is **outside** the $\mathbb{G}_1$ span of Lean CRS elements
 
 **Why GT-XPDH Applies:**
-The polynomial $f(\tau) = q_0 + q_1 \cdot \tau$ represents the public-input-dependent quotient. The Lean CRS deliberately excludes the bases needed to compute $[f(\tau)]_1$.
+The polynomial $f(\tau) = H_{pub}(x,\tau)$ represents the public-input-dependent quotient. The Lean CRS deliberately excludes the $\mathbb{G}_1$ bases needed to compute $[f(\tau)]_1$. The adversary can compute $T_{baked} = e(f(\tau), \delta)$ from the GT-baked handles, but cannot:
+1. Extract $[f(\tau)]_1$ from $T_{baked}$ (discrete log in $\mathbb{G}_T$)
+2. Compute $T_{baked}^\rho$ without a $\mathbb{G}_T$-exponentiation oracle for $\rho$
 
 To forge a proof, the adversary must produce $C \in \mathbb{G}_1$ such that:
-$$e(A, B) = T_{baked} + e(C, \delta)$$
+$$e(A, B) = T_{baked}^\rho + e(C, \delta)$$
 
-This requires computing $e([f(\tau)]_1, [\delta]_2)$ or an equivalent $\mathbb{G}_T$ element, which is exactly the GT-XPDH problem.
+This requires computing $T_{baked}^\rho$ or an equivalent, which is exactly the GT-XPDH problem: given $\mathbb{G}_T$ projections of polynomials outside the $\mathbb{G}_1$ span, compute their $\rho$-exponent.
 
 **Connection to TEP:**
 The Target Exponent Problem is the "search" version: given the target $T_{baked}$, find exponents $(a, b)$ such that $e([a]_1, [b]_2) = T_{baked}$. Our construction ensures:
@@ -239,8 +251,8 @@ The algebraic framework confirms that the **Hardened Arming** architecture is se
 
 1. **Aggregation** (one-sided PPE structure)
 2. **Gamma-Exclusion** (blocks GT-slicing attacks)
-3. **Baked Quotient** (hides $H_{pub}$ in target)
-4. **Linearity/Audit** (ensures affine quotient)
+3. **GT-Baked Quotient** (publishes $H_{pub}$ only as $\mathbb{G}_T$ projections $T_i = e(H_i(\tau), \delta)$, not as $\mathbb{G}_1$ handles)
+4. **Linearity/Audit** (ensures affine quotient, orthogonal to witness span)
 5. **GT-XPDH / TEP Reduction** (formal security proof)
 
 eliminates the reachable subspace for all known algebraic attack vectors and reduces security to the hardness of the **Target Exponent Problem (TEP)** and **GT-XPDH** in the Generic Bilinear Group Model.
