@@ -34,7 +34,9 @@ type Fr = OuterFr;
 enum TrapdoorMonomial {
     // --- Target Terms (scaled by delta) ---
     AlphaBetaDelta, // alpha * beta * delta
-    GammaDelta,     // gamma * delta * IC(x)
+    // GammaDelta removed because gamma cancels out in e(L, gamma).
+    // Instead, we model the expanded terms of L*delta directly.
+    
     DeltaSq,        // Any(x) * delta^2 (Merges H and u terms)
 
     // --- Handle Terms from L_k * D_pub (1/delta * delta cancels) ---
@@ -79,8 +81,6 @@ enum TrapdoorMonomial {
 
     // --- Raw B-Query Handles (from b_g1_query and b_g2_query) ---
     // These are available for ALL variables in standard Groth16.
-    // v_k (G1) * delta (G2) -> v * delta
-    DeltaV,
     // v_k (G1) * beta (G2) -> v * beta
     BetaV,
     // v_k (G1) * v_j (G2) -> v * v
@@ -240,40 +240,25 @@ fn run_audit(subject: &dyn AuditSubject) {
     // 2. Independence Check
     let h_const = compute_h_const(&pub_polys, &extractor.domain);
     let target = build_target(&pub_polys, &h_const);
+    let target_no_gamma = build_target_without_gamma(&h_const);
 
-    let mut all_safe = true;
     let num_checks = 5;
-    println!(
-        "[Independence Check] Running {} iterations for robustness...",
-        num_checks
+    let all_safe = run_independence_checks(
+        "",
+        &extractor,
+        &pub_polys,
+        &target,
+        num_pub + num_wit,
+        num_checks,
     );
-
-    for i in 0..num_checks {
-        let seed = 12345 + i as u64;
-        let is_safe = check_independence_streaming(
-            &extractor,
-            &pub_polys,
-            &target,
-            num_pub + num_wit,
-            seed,
-            i + 1,
-            num_checks,
-        );
-        if !is_safe {
-            all_safe = false;
-            println!("[FAIL] Iteration {} found dependency!", i + 1);
-            break;
-        }
-    }
-
-    if all_safe {
-        println!(
-            "[PASS] Independence Check (All {} iterations passed).",
-            num_checks
-        );
-    } else {
-        println!("[FAIL] Independence Check (Target in Span).");
-    }
+    let all_safe_no_gamma = run_independence_checks(
+        " (γ removed)",
+        &extractor,
+        &pub_polys,
+        &target_no_gamma,
+        num_pub + num_wit,
+        num_checks,
+    );
 
     println!(
         "RESULT: {}",
@@ -498,18 +483,41 @@ fn build_target(
     )],
     h_const: &DensePolynomial<Fr>,
 ) -> TrapdoorPolyVector {
-    let mut ic = DensePolynomial::zero();
-    for (u, _, _) in pub_polys {
-        ic += u;
+    // Reconstruct L_pub components
+    // L_pub = Sum x_i (beta u_i + alpha v_i + w_i)
+    // Normalized Target (x delta) = alpha*beta*delta + delta * L_pub - H*delta^2
+    // = alpha*beta*delta + beta*delta*U + alpha*delta*V + delta*W - H*delta^2
+    
+    let mut u_sum = DensePolynomial::zero();
+    let mut v_sum = DensePolynomial::zero();
+    let mut w_sum = DensePolynomial::zero();
+    
+    for (u, v, w) in pub_polys {
+        u_sum += u;
+        v_sum += v;
+        w_sum += w;
     }
 
-    // Target * delta = alpha*beta*delta + gamma*delta*IC(x) - H_const(x)*delta^2
     TrapdoorPolyVector::new(vec![
         (
             TrapdoorMonomial::AlphaBetaDelta,
             DensePolynomial::from_coefficients_slice(&[Fr::one()]),
         ),
-        (TrapdoorMonomial::GammaDelta, ic),
+        (TrapdoorMonomial::BetaDeltaU, u_sum),
+        (TrapdoorMonomial::AlphaDeltaV, v_sum),
+        (TrapdoorMonomial::DeltaW, w_sum),
+        (TrapdoorMonomial::DeltaSq, -h_const.clone()),
+    ])
+}
+
+fn build_target_without_gamma(
+    h_const: &DensePolynomial<Fr>,
+) -> TrapdoorPolyVector {
+    TrapdoorPolyVector::new(vec![
+        (
+            TrapdoorMonomial::AlphaBetaDelta,
+            DensePolynomial::from_coefficients_slice(&[Fr::one()]),
+        ),
         (TrapdoorMonomial::DeltaSq, -h_const.clone()),
     ])
 }
@@ -573,7 +581,7 @@ fn check_independence_streaming(
     }
     let all_monos = vec![
         TrapdoorMonomial::AlphaBetaDelta,
-        TrapdoorMonomial::GammaDelta,
+        // GammaDelta removed
         TrapdoorMonomial::DeltaSq,
         TrapdoorMonomial::BetaSqU,
         TrapdoorMonomial::BetaU,
@@ -589,9 +597,7 @@ fn check_independence_streaming(
         TrapdoorMonomial::DeltaW,
         TrapdoorMonomial::DeltaUV,
         TrapdoorMonomial::DeltaPureUV,
-        TrapdoorMonomial::AlphaDeltaV,
         TrapdoorMonomial::AlphaDeltaSq,
-        TrapdoorMonomial::DeltaV,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
     ];
@@ -630,6 +636,8 @@ fn check_independence_streaming(
 
     // The adversary has handles for Public Inputs (CRS) AND Witness Inputs (Arming).
     // Skipping 0..num_pub would be UNDER-POWERING the adversary (ignoring public handles).
+    let num_pub = pub_polys.len();
+
     for k in 0..num_vars {
         if k % step == 0 {
             let pct = (k * 100) / total_cols;
@@ -657,7 +665,7 @@ fn check_independence_streaming(
         // This might allow forging the target term `DeltaSq * H` if H correlates with u_k.
         // The audit must catch this by including it in the span if u_k is non-zero.
         add_basis_vec(vec![(TrapdoorMonomial::DeltaSq, u_val)]);
-
+        add_basis_vec(vec![(TrapdoorMonomial::DeltaSq, v_val)]);
         // 3. u_k * D_j * delta -> u * v_j * delta
         // Model as u * Any * delta -> DeltaPureUV * u (approx)
         // This represents pairing A-query u_k (G1) with B-query v_j (G2).
@@ -666,41 +674,43 @@ fn check_independence_streaming(
         // We model this as DeltaPureUV.
         add_basis_vec(vec![(TrapdoorMonomial::DeltaPureUV, u_val)]);
 
-        // 4. L_k * D_pub * delta -> (beta*u+alpha*v+w)(beta+V)
-        // = beta^2*u + beta*u*V + alpha*beta*v + alpha*v*V + beta*w + w*V
-        add_basis_vec(vec![
-            (TrapdoorMonomial::BetaSqU, u_val),
-            (TrapdoorMonomial::BetaU, u_val * v_pub_r),
-            (TrapdoorMonomial::AlphaBetaV, v_val),
-            (TrapdoorMonomial::AlphaV, v_val * v_pub_r),
-            (TrapdoorMonomial::BetaW, w_val),
-            (TrapdoorMonomial::W, w_val * v_pub_r),
-        ]);
+        if k >= num_pub {
+            // 4. L_k * D_pub * delta -> (beta*u+alpha*v+w)(beta+V)
+            // = beta^2*u + beta*u*V + alpha*beta*v + alpha*v*V + beta*w + w*V
+            add_basis_vec(vec![
+                (TrapdoorMonomial::BetaSqU, u_val),
+                (TrapdoorMonomial::BetaU, u_val * v_pub_r),
+                (TrapdoorMonomial::AlphaBetaV, v_val),
+                (TrapdoorMonomial::AlphaV, v_val * v_pub_r),
+                (TrapdoorMonomial::BetaW, w_val),
+                (TrapdoorMonomial::W, w_val * v_pub_r),
+            ]);
 
-        // 5. L_k * D_delta * delta -> (beta*u+alpha*v+w) * delta
-        // = beta*delta*u + alpha*delta*v + delta*w
-        add_basis_vec(vec![
-            (TrapdoorMonomial::BetaDeltaU, u_val),
-            (TrapdoorMonomial::AlphaDeltaV, v_val),
-            (TrapdoorMonomial::DeltaW, w_val),
-        ]);
+            // 5. L_k * D_delta * delta -> (beta*u+alpha*v+w) * delta
+            // = beta*delta*u + alpha*delta*v + delta*w
+            add_basis_vec(vec![
+                (TrapdoorMonomial::BetaDeltaU, u_val),
+                (TrapdoorMonomial::AlphaDeltaV, v_val),
+                (TrapdoorMonomial::DeltaW, w_val),
+            ]);
 
-        // 6. L_k * D_j * delta -> (beta*u+alpha*v+w) * v_j
-        // Model as (beta*u + alpha*v + w) * Any
-        // = BetaUV * u + AlphaVV * v + WV * w
-        add_basis_vec(vec![
-            (TrapdoorMonomial::BetaUV, u_val),
-            (TrapdoorMonomial::AlphaVV, v_val),
-            (TrapdoorMonomial::WV, w_val),
-        ]);
+            // 6. L_k * D_j * delta -> (beta*u+alpha*v+w) * v_j
+            // Model as (beta*u + alpha*v + w) * Any
+            // = BetaUV * u + AlphaVV * v + WV * w
+            add_basis_vec(vec![
+                (TrapdoorMonomial::BetaUV, u_val),
+                (TrapdoorMonomial::AlphaVV, v_val),
+                (TrapdoorMonomial::WV, w_val),
+            ]);
+        }
 
         // 7. Raw B-Query Handles (b_g1_query)
         // Available for ALL variables (including public).
-        // v_k (G1) * delta (G2)
-        add_basis_vec(vec![(TrapdoorMonomial::DeltaV, v_val)]);
-        // v_k (G1) * beta (G2)
+        // v_k (G1) * delta (G2) -> v * delta.
+        add_basis_vec(vec![(TrapdoorMonomial::DeltaSq, v_val)]);
+        // v_k (G1) * beta (G2) -> v * beta
         add_basis_vec(vec![(TrapdoorMonomial::BetaV, v_val)]);
-        // v_k (G1) * v_j (G2) - approximated as v_k * Any(v) -> PureVV * v_k
+        // v_k (G1) * v_j (G2) -> v * v
         add_basis_vec(vec![(TrapdoorMonomial::PureVV, v_val)]);
     }
     println!(
@@ -710,6 +720,11 @@ fn check_independence_streaming(
 
     // 7. Fixed handles
     // Alpha * D_pub * delta -> alpha(beta+V)delta = alpha*beta*delta + alpha*V*delta
+    // The adversary HAS these handles because they have [alpha]_1 and [public_leg]_2.
+    // [public_leg]_2 = [beta]_2 + Sum x_i [B_i]_2.
+    // Pairing [alpha]_1 with [public_leg]_2 gives e(alpha, beta) + Sum x_i e(alpha, B_i).
+    // e(alpha, beta) corresponds to AlphaBetaDelta (normalized).
+    // e(alpha, B_i) corresponds to AlphaDeltaV (normalized).
     add_basis_vec(vec![
         (TrapdoorMonomial::AlphaBetaDelta, Fr::one()),
         (TrapdoorMonomial::AlphaDeltaV, v_pub_r),
@@ -729,4 +744,56 @@ fn check_independence_streaming(
 
     let residue = basis.reduce(target_vec);
     residue.iter().all(|x| x.is_zero()) == false
+}
+
+fn run_independence_checks(
+    label: &str,
+    extractor: &MatrixExtractor,
+    pub_polys: &[(
+        DensePolynomial<Fr>,
+        DensePolynomial<Fr>,
+        DensePolynomial<Fr>,
+    )],
+    target: &TrapdoorPolyVector,
+    num_vars: usize,
+    num_checks: usize,
+) -> bool {
+    let mut all_safe = true;
+    println!(
+        "[Independence Check{}] Running {} iterations for robustness...",
+        label, num_checks
+    );
+    for i in 0..num_checks {
+        let seed = 12345 + i as u64;
+        let is_safe = check_independence_streaming(
+            extractor,
+            pub_polys,
+            target,
+            num_vars,
+            seed,
+            i + 1,
+            num_checks,
+        );
+        if !is_safe {
+            all_safe = false;
+            println!(
+                "[FAIL] Independence Check{} iteration {} found dependency!",
+                label,
+                i + 1
+            );
+            break;
+        }
+    }
+    if all_safe {
+        println!(
+            "[PASS] Independence Check{} (All {} iterations passed).",
+            label, num_checks
+        );
+    } else {
+        println!(
+            "[FAIL] Independence Check{} (Target in Span).",
+            label
+        );
+    }
+    all_safe
 }
