@@ -76,6 +76,15 @@ enum TrapdoorMonomial {
 
     // alpha * D_delta * delta = alpha * delta^2
     AlphaDeltaSq, // alpha * delta^2
+
+    // --- Raw B-Query Handles (from b_g1_query and b_g2_query) ---
+    // These are available for ALL variables in standard Groth16.
+    // v_k (G1) * delta (G2) -> v * delta
+    DeltaV,
+    // v_k (G1) * beta (G2) -> v * beta
+    BetaV,
+    // v_k (G1) * v_j (G2) -> v * v
+    PureVV,
 }
 
 struct TrapdoorPolyVector {
@@ -582,6 +591,9 @@ fn check_independence_streaming(
         TrapdoorMonomial::DeltaPureUV,
         TrapdoorMonomial::AlphaDeltaV,
         TrapdoorMonomial::AlphaDeltaSq,
+        TrapdoorMonomial::DeltaV,
+        TrapdoorMonomial::BetaV,
+        TrapdoorMonomial::PureVV,
     ];
     for m in all_monos {
         mono_set.insert(m);
@@ -638,10 +650,20 @@ fn check_independence_streaming(
         ]);
 
         // 2. u_k * D_delta * delta -> u * delta^2
+        // This represents the A-query term u_k(x) in G1, paired with delta in G2 (from B-side or similar).
+        // For PVUGC One-Sided, public input A-queries (u_k for k in 1..num_pub)
+        // must be ZERO (or removed) to prevent mixing public inputs into the A-side.
+        // If u_k is non-zero for a public input, it adds `delta^2 * u_k` to the span.
+        // This might allow forging the target term `DeltaSq * H` if H correlates with u_k.
+        // The audit must catch this by including it in the span if u_k is non-zero.
         add_basis_vec(vec![(TrapdoorMonomial::DeltaSq, u_val)]);
 
         // 3. u_k * D_j * delta -> u * v_j * delta
         // Model as u * Any * delta -> DeltaPureUV * u (approx)
+        // This represents pairing A-query u_k (G1) with B-query v_j (G2).
+        // If u_k is a public input (non-zero), and v_j is ANY B-query,
+        // this allows creating terms u_pub * v_any * delta.
+        // We model this as DeltaPureUV.
         add_basis_vec(vec![(TrapdoorMonomial::DeltaPureUV, u_val)]);
 
         // 4. L_k * D_pub * delta -> (beta*u+alpha*v+w)(beta+V)
@@ -671,6 +693,15 @@ fn check_independence_streaming(
             (TrapdoorMonomial::AlphaVV, v_val),
             (TrapdoorMonomial::WV, w_val),
         ]);
+
+        // 7. Raw B-Query Handles (b_g1_query)
+        // Available for ALL variables (including public).
+        // v_k (G1) * delta (G2)
+        add_basis_vec(vec![(TrapdoorMonomial::DeltaV, v_val)]);
+        // v_k (G1) * beta (G2)
+        add_basis_vec(vec![(TrapdoorMonomial::BetaV, v_val)]);
+        // v_k (G1) * v_j (G2) - approximated as v_k * Any(v) -> PureVV * v_k
+        add_basis_vec(vec![(TrapdoorMonomial::PureVV, v_val)]);
     }
     println!(
         "\r[Independence Check {}/{}] Progress: 100%",
