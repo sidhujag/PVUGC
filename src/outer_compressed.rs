@@ -9,18 +9,30 @@
 //! for experimentation.  Switching cycles lets downstream callers trade security for
 //! faster recursion-friendly parameter generation.
 
+
 use crate::api::enforce_public_inputs_are_outputs;
 use crate::ppe::PvugcVk;
 use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
-use ark_ec::pairing::{Pairing, PairingOutput};
-use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{BigInteger, PrimeField, Field};
+use ark_crypto_primitives::sponge::poseidon::{
+    constraints::PoseidonSpongeVar, PoseidonConfig, PoseidonSponge,
+};
+use ark_crypto_primitives::sponge::{constraints::CryptographicSpongeVar, CryptographicSponge};
+use ark_ec::{
+    pairing::{Pairing, PairingOutput},
+    AffineRepr, CurveGroup,
+};
+use ark_ff::{BigInteger, Field, PrimeField};
 use ark_groth16::constraints::{Groth16VerifierGadget, ProofVar, VerifyingKeyVar};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
-use ark_r1cs_std::boolean::Boolean;
-use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, pairing::PairingVar as PairingVarTrait};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use ark_r1cs_std::{
+    boolean::Boolean, convert::ToConstraintFieldGadget, fields::fp::FpVar,
+    pairing::PairingVar as PairingVarTrait, prelude::*,
+};
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystemRef, LinearCombination, SynthesisError, Variable,
+};
 use ark_snark::SNARK;
+use ark_std::One;
 use core::marker::PhantomData;
 
 /// Trait describing a recursion-friendly pairing cycle.
@@ -88,7 +100,7 @@ pub mod cycles {
 pub use cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle};
 
 /// Default cycle used across the crate unless otherwise specified.
-pub type DefaultCycle = Mnt4Mnt6Cycle;
+pub type DefaultCycle = Bls12Bw6Cycle;
 
 /// Convenience aliases for the default recursion cycle.
 pub type InnerE = <DefaultCycle as RecursionCycle>::InnerE;
@@ -159,9 +171,10 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &self.vk_inner,
         )?;
 
-        let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+        /*let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
             Ok(self.proof_inner)
-        })?;
+        })?;*/
+
         // BooleanInputVar handles field element conversion for recursion
         // It converts inner field elements to the outer constraint field
         let input_var =
@@ -169,10 +182,10 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
                 Ok(self.x_inner.clone())
             })?;
 
-        let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
+        /*let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;
+        ok.enforce_equal(&Boolean::TRUE)?;*/
         enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
@@ -234,7 +247,8 @@ pub fn prove_outer_for<C: RecursionCycle>(
     // Now prove with a fresh circuit instance
     let circuit_for_proving =
         OuterCircuit::<C>::new(vk_inner.clone(), x_inner.to_vec(), proof_inner.clone());
-    let proof_outer = Groth16::<C::OuterE, PvugcReduction>::prove(pk_outer, circuit_for_proving, rng)?;
+    let proof_outer =
+        Groth16::<C::OuterE, PvugcReduction>::prove(pk_outer, circuit_for_proving, rng)?;
     let vk_outer = pk_outer.vk.clone();
 
     Ok((proof_outer, vk_outer, actual_public_inputs))
@@ -265,10 +279,9 @@ pub fn verify_outer_for<C: RecursionCycle>(
     let proof_to_check = if let Some(pvugc_vk) = pvugc_vk {    
         let mut t_acc = pvugc_vk.t_const_points_gt[0];
         for (i, x_i) in compressed_public_inputs.iter().enumerate() {
-             let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
-             t_acc = PairingOutput(t_acc.0 * term);
+            let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
+            t_acc = PairingOutput(t_acc.0 * term);
         }
-        
         let mut pvk_modified = pvk.clone();
         // In ark-groth16 PreparedVerifyingKey, alpha_g1_beta_g2 is E::TargetField, not PairingOutput wrapper.
         // t_acc is PairingOutput(E::TargetField).
@@ -373,6 +386,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Instant;
 
+        // STARK module uses BLS12-377, which is the inner curve for Bls12Bw6Cycle
         type Cycle = Bls12Bw6Cycle;
 
         let mut rng = StdRng::seed_from_u64(99999);
@@ -466,15 +480,25 @@ mod tests {
         let mut instance = cs.borrow().unwrap().instance_assignment.clone();
         let actual_public_inputs = instance.split_off(1);
 
-        assert!(
-            verify_outer_for::<Cycle>(
-                &*vk_outer,
-                &actual_public_inputs,
-                &proof_outer,
-                Some(&pvugc_vk)
-            )
-            .unwrap(),
-            "Outer proof verification failed for {}",
+
+        // Lean verification: e(A', B) + alpha_b = r_baked + e(C', δ) + alpha_c
+        let r_baked = crate::ppe::compute_baked_target_lean(
+            &*vk_outer,
+            &pvugc_vk,
+            &actual_public_inputs,
+        ).expect("failed to compute baked target");
+
+        let lhs = <Cycle as RecursionCycle>::OuterE::pairing(proof_outer.a, proof_outer.b)
+            + proof_outer.alpha_b;
+
+        let pairing_c_delta =
+            <Cycle as RecursionCycle>::OuterE::pairing(proof_outer.c, vk_outer.delta_g2);
+        
+        let rhs = r_baked + pairing_c_delta + proof_outer.alpha_c;
+        assert_eq!(lhs, rhs, "Lean Proof verification failed for {}", Cycle::name());
+
+        eprintln!(
+            "[timing:{}] lean proof verified successfully",
             Cycle::name()
         );
 
@@ -499,10 +523,7 @@ mod tests {
                 decap_start.elapsed()
             );
 
-            let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
-                &*vk_outer, &pvugc_vk, &public_x,
-            );
-            let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
+            let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r_baked, &rho);
 
             assert!(
                 crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),

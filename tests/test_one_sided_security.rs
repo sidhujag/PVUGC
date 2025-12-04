@@ -58,13 +58,16 @@ fn test_cannot_compute_k_from_arms_alone() {
 
     // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    // Dummy Q points for non-baked tests
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    // Dummy Q points for non-baked tests (must be PairingOutput, not G1Affine)
+    use ark_ff::Field;
+    let q_dummy: Vec<PairingOutput<E>> = vec![PairingOutput(<E as Pairing>::TargetField::one()); vk.gamma_abc_g1.len()];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
         q_dummy,
+        alpha_g1_beta_g2,
     );
     let cols = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &vault_utxo).unwrap();
     let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
@@ -196,12 +199,15 @@ fn test_verify_rejects_mismatched_statement() {
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    use ark_ff::Field;
+    let q_dummy: Vec<PairingOutput<E>> = vec![PairingOutput(<E as Pairing>::TargetField::one()); vk.gamma_abc_g1.len()];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
         q_dummy,
+        alpha_g1_beta_g2,
     );
 
     // Canonical Γ required by verifier

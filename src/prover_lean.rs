@@ -4,27 +4,56 @@
 //! (stripped of Powers of Tau) by using pre-computed quotient bases H_{ij}.
 //! This is required to secure the One-Sided PVUGC scheme against algebraic attacks.
 
-use ark_ec::pairing::Pairing;
+use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM}; // AffineRepr imported
-use ark_ff::PrimeField;
-use ark_groth16::Proof;
+use ark_ff::{Field, PrimeField};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{UniformRand, Zero};
+use ark_std::{One, UniformRand, Zero};
 use rayon::prelude::*;
 use std::time::Instant;
 
-/// Lean Proving Key (Hardened)
-/// Contains only the elements strictly necessary for the honest prover
-/// using the witness-based quotient computation method.
+
+#[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
+pub struct LeanProof<E: Pairing> {
+    pub a: E::G1Affine,
+    pub b: E::G2Affine,
+    pub c: E::G1Affine,
+    /// Compensates for α removed from A: alpha_b = e(α, B)
+    pub alpha_b: PairingOutput<E>,
+    /// Compensates for s*α removed from C: alpha_c = s * e(α, δ)
+    pub alpha_c: PairingOutput<E>,
+}
+
+impl<E: Pairing> LeanProof<E> {
+    /// Convert to a standard Groth16 proof (discards alpha_b).
+    /// Use this for standard Groth16 verification.
+    pub fn to_groth16_proof(&self) -> ark_groth16::Proof<E> {
+        ark_groth16::Proof {
+            a: self.a,
+            b: self.b,
+            c: self.c,
+        }
+    }
+}
+
+impl<E: Pairing> From<LeanProof<E>> for ark_groth16::Proof<E> {
+    fn from(lean: LeanProof<E>) -> Self {
+        ark_groth16::Proof {
+            a: lean.a,
+            b: lean.b,
+            c: lean.c,
+        }
+    }
+}
+
 #[derive(Clone, CanonicalSerialize, CanonicalDeserialize)]
 pub struct LeanProvingKey<E: Pairing> {
     pub vk: ark_groth16::VerifyingKey<E>,
     pub beta_g1: E::G1Affine,
     pub delta_g1: E::G1Affine,
-    /// `enforce_public_input` ensures statement binding (through B and C) and copy constraints are removed from `r1cs_to_qap.rs`,
-    /// so this carries no clean public input handles.
-    pub a_query_wit: Vec<E::G1Affine>,
+    /// Witness-only A-query bases (public slots zeroed).
+    pub a_query: Vec<E::G1Affine>,
     pub b_g1_query: Vec<E::G1Affine>,
     pub b_g2_query: Vec<E::G2Affine>,
     /// Sparse H_{ij} bases for witness terms.
@@ -32,6 +61,9 @@ pub struct LeanProvingKey<E: Pairing> {
     /// Only non-zero bases are stored.
     pub h_query_wit: Vec<(u32, u32, E::G1Affine)>,
     pub l_query: Vec<E::G1Affine>,
+    pub t_beta: PairingOutput<E>,
+    pub t_delta: PairingOutput<E>,
+    pub t_v: Vec<PairingOutput<E>>,
 }
 
 /// Generate a Groth16 proof using the Lean CRS.
@@ -49,7 +81,7 @@ pub fn prove_lean<E: Pairing, C: ConstraintSynthesizer<E::ScalarField>>(
     pk: &LeanProvingKey<E>,
     circuit: C,
     mut rng: impl ark_std::rand::Rng,
-) -> Result<(Proof<E>, Vec<E::ScalarField>), ark_relations::r1cs::SynthesisError> {
+) -> Result<(LeanProof<E>, Vec<E::ScalarField>), ark_relations::r1cs::SynthesisError> {
     let r = E::ScalarField::rand(&mut rng);
     let s = E::ScalarField::rand(&mut rng);
     prove_lean_with_randomizers(pk, circuit, r, s)
@@ -60,7 +92,7 @@ pub fn prove_lean_with_randomizers<E: Pairing, C: ConstraintSynthesizer<E::Scala
     circuit: C,
     r: E::ScalarField,
     s: E::ScalarField,
-) -> Result<(Proof<E>, Vec<E::ScalarField>), ark_relations::r1cs::SynthesisError> {
+) -> Result<(LeanProof<E>, Vec<E::ScalarField>), ark_relations::r1cs::SynthesisError> {
     let prove_start = Instant::now();
 
     // 1. Synthesize circuit to get witness assignment
@@ -92,20 +124,20 @@ pub fn prove_lean_with_randomizers<E: Pairing, C: ConstraintSynthesizer<E::Scala
     // let r = E::ScalarField::rand(&mut rng);
     // let s = E::ScalarField::rand(&mut rng);
 
-    // 3. Compute A = alpha + sum a_i A_i + r delta
+    // 3. Compute A' = sum a_i A_i + r delta (no alpha)
     let a_start = Instant::now();
     let mut a_acc = pk.vk.alpha_g1.into_group();
-    if pk.a_query_wit.len() != num_vars {
+    if pk.a_query.len() != num_vars {
         return Err(ark_relations::r1cs::SynthesisError::Unsatisfiable);
     }
     let scalars_bigint: Vec<_> = full_assignment.iter().map(|s| s.into_bigint()).collect();
 
-    let a_linear = <E::G1 as VariableBaseMSM>::msm_bigint(&pk.a_query_wit, &scalars_bigint);
+    let a_linear = <E::G1 as VariableBaseMSM>::msm_bigint(&pk.a_query, &scalars_bigint);
     a_acc += a_linear;
     a_acc += pk.delta_g1.into_group() * r;
     eprintln!(
         "[LeanProver] A-term MSM ({} points) in {:.2}ms",
-        pk.a_query_wit.len(),
+        pk.a_query.len(),
         a_start.elapsed().as_secs_f64() * 1000.0
     );
 
@@ -226,12 +258,55 @@ pub fn prove_lean_with_randomizers<E: Pairing, C: ConstraintSynthesizer<E::Scala
         prove_start.elapsed().as_secs_f64() * 1000.0
     );
 
+    assert!(
+        !full_assignment.is_empty(),
+        "full assignment must contain the constant 1 column"
+    );
+
+    if full_assignment[0] != E::ScalarField::one() {
+        eprintln!(
+            "[LeanProver][warn] constant term != 1: {:?}",
+            full_assignment[0]
+        );
+    }
+
+    let alpha_b = compute_alpha_b(&full_assignment, &s, pk);
+    
+    // Compute alpha_c = s * e(α, δ) to compensate for the s*α term missing from C
+    // This is because C = s*A + ... and A is missing α, so C is missing s*α
+    let alpha_c: PairingOutput<E> = PairingOutput(pk.t_delta.0.pow(s.into_bigint()));
+
     Ok((
-        Proof {
+        LeanProof {
             a: a_acc.into_affine(),
             b: b_g2_acc.into_affine(),
             c: c_acc.into_affine(),
+            alpha_b,
+            alpha_c,
         },
         full_assignment,
     ))
+}
+
+fn compute_alpha_b<E: Pairing>(
+    full_assignment: &[E::ScalarField],
+    s: &E::ScalarField,
+    pk: &LeanProvingKey<E>,
+) -> PairingOutput<E> {
+    let mut acc = pk.t_beta.0.clone();
+    assert!(
+        pk.t_v.len() == full_assignment.len(),
+        "t_v length ({}) must equal assignment length ({})",
+        pk.t_v.len(),
+        full_assignment.len()
+    );
+    for (coeff, tv) in full_assignment.iter().zip(pk.t_v.iter()) {
+        if !coeff.is_zero() {
+            let pow = tv.0.pow(coeff.into_bigint());
+            acc *= pow;
+        }
+    }
+    let delta_pow = pk.t_delta.0.pow(s.into_bigint());
+    acc *= delta_pow;
+    PairingOutput(acc)
 }

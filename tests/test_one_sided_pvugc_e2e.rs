@@ -141,11 +141,21 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // === DEPOSIT TIME ===
 
     // Build PVUGC VK wrapper
+    // t_const_points_gt needs length = public_inputs.len() + 1
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::One;
+    let num_public_inputs = vault_utxo.len();
+    let t_const_dummy: Vec<PairingOutput<E>> = vec![
+        PairingOutput(<E as Pairing>::TargetField::one()); 
+        num_public_inputs + 1
+    ];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_const_dummy,
+        alpha_g1_beta_g2,
     );
 
     // Generate ρ
@@ -305,11 +315,17 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     let (pk2, vk2) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit2.clone(), &mut rng).unwrap();
+    let t_const_dummy2: Vec<PairingOutput<E>> = vec![
+        PairingOutput(<E as Pairing>::TargetField::one()); 
+        vault2_utxo.len() + 1
+    ];
+    let alpha_g1_beta_g2_2 = E::pairing(vk2.alpha_g1, vk2.beta_g2);
     let pvugc_vk2 = PvugcVk::new_with_all_witnesses_isolated(
         vk2.beta_g2,
         vk2.delta_g2,
         pk2.b_g2_query.clone(),
-        vec![],
+        t_const_dummy2,
+        alpha_g1_beta_g2_2,
     );
 
     // Generate proof for vault 2
@@ -379,11 +395,19 @@ fn test_delta_sign_sanity() {
         y: Some(Fr::from(5u64)),
     };
     let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::One;
+    let t_const_dummy: Vec<PairingOutput<E>> = vec![
+        PairingOutput(<E as Pairing>::TargetField::one()); 
+        vault_utxo.len() + 1
+    ];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_const_dummy,
+        alpha_g1_beta_g2,
     );
     let rho = Fr::rand(&mut rng);
 
@@ -499,11 +523,19 @@ fn test_witness_independence() {
     // Compute R = e(α,β)·e(L(x),γ) from (vk, public_x)
     let r_statement = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
 
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::One;
+    let t_const_dummy: Vec<PairingOutput<E>> = vec![
+        PairingOutput(<E as Pairing>::TargetField::one()); 
+        public_x.len() + 1
+    ];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_const_dummy,
+        alpha_g1_beta_g2,
     );
 
     let rho = Fr::rand(&mut rng);
@@ -575,11 +607,19 @@ fn test_phase1_integration() {
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
+    use ark_ec::pairing::PairingOutput;
+    use ark_ff::One;
+    let t_const_dummy: Vec<PairingOutput<E>> = vec![
+        PairingOutput(<E as Pairing>::TargetField::one()); 
+        statement_x.len() + 1
+    ];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_const_dummy,
+        alpha_g1_beta_g2,
     );
 
     let rho = Fr::rand(&mut rng);

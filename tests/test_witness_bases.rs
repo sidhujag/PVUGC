@@ -5,7 +5,7 @@ mod tests {
     use ark_ec::pairing::Pairing;
     use ark_ec::{AffineRepr, CurveGroup};
     use ark_ff::{Field, UniformRand};
-use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
+    use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
     use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
     use ark_snark::SNARK;
     use ark_std::{rand::SeedableRng, test_rng, One, Zero};
@@ -139,22 +139,23 @@ use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
         )
         .expect("Lean proof failed");
 
-        // 7. Verify C element match
-        // expected_c = proof_lean.c + q_const[0]
-        // Because public inputs are empty, the only "missing" part from lean proof is the constant term H_{0,0}.
+        // 7. Verify C element match in GT space
+        // Original: c_std = c_lean + gap (in G1)
+        // With GT baking: e(c_std, delta) = e(c_lean, delta) + t_const_gt[0]
+        // Because public inputs are empty, the only "missing" part from lean proof is the constant term.
 
-        let c_lean = proof_lean.c.into_group();
-        let c_std = proof_std.c.into_group();
+        use ark_bw6_761::BW6_761;
 
-        // pvugc_vk.q_const_points[0] is the gap for the constant term
-        let q_const_0 = pvugc_vk.q_const_points[0].into_group();
+        let e_c_lean_delta = BW6_761::pairing(proof_lean.c, lean_pk.vk.delta_g2);
+        let e_c_std_delta = BW6_761::pairing(proof_std.c, pk_outer.vk.delta_g2);
+        let t_const_0 = pvugc_vk.t_const_points_gt[0];
 
-        let c_reconstructed = c_lean + q_const_0;
+        let lhs = e_c_lean_delta + t_const_0;
 
-        assert_eq!(c_reconstructed.into_affine(), c_std.into_affine(),
-            "Mismatch! h_wit (Lean) + q_const != Standard C. The witness bases are likely incorrect.");
+        assert_eq!(lhs, e_c_std_delta,
+            "Mismatch! e(c_lean, delta) + t_const_gt != e(c_std, delta). The witness bases are likely incorrect.");
 
-        println!("SUCCESS: Lean Proof + Q_const matches Standard Proof. h_wit is correct.");
+        println!("SUCCESS: Lean Proof + t_const_gt matches Standard Proof in GT. h_wit is correct.");
     }
 
     #[test]

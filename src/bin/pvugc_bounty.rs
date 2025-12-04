@@ -240,11 +240,13 @@ fn arm(passphrase: &str, ctx: &str, path: PathBuf) {
     use ark_ec::pairing::PairingOutput;
     use ark_ff::{Field, One};
     let q_dummy = vec![PairingOutput(<<E as Pairing>::TargetField as Field>::ONE); vk.gamma_abc_g1.len()];
+    let alpha_g1_beta_g2 = E::pairing(vk.alpha_g1, vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
         q_dummy,
+        alpha_g1_beta_g2,
     );
 
     let statement_x = vec![h];
