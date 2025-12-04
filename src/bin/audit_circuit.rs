@@ -37,8 +37,7 @@ enum TrapdoorMonomial {
     AlphaBetaDelta, // alpha * beta * delta
     // GammaDelta removed because gamma cancels out in e(L, gamma).
     // Instead, we model the expanded terms of L*delta directly.
-    
-    DeltaSq,        // Any(x) * delta^2 (Merges H and u terms)
+    DeltaSq, // Any(x) * delta^2 (Merges H and u terms)
 
     // --- Handle Terms from L_k * D_pub (1/delta * delta cancels) ---
     // Result is (beta*u + alpha*v + w)(beta + V)
@@ -86,6 +85,10 @@ enum TrapdoorMonomial {
     BetaV,
     // v_k (G1) * v_j (G2) -> v * v
     PureVV,
+    // --- Static GT table handles (deg_rho = 0) ---
+    AlphaBetaStatic,  // alpha * beta
+    AlphaDeltaStatic, // alpha * delta
+    AlphaVStatic,     // alpha * v
 }
 
 struct TrapdoorPolyVector {
@@ -196,37 +199,53 @@ fn run_audit(subject: &dyn AuditSubject) {
     let extractor = MatrixExtractor::new(cs.clone());
 
     // 0. Check public column structure (Lean CRS diagnostic)
-    let mut public_inputs_a_zero = true;  // Columns 1..num_pub (actual public inputs)
+    let mut public_inputs_a_zero = true; // Columns 1..num_pub (actual public inputs)
     let mut public_inputs_b_nonzero = true; // Columns 1..num_pub MUST be in B
-    let constant_one_has_a = !extractor.a_cols[0].is_empty();  // Column 0 (constant "1")
-    
-    for i in 1..num_pub {  // Skip column 0 (constant "1" is expected to have A entries)
+    let constant_one_has_a = !extractor.a_cols[0].is_empty(); // Column 0 (constant "1")
+
+    for i in 1..num_pub {
+        // Skip column 0 (constant "1" is expected to have A entries)
         let a_count = extractor.a_cols[i].len();
         let b_count = extractor.b_cols[i].len();
         let c_count = extractor.c_cols[i].len();
-        
-        println!("  [Column {}] A={}, B={}, C={}", i, a_count, b_count, c_count);
-        
+
+        println!(
+            "  [Column {}] A={}, B={}, C={}",
+            i, a_count, b_count, c_count
+        );
+
         if a_count > 0 {
             public_inputs_a_zero = false;
-            println!("  [FAIL] Column {} has A entries! Public inputs must be A-free.", i);
+            println!(
+                "  [FAIL] Column {} has A entries! Public inputs must be A-free.",
+                i
+            );
         }
 
         if b_count == 0 {
             public_inputs_b_nonzero = false;
-            println!("  [FAIL] Column {} has B=0! Public inputs must be in B for statement dependency.", i);
+            println!(
+                "  [FAIL] Column {} has B=0! Public inputs must be in B for statement dependency.",
+                i
+            );
         }
-        
+
         // Check if IC_i would be zero (security issue!)
         if b_count == 0 && c_count == 0 {
-            println!("  [SECURITY] Column {} has v_i=0 AND w_i=0 → IC_i=0 → PUBLIC INPUT NOT VERIFIED!", i);
+            println!(
+                "  [SECURITY] Column {} has v_i=0 AND w_i=0 → IC_i=0 → PUBLIC INPUT NOT VERIFIED!",
+                i
+            );
         }
     }
-    
+
     if constant_one_has_a {
-        println!("  [Column 0] Constant '1' has {} A entries (expected, baked into α)", extractor.a_cols[0].len());
+        println!(
+            "  [Column 0] Constant '1' has {} A entries (expected, baked into α)",
+            extractor.a_cols[0].len()
+        );
     }
-    
+
     if public_inputs_a_zero && public_inputs_b_nonzero {
         println!("[PASS] Public input structure valid (A=0, B>0) → Lean CRS compatible & Statement Dependent");
     } else {
@@ -291,8 +310,7 @@ fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool 
         if extractor.a_cols[col].is_empty() || extractor.b_cols[col].is_empty() {
             continue;
         }
-        let rows_b: HashSet<usize> =
-            extractor.b_cols[col].iter().map(|(row, _)| *row).collect();
+        let rows_b: HashSet<usize> = extractor.b_cols[col].iter().map(|(row, _)| *row).collect();
         for (row, _) in &extractor.a_cols[col] {
             if rows_b.contains(row) {
                 println!(
@@ -346,8 +364,7 @@ fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
     let circuit_inner = AddCircuit::with_public_input(x_val);
     let proof_inner =
         Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng).expect("inner proof");
-    
-    
+
     let x_inner = vec![x_val];
 
     OuterCircuit::new((*fixture.vk_inner).clone(), x_inner, proof_inner)
@@ -506,11 +523,11 @@ fn build_target(
     // L_pub = Sum x_i (beta u_i + alpha v_i + w_i)
     // Normalized Target (x delta) = alpha*beta*delta + delta * L_pub - H*delta^2
     // = alpha*beta*delta + beta*delta*U + alpha*delta*V + delta*W - H*delta^2
-    
+
     let mut u_sum = DensePolynomial::zero();
     let mut v_sum = DensePolynomial::zero();
     let mut w_sum = DensePolynomial::zero();
-    
+
     for (u, v, w) in pub_polys {
         u_sum += u;
         v_sum += v;
@@ -588,7 +605,6 @@ fn check_independence_streaming(
     }
     let all_monos = vec![
         TrapdoorMonomial::AlphaBetaDelta,
-        // GammaDelta removed
         TrapdoorMonomial::DeltaSq,
         TrapdoorMonomial::BetaSqU,
         TrapdoorMonomial::BetaU,
@@ -607,6 +623,9 @@ fn check_independence_streaming(
         TrapdoorMonomial::AlphaDeltaSq,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
+        TrapdoorMonomial::AlphaBetaStatic,
+        TrapdoorMonomial::AlphaDeltaStatic,
+        TrapdoorMonomial::AlphaVStatic,
     ];
     for m in all_monos {
         mono_set.insert(m);
@@ -642,8 +661,7 @@ fn check_independence_streaming(
         if dependency_report.is_none() {
             let residue = basis.reduce(target_vec.clone());
             if residue.iter().all(|x| x.is_zero()) {
-                dependency_report =
-                    Some(format!("column {} via {}", col_idx, label));
+                dependency_report = Some(format!("column {} via {}", col_idx, label));
             }
         }
     };
@@ -751,25 +769,29 @@ fn check_independence_streaming(
         check_idx, total_checks
     );
 
-    // 7. Fixed handles
-    // Alpha * D_pub * delta -> alpha(beta+V)delta = alpha*beta*delta + alpha*V*delta
-    // The adversary HAS these handles because they have [alpha]_1 and [public_leg]_2.
-    // [public_leg]_2 = [beta]_2 + Sum x_i [B_i]_2.
-    // Pairing [alpha]_1 with [public_leg]_2 gives e(alpha, beta) + Sum x_i e(alpha, B_i).
-    // e(alpha, beta) corresponds to AlphaBetaDelta (normalized).
-    // e(alpha, B_i) corresponds to AlphaDeltaV (normalized).
-    /*add_basis_vec(
-        "Alpha * D_pub * delta",
+    // 8. Static GT table handles (deg_rho = 0).
+    // T_beta = e(alpha, beta)  → AlphaBetaStatic
+    add_basis_vec(
+        "GT T_beta (alpha*beta, no delta)",
         usize::MAX,
-        vec![
-            (TrapdoorMonomial::AlphaBetaDelta, Fr::one()),
-            (TrapdoorMonomial::AlphaDeltaV, v_pub_r),
-        ],
-    );*/
-    // Alpha * D_delta * delta -> alpha * delta^2
-    add_basis_vec("Alpha * D_delta * delta", usize::MAX, vec![(TrapdoorMonomial::AlphaDeltaSq, Fr::one())]);
-    // Alpha * D_j * delta -> alpha * v_j * delta -> AlphaDeltaV * Any
-    add_basis_vec("Alpha * D_j * delta", usize::MAX, vec![(TrapdoorMonomial::AlphaDeltaV, Fr::one())]);
+        vec![(TrapdoorMonomial::AlphaBetaStatic, Fr::one())],
+    );
+
+    // T_delta = e(alpha, delta) → AlphaDeltaStatic
+    add_basis_vec(
+        "GT T_delta (alpha*delta, no delta^2)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::AlphaDeltaStatic, Fr::one())],
+    );
+
+    // T_v[i] = e(alpha, B_i) for *all* B-columns.
+    // The adversary gets the span of {alpha * v_i}; we model that as one generic AlphaVStatic direction.
+    // You can refine this later if you want multiple independent directions.
+    add_basis_vec(
+        "GT T_v aggregate (alpha*v, no delta)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::AlphaVStatic, Fr::one())],
+    );
 
     let residue = basis.reduce(target_vec);
     let is_safe = residue.iter().all(|x| x.is_zero()) == false;
@@ -823,10 +845,7 @@ fn run_independence_checks(
             label, num_checks
         );
     } else {
-        println!(
-            "[FAIL] Independence Check{} (Target in Span).",
-            label
-        );
+        println!("[FAIL] Independence Check{} (Target in Span).", label);
     }
     all_safe
 }
