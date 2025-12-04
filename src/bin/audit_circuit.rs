@@ -1,10 +1,30 @@
 //! PVUGC Trapdoor-Aware Audit Tool
 //!
-//! This tool audits circuits for algebraic security.
-//! It performs:
+//! This tool audits circuits for algebraic security in the AGBGM (Algebraic Generic
+//! Bilinear Group Model) for the PVUGC Witness Encryption scheme.
+//!
+//! ## Security Model
+//!
+//! With **Full Span Separation** (U, V, W all separated), the minimal secure architecture is:
+//!
+//! **REQUIRED:**
+//! 1. Lean CRS (Baked Quotient/GT-Baking) - prevents quotient forgery
+//! 2. Circuit Linearity - enables Baked Quotient strategy  
+//! 3. Full Span Separation (U, V, W verified) - blocks all PK-based attacks
+//! 4. Aggregation - prevents GT-Slicing attacks
+//!
+//! ## Audit Checks
+//!
 //! 1. **Linearity Check**: Verifies that Public Inputs do not multiply each other.
-//! 2. **Independence Check**: Verifies that the "Baked Quotient" Target lies outside the linear span of the
-//!    "Lean CRS" + "Ciphertext" handles in the Generic Bilinear Group Model (AGBGM).
+//! 2. **Span Separation Check**: Verifies U/V/W_pub ⊥ U/V/W_wit (critical for security!)
+//! 3. **Independence Check**: Verifies target is outside adversary's span in AGBGM.
+//!
+//! ## Key Modeling Features
+//!
+//! - **ρ-Degree Separation**: Distinguishes Static (deg_ρ=0) vs Armed (deg_ρ=1) handles.
+//!   Static GT table entries CANNOT reach the dynamic KEM target.
+//! - **Span-Separated Pub/Wit**: Uses separate monomials (e.g., AlphaDeltaVPub vs AlphaDeltaVWit)
+//!   to properly model algebraic orthogonality when span separation holds.
 //!
 //! Optimization: Uses streaming column processing + Incremental Basis + Sparse Eval.
 
@@ -25,70 +45,97 @@ use arkworks_groth16::{
     test_circuits::AddCircuit,
     test_fixtures::get_fixture,
 };
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Fr = OuterFr;
 
 // All handles/targets are multiplied by delta to clear denominators from L-queries.
-// Base ring: F[alpha, beta, gamma, delta, x]
+// Base ring: F[alpha, beta, gamma, delta, rho, x]
+//
+// IMPORTANT: ρ-DEGREE SEPARATION
+// The audit distinguishes between:
+// - Static handles (deg_ρ = 0): GT table entries like e(α, β), e(α, v_i)
+// - Armed handles (deg_ρ = 1): Dynamically armed values like e(L_k, δ^ρ)
+// Static handles CANNOT synthesize the dynamic KEM target (which has deg_ρ = 1).
+// The monomial names below indicate ρ-degree:
+// - Monomials WITHOUT "Static" suffix: Armed (deg_ρ = 1)
+// - Monomials WITH "Static" suffix: Static (deg_ρ = 0)
+//
+// IMPORTANT: FULL SPAN SEPARATION (U, V, W)
+// When span separation holds for ALL three polynomial types:
+// - U_pub ⊥ U_wit, V_pub ⊥ V_wit, W_pub ⊥ W_wit
+// The adversary cannot synthesize public components from witness handles.
+// We model this by using SEPARATE monomials for Pub vs Wit.
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum TrapdoorMonomial {
-    // --- Target Terms (scaled by delta) ---
-    AlphaBetaDelta, // alpha * beta * delta
-    // GammaDelta removed because gamma cancels out in e(L, gamma).
-    // Instead, we model the expanded terms of L*delta directly.
-    DeltaSq, // Any(x) * delta^2 (Merges H and u terms)
+    // ============================================================
+    // TARGET TERMS (Armed, deg_ρ = 1) - All PUBLIC polynomials!
+    // ============================================================
+    // Standard Groth16 extraction: e(A,B) - e(C,δ) = e(α,β) + e(IC(x), γ)
+    // Since IC(x) = Σ x_i · (β·u_i + α·v_i + w_i)/γ, pairing with γ gives:
+    //   e(IC(x), γ) = β·U_pub + α·V_pub + W_pub (γ cancels!)
+    // So the target is: ρ·(α·β + β·U_pub + α·V_pub + W_pub)
+    // Under δ-normalization: ρ·δ·(α·β + β·U_pub + α·V_pub + W_pub)
+    AlphaBetaDelta, // ρ * alpha * beta * delta (fixed)
+    DeltaSq,        // ρ * delta^2 (from quotient H)
 
-    // --- Handle Terms from L_k * D_pub (1/delta * delta cancels) ---
-    // Result is (beta*u + alpha*v + w)(beta + V)
-    BetaSqU,    // beta^2 * u
-    BetaU,      // beta * u * V
-    AlphaBetaV, // alpha * beta * v
-    AlphaV,     // alpha * v * V
-    BetaW,      // beta * w
-    W,          // w * V
+    // ============================================================
+    // SPAN-SEPARATED TARGET COMPONENTS (Pub vs Wit)
+    // ============================================================
+    // These are DISTINCT monomials when span separation holds.
+    // The target uses PUBLIC polynomials (U_pub, V_pub, W_pub).
+    // L-query handles provide WITNESS polynomials (U_wit, V_wit, W_wit).
+    // If span separation holds, witness handles CANNOT synthesize target.
+    
+    // β·δ·U components
+    BetaDeltaUPub, // ρ * beta * delta * U_pub (TARGET component)
+    BetaDeltaUWit, // ρ * beta * delta * U_wit (from witness L-queries)
+    
+    // α·δ·V components
+    AlphaDeltaVPub, // ρ * alpha * delta * V_pub (from bundled α handle + TARGET)
+    AlphaDeltaVWit, // ρ * alpha * delta * V_wit (from witness L-queries)
+    
+    // δ·W components  
+    DeltaWPub, // ρ * delta * W_pub (TARGET component)
+    DeltaWWit, // ρ * delta * W_wit (from witness L-queries)
 
-    // Result is (beta*u + ...)(v_j)
-    BetaUV,  // beta * u * v
-    AlphaVV, // alpha * v * v
-    WV,      // w * v
+    // ============================================================
+    // HANDLE TERMS from L_k * D_pub (Armed, deg_ρ = 1)
+    // ============================================================
+    // These are from WITNESS L-queries, so they use witness polynomials
+    BetaSqU,    // ρ * beta^2 * u_wit
+    BetaU,      // ρ * beta * u_wit * V
+    AlphaBetaV, // ρ * alpha * beta * v_wit (available in standard Groth16)
+    AlphaV,     // ρ * alpha * v_wit * V (available in standard Groth16)
+    BetaW,      // ρ * beta * w_wit
+    W,          // ρ * w_wit * V
 
-    // --- Handle Terms from L_k * D_delta (Clean L * delta) ---
-    // Result is (beta*u + alpha*v + w) * delta
-    BetaDeltaU,  // beta * delta * u
-    AlphaDeltaV, // alpha * delta * v
-    DeltaW,      // delta * w
+    // Result is (beta*u + alpha*v + w)(v_j) - full L-query
+    BetaUV,  // ρ * beta * u_wit * v
+    AlphaVV, // ρ * alpha * v_wit * v (available in standard Groth16)
+    WV,      // ρ * w_wit * v
 
-    // --- Handle Terms from u_k * D_pub (Clean u * delta) ---
-    // u * (beta + V) * delta = beta*delta*u + delta*u*V
-    // BetaDeltaU is already defined above (MATCH!)
-    DeltaUV, // delta * u * V
+    // ============================================================
+    // OTHER HANDLE TERMS (Armed, deg_ρ = 1)
+    // ============================================================
+    DeltaUV,     // ρ * delta * u * V
+    DeltaPureUV, // ρ * delta * u * v
+    AlphaDeltaSq, // ρ * alpha * delta^2
+    BetaV,       // ρ * v * beta
+    PureVV,      // ρ * v * v
 
-    // --- Handle Terms from u_k * D_delta (Clean u * delta) ---
-    // u * delta * delta = delta^2 * u
-    // Merged into DeltaSq
-
-    // --- Handle Terms from u_k * D_j (Clean u * v * delta) ---
-    // u * v * delta
-    DeltaPureUV, // delta * u * v
-
-    // --- Fixed Alpha Handles ---
-    // alpha * D_pub * delta = alpha(beta+V)delta = alpha*beta*delta + alpha*V*delta
-    // AlphaDeltaV represents alpha * delta * V_pub
-
-    // alpha * D_delta * delta = alpha * delta^2
-    AlphaDeltaSq, // alpha * delta^2
-
-    // --- Raw B-Query Handles (from b_g1_query and b_g2_query) ---
-    // These are available for ALL variables in standard Groth16.
-    // v_k (G1) * beta (G2) -> v * beta
-    BetaV,
-    // v_k (G1) * v_j (G2) -> v * v
-    PureVV,
-    // --- Static GT table handles (deg_rho = 0) ---
-    AlphaBetaStatic,  // alpha * beta
-    AlphaDeltaStatic, // alpha * delta
-    AlphaVStatic,     // alpha * v
+    // ============================================================
+    // STATIC GT TABLE HANDLES (Static, deg_ρ = 0)
+    // ============================================================
+    // These are precomputed GT elements, NOT armed with ρ.
+    // They CANNOT synthesize the target because target has deg_ρ = 1.
+    // We keep them as separate monomials to prevent incorrect cancellation.
+    AlphaBetaStatic,  // alpha * beta (deg_ρ = 0)
+    AlphaDeltaStatic, // alpha * delta (deg_ρ = 0)
+    AlphaVStatic,     // alpha * v (deg_ρ = 0)
 }
 
 struct TrapdoorPolyVector {
@@ -170,6 +217,113 @@ impl AuditSubject for MockQuadratic {
     }
 }
 
+/// TEST CIRCUIT: V Span Separation SHOULD FAIL
+/// For v_pub ∈ span(v_wit), we need v_pub = c * v_wit (scalar multiple).
+/// 
+/// SIMPLE: Put x and w in B at EXACTLY the same single row.
+/// Then v_x = L_0 and v_w = L_0, so v_x = 1 * v_w.
+struct MockSpanViolation;
+impl AuditSubject for MockSpanViolation {
+    fn name(&self) -> &'static str {
+        "Mock V-Span Violation (SHOULD FAIL V-span)"
+    }
+    fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
+        let x = cs.new_input_variable(|| Ok(Fr::from(1u64)))?;  // public
+        let w = cs.new_witness_variable(|| Ok(Fr::from(1u64)))?; // witness
+        let one = Variable::One;
+        
+        // SINGLE constraint that puts BOTH x and w in B at row 0:
+        // A=1, B=(x+w), C=2
+        // This gives: v_x = L_0 and v_w = L_0
+        // So v_x = 1 * v_w → v_pub IS IN span(v_wit)!
+        let lc_a = LinearCombination::from((Fr::one(), one));
+        let mut lc_b = LinearCombination::zero();
+        lc_b += (Fr::one(), x);  // x in B at row 0
+        lc_b += (Fr::one(), w);  // w in B at row 0 (SAME ROW!)
+        let lc_c = LinearCombination::from((Fr::from(2u64), one));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+        
+        // Add a dummy constraint to satisfy minimum circuit requirements
+        // 1 * 1 = 1
+        let lc_a2 = LinearCombination::from((Fr::one(), one));
+        let lc_b2 = LinearCombination::from((Fr::one(), one));
+        let lc_c2 = LinearCombination::from((Fr::one(), one));
+        cs.enforce_constraint(lc_a2, lc_b2, lc_c2)?;
+        
+        Ok(())
+    }
+}
+
+/// TEST CIRCUIT: U Span Separation SHOULD FAIL
+/// Put x and w in A at same row (so u_x = u_w).
+/// Note: This also needs x in B for statement dependence.
+struct MockUSpanViolation;
+impl AuditSubject for MockUSpanViolation {
+    fn name(&self) -> &'static str {
+        "Mock U-Span Violation (SHOULD FAIL U-span)"
+    }
+    fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
+        let x = cs.new_input_variable(|| Ok(Fr::from(1u64)))?;  // public
+        let w = cs.new_witness_variable(|| Ok(Fr::from(1u64)))?; // witness
+        let one = Variable::One;
+        
+        // Constraint 0: Put BOTH x and w in A at SAME row
+        // A=(x+w), B=1, C=(x+w)
+        // This gives: u_x = L_0 and u_w = L_0
+        // So u_x = 1 * u_w → u_pub IS IN span(u_wit)!
+        let mut lc_a0 = LinearCombination::zero();
+        lc_a0 += (Fr::one(), x);  // x in A at row 0
+        lc_a0 += (Fr::one(), w);  // w in A at row 0 (SAME ROW!)
+        let lc_b0 = LinearCombination::from((Fr::one(), one));
+        let mut lc_c0 = LinearCombination::zero();
+        lc_c0 += (Fr::one(), x);
+        lc_c0 += (Fr::one(), w);
+        cs.enforce_constraint(lc_a0, lc_b0, lc_c0)?;
+        
+        // Constraint 1: Put x in B for statement dependence (separate row)
+        // 1 * x = x
+        let lc_a1 = LinearCombination::from((Fr::one(), one));
+        let lc_b1 = LinearCombination::from((Fr::one(), x));
+        let lc_c1 = LinearCombination::from((Fr::one(), x));
+        cs.enforce_constraint(lc_a1, lc_b1, lc_c1)?;
+        
+        Ok(())
+    }
+}
+
+/// TEST CIRCUIT: W Span Separation SHOULD FAIL (but V should pass)
+/// Put x and w in C at same row (so w_x = w_w), but x in B at different row than w.
+struct MockWSpanViolation;
+impl AuditSubject for MockWSpanViolation {
+    fn name(&self) -> &'static str {
+        "Mock W-Span Violation (SHOULD FAIL W-span, V-span OK)"
+    }
+    fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
+        let x = cs.new_input_variable(|| Ok(Fr::from(1u64)))?;
+        let w = cs.new_witness_variable(|| Ok(Fr::from(1u64)))?;
+        let one = Variable::One;
+        
+        // Constraint 0: Put x in B (for statement dependence) but NOT where w is in B
+        // 1 * x = 1  → v_x = L_0
+        let lc_a0 = LinearCombination::from((Fr::one(), one));
+        let lc_b0 = LinearCombination::from((Fr::one(), x));
+        let lc_c0 = LinearCombination::from((Fr::one(), one));
+        cs.enforce_constraint(lc_a0, lc_b0, lc_c0)?;
+        
+        // Constraint 1: Put BOTH x and w in C at SAME row
+        // 1 * 1 = x + w  → w_x = L_1 and w_w = L_1
+        // So w_x = 1 * w_w → w_pub IS IN span(w_wit)!
+        let lc_a1 = LinearCombination::from((Fr::one(), one));
+        let lc_b1 = LinearCombination::from((Fr::one(), one));
+        let mut lc_c1 = LinearCombination::zero();
+        lc_c1 += (Fr::one(), x);  // x in C at row 1
+        lc_c1 += (Fr::one(), w);  // w in C at row 1 (SAME ROW!)
+        cs.enforce_constraint(lc_a1, lc_b1, lc_c1)?;
+        
+        Ok(())
+    }
+}
+
 fn main() {
     println!("PVUGC Production Audit Tool");
     println!("===========================\n");
@@ -177,6 +331,9 @@ fn main() {
     let subjects: Vec<Box<dyn AuditSubject>> = vec![
         Box::new(MockLinear),
         Box::new(MockQuadratic),
+        Box::new(MockSpanViolation),    // Should FAIL V-span
+        Box::new(MockUSpanViolation),   // Should FAIL U-span
+        Box::new(MockWSpanViolation),   // Should FAIL W-span
         Box::new(ProductionSubject(get_valid_circuit())),
     ];
 
@@ -281,6 +438,50 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("[FAIL] Mixing Check (Public*Witness detected).");
     }
 
+    // 1.6 Span Separation Checks (U_pub ⊥ U_wit, V_pub ⊥ V_wit, W_pub ⊥ W_wit)
+    println!("\n--- Span Separation Analysis ---");
+    
+    // V (B-matrix) - CRITICAL for α-handle attack
+    let v_span_separated = check_span_separation_matrix(
+        &extractor, num_pub, num_pub + num_wit, "V", "B",
+        |e, i| &e.b_cols[i],
+        |e, i, r| { let (_, v, _) = e.evaluate_column(i, r); v },
+    );
+    if v_span_separated {
+        println!("[PASS] V Span Separation (V_pub ⊥ V_wit) → α-handle attack blocked.");
+    } else {
+        println!("[FAIL] V Span Separation (V_pub ∈ span V_wit) → Lean CRS required!");
+    }
+    
+    // U (A-matrix) - for L-query derived β·U attacks
+    let u_span_separated = check_span_separation_matrix(
+        &extractor, num_pub, num_pub + num_wit, "U", "A",
+        |e, i| &e.a_cols[i],
+        |e, i, r| { let (u, _, _) = e.evaluate_column(i, r); u },
+    );
+    if u_span_separated {
+        println!("[PASS] U Span Separation (U_pub ⊥ U_wit) → β·U synthesis blocked.");
+    } else {
+        println!("[WARN] U Span Separation failed (U_pub ∈ span U_wit) → L-query risk.");
+    }
+    
+    // W (C-matrix) - for L-query derived W attacks
+    let w_span_separated = check_span_separation_matrix(
+        &extractor, num_pub, num_pub + num_wit, "W", "C",
+        |e, i| &e.c_cols[i],
+        |e, i, r| { let (_, _, w) = e.evaluate_column(i, r); w },
+    );
+    if w_span_separated {
+        println!("[PASS] W Span Separation (W_pub ⊥ W_wit) → W synthesis blocked.");
+    } else {
+        println!("[WARN] W Span Separation failed (W_pub ∈ span W_wit) → L-query risk.");
+    }
+    
+    // Combined span separation result
+    let full_span_separated = v_span_separated && u_span_separated && w_span_separated;
+    
+    println!("--- End Span Separation ---\n");
+
     // 2. Independence Check
     let h_const = compute_h_const(&pub_polys, &extractor.domain);
     let target = build_target(&pub_polys, &h_const);
@@ -295,14 +496,66 @@ fn run_audit(subject: &dyn AuditSubject) {
         num_checks,
     );
 
+    // Final verdict
+    let fully_safe = is_linear && is_unmixed && all_safe && no_pub_ab_overlap;
+    
+    println!("\n=== SECURITY SUMMARY (AGBGM) ===");
+    println!("Linearity:          {}", if is_linear { "PASS" } else { "FAIL" });
+    println!("No Pub/Wit Mix:     {}", if is_unmixed { "PASS" } else { "FAIL" });
+    println!("No Pub A/B Overlap: {}", if no_pub_ab_overlap { "PASS" } else { "FAIL" });
+    println!("V Span Separation:  {}", if v_span_separated { "PASS" } else { "FAIL" });
+    println!("U Span Separation:  {}", if u_span_separated { "PASS" } else { "FAIL" });
+    println!("W Span Separation:  {}", if w_span_separated { "PASS" } else { "FAIL" });
+    println!("Independence:       {}", if all_safe { "PASS" } else { "FAIL" });
+    
+    // Full span separation is THE critical security property
+    if full_span_separated {
+        println!("\n✅ FULL SPAN SEPARATION VERIFIED (U, V, W all orthogonal)!");
+        println!("");
+        println!("   This enables STANDARD GROTH16 architecture:");
+        println!("   • Standard L-queries are SAFE");
+        println!("   • Standard IC algebra");
+        println!("   • Standard decap works (proof-agnostic key extraction)");
+        println!("");
+        println!("   Attack blocking (AGBGM verified):");
+        println!("   • V-span blocks: e([α]_1, D_pub^ρ) pollution cancellation");
+        println!("   • U-span blocks: β·U_pub synthesis from witness L-queries");
+        println!("   • W-span blocks: W_pub synthesis from witness L-queries");
+    } else {
+        if !v_span_separated {
+            println!("\n⚠️  V SPAN SEPARATION FAILED!");
+            println!("   V_pub ∈ span(V_wit), so:");
+            println!("   • e([α]_1, D_pub^ρ) pollution CAN be cancelled");
+            println!("   • MUST use Lean CRS (remove [α]_1 from public PK)");
+        }
+        
+        if !u_span_separated || !w_span_separated {
+            println!("\n⚠️  U/W SPAN SEPARATION FAILED!");
+            println!("   Residue synthesis attack possible:");
+            println!("   • e(L_k, δ^ρ) gives ρ·(β·u_k + w_k)");
+            println!("   • If U_pub or W_pub in witness span, can synthesize target");
+            println!("   • This is a fundamental issue - circuit redesign may be needed");
+        }
+    }
+
     println!(
-        "RESULT: {}",
-        if is_linear && is_unmixed && all_safe && no_pub_ab_overlap {
-            "SAFE"
+        "\nRESULT: {}",
+        if fully_safe && full_span_separated {
+            "✅ SECURE (Standard Groth16 with Full Span Separation)"
+        } else if fully_safe {
+            "⚠️  CONDITIONALLY SAFE (requires additional mitigations)"
         } else {
-            "UNSAFE"
+            "❌ UNSAFE"
         }
     );
+    
+    if fully_safe && full_span_separated {
+        println!("\n=== MINIMAL REQUIRED ARCHITECTURE ===");
+        println!("1. Lean CRS (Baked Quotient/GT-Baking) - quotient forgery prevention");
+        println!("2. Circuit Linearity - verified above");
+        println!("3. Full Span Separation - verified above");
+        println!("4. Aggregation - prevents GT-Slicing (verify separately)");
+    }
 }
 
 fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
@@ -355,6 +608,251 @@ fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) ->
         }
     }
     true
+}
+
+/// Generalized Span Separation Check for any matrix (A, B, or C)
+/// 
+/// Checks if public polynomial P_pub is NOT in span of witness polynomials P_wit.
+/// Uses direct row-overlap check for reliability.
+/// 
+/// Parameters:
+/// - matrix_name: "U", "V", or "W" for display
+/// - col_name: "A", "B", or "C" for display  
+/// - get_col: closure to get column entries from extractor
+/// - eval_col: closure to evaluate column polynomial at a point
+fn check_span_separation_matrix<F, G>(
+    extractor: &MatrixExtractor, 
+    num_pub: usize, 
+    num_vars: usize,
+    matrix_name: &str,
+    col_name: &str,
+    get_col: F,
+    eval_col: G,
+) -> bool 
+where
+    F: Fn(&MatrixExtractor, usize) -> &Vec<(usize, Fr)>,
+    G: Fn(&MatrixExtractor, usize, Fr) -> Fr + Sync,
+{
+    let num_wit = num_vars - num_pub;
+    if num_wit == 0 {
+        println!("  [{}_SPAN] No witness columns to check.", matrix_name);
+        return true;
+    }
+    
+    // Collect all rows where public inputs (1..num_pub) have entries in this matrix
+    let mut pub_rows: HashSet<usize> = HashSet::new();
+    for i in 1..num_pub {
+        for &(row, _) in get_col(extractor, i) {
+            pub_rows.insert(row);
+        }
+    }
+    
+    if pub_rows.is_empty() {
+        println!("  [{}_SPAN] Public inputs have no {}-entries ({}_pub = 0). Trivially separated.", 
+                 matrix_name, col_name, matrix_name.to_lowercase());
+        return true;
+    }
+    
+    println!("  [{}_SPAN] Public inputs have {}-entries at {} rows: {:?}", 
+             matrix_name, col_name, pub_rows.len(), 
+             pub_rows.iter().take(5).collect::<Vec<_>>());
+    
+    // Check if ANY witness column has entries at those same rows
+    let mut overlapping_witnesses: Vec<(usize, Vec<usize>)> = Vec::new();
+    
+    for j in num_pub..num_vars {
+        let mut overlap_rows: Vec<usize> = Vec::new();
+        for &(row, _) in get_col(extractor, j) {
+            if pub_rows.contains(&row) {
+                overlap_rows.push(row);
+            }
+        }
+        if !overlap_rows.is_empty() {
+            overlapping_witnesses.push((j, overlap_rows));
+        }
+    }
+    
+    if overlapping_witnesses.is_empty() {
+        println!("  [{}_SPAN] No witness {}-entries overlap with public {}-rows.", 
+                 matrix_name, col_name, col_name);
+        println!("  [{}_SPAN] By Lagrange orthogonality: {}_pub NOT in span({}_wit)", 
+                 matrix_name, matrix_name.to_lowercase(), matrix_name.to_lowercase());
+        return true;
+    }
+    
+    // There ARE overlapping witnesses - need full span check
+    // Example: p on {r1}, w1 on {r1,r2}, w2 on {r2} -> p = w1 - w2 is in span
+    println!("  [{}_SPAN] {} witness columns have {}-entries overlapping public rows", 
+             matrix_name, overlapping_witnesses.len(), col_name);
+    
+    // Use sampling to verify if polynomial span separation holds
+    // Include ALL witness columns (num_pub..num_vars), not just overlapping ones
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(98765);
+    
+    // Include ALL witness columns
+    let all_witnesses: Vec<usize> = (num_pub..num_vars).collect();
+    let num_witnesses = all_witnesses.len();
+    
+    if num_witnesses == 0 {
+        println!("  [{}_SPAN] No witness columns - trivially separated", matrix_name);
+        return true;
+    }
+    
+    // Need more samples than witness columns for reliable span test
+    // But cap it to avoid excessive computation
+    let num_samples = std::cmp::min(std::cmp::max(100, num_witnesses + 20), 300);
+    
+    println!("  [{}_SPAN] Building evaluation matrix: {} samples x {} witnesses...", 
+             matrix_name, num_samples, num_witnesses);
+    
+    let mut samples: Vec<Fr> = Vec::new();
+    for _ in 0..num_samples {
+        let mut sample = Fr::rand(&mut rng);
+        while sample.is_zero() {
+            sample = Fr::rand(&mut rng);
+        }
+        samples.push(sample);
+    }
+    
+    // Pre-build witness evaluation matrix (shared across public columns)
+    // Each sample row is computed independently
+    let start_time = std::time::Instant::now();
+    let progress = AtomicUsize::new(0);
+    
+    println!("  [{}_SPAN] Using {} CPU cores for parallel evaluation...", 
+             matrix_name, rayon::current_num_threads());
+    
+    let wit_matrix: Vec<Vec<Fr>> = samples
+        .par_iter()
+        .map(|sample| {
+            let row: Vec<Fr> = all_witnesses
+                .iter()
+                .map(|&j| eval_col(extractor, j, *sample))
+                .collect();
+            
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            if done % 50 == 0 || done == num_samples {
+                eprint!("\r  [{}_SPAN] Evaluating witnesses: {}/{} samples...", 
+                       matrix_name, done, num_samples);
+            }
+            row
+        })
+        .collect();
+    
+    eprintln!(" done ({:.2?})", start_time.elapsed());
+    
+    let mut all_separated = true;
+    let num_pub_to_check = num_pub - 1; // Skip column 0 (constant)
+    
+    for (idx, i) in (1..num_pub).enumerate() {
+        // Get public polynomial evaluations
+        let mut pub_evals: Vec<Fr> = Vec::new();
+        for sample in &samples {
+            pub_evals.push(eval_col(extractor, i, *sample));
+        }
+        
+        // Check if public polynomial is identically zero (trivially separated)
+        if pub_evals.iter().all(|x| x.is_zero()) {
+            continue;
+        }
+        
+        let in_span = check_vector_in_column_span(&wit_matrix, &pub_evals);
+        
+        if in_span {
+            println!("  [{}_SPAN FAIL] Public column {} is IN span of ALL {} witness columns", 
+                     matrix_name, i, num_witnesses);
+            all_separated = false;
+        }
+        
+        // Progress for public columns
+        if (idx + 1) % 5 == 0 || idx + 1 == num_pub_to_check {
+            print!("\r  [{}_SPAN] Checking public columns: {}/{}...", 
+                   matrix_name, idx + 1, num_pub_to_check);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    }
+    if num_pub_to_check > 0 {
+        println!(" done");
+    }
+    
+    all_separated
+}
+
+/// Check if target vector is in the column span of matrix
+/// Uses Gaussian elimination with augmented matrix
+fn check_vector_in_column_span(matrix: &[Vec<Fr>], target: &[Fr]) -> bool {
+    if matrix.is_empty() || matrix[0].is_empty() {
+        // No witness columns - target must be zero
+        return target.iter().all(|x| x.is_zero());
+    }
+    
+    let num_rows = matrix.len();
+    let num_cols = matrix[0].len();
+    
+    // With more rows than columns, we can properly check span membership
+    // Build augmented matrix [M | target] and check consistency
+    
+    let mut aug: Vec<Vec<Fr>> = Vec::new();
+    for (row_idx, row) in matrix.iter().enumerate() {
+        let mut aug_row = row.clone();
+        aug_row.push(target[row_idx]); // Augment with target
+        aug.push(aug_row);
+    }
+    
+    // Gaussian elimination
+    let mut pivot_row = 0;
+    for col in 0..num_cols {
+        // Find pivot
+        let mut found = false;
+        for row in pivot_row..num_rows {
+            if !aug[row][col].is_zero() {
+                // Swap rows
+                aug.swap(row, pivot_row);
+                found = true;
+                break;
+            }
+        }
+        
+        if !found {
+            continue; // No pivot in this column
+        }
+        
+        // Normalize pivot row
+        let inv = aug[pivot_row][col].inverse().unwrap();
+        for j in col..=num_cols {
+            aug[pivot_row][j] *= inv;
+        }
+        
+        // Eliminate other rows
+        for row in 0..num_rows {
+            if row != pivot_row && !aug[row][col].is_zero() {
+                let factor = aug[row][col];
+                // Copy pivot row values to avoid borrow conflict
+                let pivot_vals: Vec<Fr> = aug[pivot_row][col..=num_cols].to_vec();
+                for (j_offset, pivot_val) in pivot_vals.iter().enumerate() {
+                    let j = col + j_offset;
+                    aug[row][j] -= factor * pivot_val;
+                }
+            }
+        }
+        
+        pivot_row += 1;
+        if pivot_row >= num_rows {
+            break;
+        }
+    }
+    
+    // After elimination, check if system is consistent
+    // A row of form [0, 0, ..., 0 | b] where b != 0 means inconsistent
+    for row in &aug {
+        let all_zero_except_last = row[..num_cols].iter().all(|x| x.is_zero());
+        if all_zero_except_last && !row[num_cols].is_zero() {
+            return false; // Inconsistent - target NOT in span
+        }
+    }
+    
+    true // Target IS in the column span
 }
 
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
@@ -534,14 +1032,16 @@ fn build_target(
         w_sum += w;
     }
 
+    // TARGET uses PUBLIC polynomials (U_pub, V_pub, W_pub) from standard IC(x)
+    // These are span-separated from witness polynomials.
     TrapdoorPolyVector::new(vec![
         (
             TrapdoorMonomial::AlphaBetaDelta,
             DensePolynomial::from_coefficients_slice(&[Fr::one()]),
         ),
-        (TrapdoorMonomial::BetaDeltaU, u_sum),
-        (TrapdoorMonomial::AlphaDeltaV, v_sum),
-        (TrapdoorMonomial::DeltaW, w_sum),
+        (TrapdoorMonomial::BetaDeltaUPub, u_sum),   // β·δ·U_pub
+        (TrapdoorMonomial::AlphaDeltaVPub, v_sum),  // α·δ·V_pub
+        (TrapdoorMonomial::DeltaWPub, w_sum),       // δ·W_pub
         (TrapdoorMonomial::DeltaSq, -h_const.clone()),
     ])
 }
@@ -606,6 +1106,14 @@ fn check_independence_streaming(
     let all_monos = vec![
         TrapdoorMonomial::AlphaBetaDelta,
         TrapdoorMonomial::DeltaSq,
+        // Span-separated monomials (Pub vs Wit - critical for security!)
+        TrapdoorMonomial::BetaDeltaUPub,
+        TrapdoorMonomial::BetaDeltaUWit,
+        TrapdoorMonomial::AlphaDeltaVPub,
+        TrapdoorMonomial::AlphaDeltaVWit,
+        TrapdoorMonomial::DeltaWPub,
+        TrapdoorMonomial::DeltaWWit,
+        // L-query handles (use witness polynomials)
         TrapdoorMonomial::BetaSqU,
         TrapdoorMonomial::BetaU,
         TrapdoorMonomial::AlphaBetaV,
@@ -615,14 +1123,12 @@ fn check_independence_streaming(
         TrapdoorMonomial::BetaUV,
         TrapdoorMonomial::AlphaVV,
         TrapdoorMonomial::WV,
-        TrapdoorMonomial::BetaDeltaU,
-        TrapdoorMonomial::AlphaDeltaV,
-        TrapdoorMonomial::DeltaW,
         TrapdoorMonomial::DeltaUV,
         TrapdoorMonomial::DeltaPureUV,
         TrapdoorMonomial::AlphaDeltaSq,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
+        // Static GT table handles (deg_ρ = 0, cannot reach armed target)
         TrapdoorMonomial::AlphaBetaStatic,
         TrapdoorMonomial::AlphaDeltaStatic,
         TrapdoorMonomial::AlphaVStatic,
@@ -692,16 +1198,21 @@ fn check_independence_streaming(
         let (u_val, v_val, w_val) = extractor.evaluate_column(k, r);
 
         // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
+        // NOTE: In PVUGC, public A-queries are zeroed, so for k < num_pub, u_val = 0.
+        // For witness k >= num_pub, this uses U_wit.
+        // We use BetaDeltaUWit because only witness columns have non-zero A-queries.
         add_basis_vec(
             "u_k * D_pub * delta",
             k,
             vec![
-                (TrapdoorMonomial::BetaDeltaU, u_val),
+                (TrapdoorMonomial::BetaDeltaUWit, u_val),
                 (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
             ],
         );
 
-        // 2. u_k * D_delta * delta -> u * delta^2
+        // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
+        // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
+        // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSq
         add_basis_vec(
             "u_k * D_delta * delta",
             k,
@@ -732,13 +1243,14 @@ fn check_independence_streaming(
 
             // 5. L_k * D_delta * delta -> (beta*u+alpha*v+w) * delta
             // = beta*delta*u + alpha*delta*v + delta*w
+            // Uses WITNESS variants because L-queries only exist for k >= num_pub.
             add_basis_vec(
-                "L_k * D_delta * delta",
+                "L_k * D_delta * delta (WITNESS)",
                 k,
                 vec![
-                    (TrapdoorMonomial::BetaDeltaU, u_val),
-                    (TrapdoorMonomial::AlphaDeltaV, v_val),
-                    (TrapdoorMonomial::DeltaW, w_val),
+                    (TrapdoorMonomial::BetaDeltaUWit, u_val), // WITNESS U
+                    (TrapdoorMonomial::AlphaDeltaVWit, v_val), // WITNESS V
+                    (TrapdoorMonomial::DeltaWWit, w_val),      // WITNESS W
                 ],
             );
 
@@ -758,7 +1270,8 @@ fn check_independence_streaming(
 
         // 7. Raw B-Query Handles (b_g1_query)
         // Available for ALL variables (including public).
-        // v_k (G1) * delta (G2) -> v * delta.
+        // Actual: e([v_k]_1, [δ]_2^ρ) = ρ·δ·v_k
+        // Normalized: δ · (ρ·δ·v_k) = ρ·δ²·v_k → DeltaSq
         add_basis_vec("Raw B DeltaSq", k, vec![(TrapdoorMonomial::DeltaSq, v_val)]);
         // v_k (G1) * beta (G2) -> v * beta
         add_basis_vec("Raw B BetaV", k, vec![(TrapdoorMonomial::BetaV, v_val)]);
@@ -791,6 +1304,48 @@ fn check_independence_streaming(
         "GT T_v aggregate (alpha*v, no delta)",
         usize::MAX,
         vec![(TrapdoorMonomial::AlphaVStatic, Fr::one())],
+    );
+
+    // 9. Alpha * D_pub (bundled) - from e([α]_1, y_cols_rho[0])
+    // This is the BUNDLED handle: adversary gets AlphaBetaDelta + AlphaDeltaVPub together.
+    // They CANNOT separate these components - they come as a package.
+    //
+    // KEY INSIGHT: With span separation (V_pub ⊥ V_wit):
+    // - The adversary gets AlphaDeltaVPub bundled with AlphaBetaDelta
+    // - The target ALSO includes AlphaDeltaVPub (from standard IC)
+    // - So the bundled handle contributes directly to target!
+    // - Security depends on the REMAINING target (BetaDeltaUPub, DeltaWPub, DeltaSq)
+    //   which CANNOT be synthesized from witness handles if span separation holds!
+    add_basis_vec(
+        "Alpha * y_cols_rho[0] (D_pub bundled)",
+        usize::MAX,
+        vec![
+            (TrapdoorMonomial::AlphaBetaDelta, Fr::one()),
+            (TrapdoorMonomial::AlphaDeltaVPub, v_pub_r),
+        ],
+    );
+
+    // 10. Alpha * Y_wit[j] - from e([α]_1, y_cols_rho[j]) for witness columns
+    // This gives ρ·α·v_j for each witness column, contributing to AlphaDeltaVWit.
+    // 
+    // CRITICAL: If span separation holds (V_pub ⊥ V_wit), this handle CANNOT
+    // be used to cancel the AlphaDeltaVPub pollution from handle #9.
+    // We model this by using a SEPARATE monomial (AlphaDeltaVWit).
+    //
+    // The adversary has the full span of {α·v_j} for all witness j, but this
+    // cannot synthesize α·V_pub if the V polynomials are span-separated.
+    add_basis_vec(
+        "Alpha * y_cols_rho[wit] (V_wit span)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::AlphaDeltaVWit, Fr::one())],
+    );
+
+    // 11. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
+    // Under δ-normalization this becomes ρ·α·δ² → AlphaDeltaSq
+    add_basis_vec(
+        "Alpha * delta_rho",
+        usize::MAX,
+        vec![(TrapdoorMonomial::AlphaDeltaSq, Fr::one())],
     );
 
     let residue = basis.reduce(target_vec);
