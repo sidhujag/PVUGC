@@ -8,7 +8,7 @@
 //! With **Full Span Separation** (U, V, W all separated), the minimal secure architecture is:
 //!
 //! **REQUIRED:**
-//! 1. Lean CRS (Baked Quotient/GT-Baking) - prevents quotient forgery
+//! 1. Lean CRS (Baked Quotient) - prevents quotient forgery
 //! 2. Circuit Linearity - enables Baked Quotient strategy  
 //! 3. Full Span Separation (U, V, W verified) - blocks all PK-based attacks
 //! 4. Aggregation - prevents GT-Slicing attacks
@@ -21,7 +21,7 @@
 //!
 //! ## Key Modeling Features
 //!
-//! - **ρ-Degree Separation**: Distinguishes Static (deg_ρ=0) vs Armed (deg_ρ=1) handles.
+//! - **Armed Handles Only**: All handles have deg_ρ=1
 //! - **Span-Separated Pub/Wit**: Uses separate monomials (e.g., AlphaDeltaVPub vs AlphaDeltaVWit)
 //!   to properly model algebraic orthogonality when span separation holds.
 //!
@@ -53,16 +53,10 @@ type Fr = OuterFr;
 // All handles/targets are multiplied by delta to clear denominators from L-queries.
 // Base ring: F[alpha, beta, gamma, delta, rho, x]
 //
-// IMPORTANT: ρ-DEGREE SEPARATION
-// The audit distinguishes between:
-// - Static handles (deg_ρ = 0): GT table entries like e(α, β), e(α, v_i)
-// - Armed handles (deg_ρ = 1): Dynamically armed values like e(L_k, δ^ρ)
-// Static handles CANNOT synthesize the dynamic KEM target (which has deg_ρ = 1).
-// The monomial names below indicate ρ-degree:
-// - Monomials WITHOUT "Static" suffix: Armed (deg_ρ = 1)
-// - Monomials WITH "Static" suffix: Static (deg_ρ = 0)
+// ARCHITECTURE: Standard Groth16 with Full Span Separation
+// All handles are ARMED (deg_ρ = 1) since the KEM target has deg_ρ = 1.
 //
-// IMPORTANT: FULL SPAN SEPARATION (U, V, W)
+// FULL SPAN SEPARATION (U, V, W)
 // When span separation holds for ALL three polynomial types:
 // - U_pub ⊥ U_wit, V_pub ⊥ V_wit, W_pub ⊥ W_wit
 // The adversary cannot synthesize public components from witness handles.
@@ -540,7 +534,7 @@ fn run_audit(subject: &dyn AuditSubject) {
     
     if fully_safe && full_span_separated {
         println!("\n=== MINIMAL REQUIRED ARCHITECTURE ===");
-        println!("1. Lean CRS (Baked Quotient/GT-Baking) - quotient forgery prevention");
+        println!("1. Lean CRS (Baked Quotient) - quotient forgery prevention");
         println!("2. Circuit Linearity - verified above");
         println!("3. Full Span Separation - verified above");
         println!("4. Aggregation - prevents GT-Slicing (verify separately)");
