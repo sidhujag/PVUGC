@@ -758,7 +758,8 @@ where
     // the target (which includes column 0) and the span separation check.
     let mut pub_rows: HashSet<usize> = HashSet::new();
     for i in 0..num_pub {
-        for &(row, _) in get_col(extractor, i) {
+        let v = to_sparse_row_vec(get_col(extractor, i));
+        for (&row, _) in v.iter() {
             pub_rows.insert(row);
         }
     }
@@ -773,12 +774,14 @@ where
              matrix_name, col_name, pub_rows.len(), 
              pub_rows.iter().take(5).collect::<Vec<_>>());
     
-    // Check if ANY witness column has entries at those same rows
+    // Check if ANY witness column has entries at those same rows (using net
+    // coefficients per row to avoid +c/-c artifacts).
     let mut overlapping_witnesses: Vec<(usize, Vec<usize>)> = Vec::new();
     
     for j in num_pub..num_vars {
         let mut overlap_rows: Vec<usize> = Vec::new();
-        for &(row, _) in get_col(extractor, j) {
+        let v = to_sparse_row_vec(get_col(extractor, j));
+        for (&row, _) in v.iter() {
             if pub_rows.contains(&row) {
                 overlap_rows.push(row);
             }
@@ -827,20 +830,18 @@ where
     let mut all_separated = true;
     let num_pub_to_check = num_pub; // Include all public columns (including constant)
 
-    // After reducing publics modulo witness span, also ensure their residual span
-    // has full rank. This detects cases where no single public column is in the
-    // witness span, but some nontrivial linear combination is.
+    // Build a basis for the public span and for its image modulo the witness
+    // span. We require dim(span(P_pub) mod span(P_wit)) == dim(span(P_pub)).
+    let mut pub_basis = RowBasis::new();
     let mut pub_reduced_basis = RowBasis::new();
-    let mut nonzero_pub = 0usize;
 
     for (idx, i) in (0..num_pub).enumerate() {
-        let entries = get_col(extractor, i);
-        if entries.is_empty() {
-            // Zero polynomial: trivially separated
+        let pub_vec = to_sparse_row_vec(get_col(extractor, i));
+        if pub_vec.is_empty() {
+            // Net-zero column: trivially separated
             continue;
         }
-        nonzero_pub += 1;
-        let pub_vec = to_sparse_row_vec(entries);
+        pub_basis.insert(pub_vec.clone());
         let reduced = wit_basis.reduce(pub_vec);
         if reduced.is_empty() {
             println!(
@@ -870,16 +871,17 @@ where
     }
 
     // If every non-zero public column survived reduction but their reduced span
-    // has lower rank than the number of non-zero publics, then some nontrivial
-    // public linear combination lies in the witness span.
+    // has lower rank than the original public span, then some nontrivial
+    // public combination lies in the witness span.
     if all_separated {
-        let rank = pub_reduced_basis.pivots.len();
-        if rank != nonzero_pub {
+        let rank_pub = pub_basis.pivots.len();
+        let rank_img = pub_reduced_basis.pivots.len();
+        if rank_img < rank_pub {
             println!(
-                "  [{}_SPAN FAIL] Nontrivial linear combination of public columns lies in witness span (rank {} < {}).",
+                "  [{}_SPAN FAIL] Some nontrivial public combination lies in witness span (rank {} < {}).",
                 matrix_name,
-                rank,
-                nonzero_pub
+                rank_img,
+                rank_pub
             );
             return false;
         }
@@ -1005,6 +1007,9 @@ impl MatrixExtractor {
                     // Multiple entries on the same row must be summed.
                     let s = root_sum.get_or_insert(Fr::zero());
                     *s += val;
+                    // Once we know r is exactly a domain root for this column,
+                    // the true value is determined by the sum at that root; we
+                    // can ignore remaining entries.
                     continue;
                 }
                 // Only accumulate barycentric terms when we have not hit a root.
