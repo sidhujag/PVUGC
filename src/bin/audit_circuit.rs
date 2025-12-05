@@ -73,7 +73,6 @@ enum TrapdoorMonomial {
     // So the target is: ρ·(α·β + β·U_pub + α·V_pub + W_pub)
     // Under δ-normalization: ρ·δ·(α·β + β·U_pub + α·V_pub + W_pub)
     AlphaBetaDelta, // ρ * alpha * beta * delta (fixed)
-    DeltaSq,        // ρ * delta^2 (from quotient H)
 
     // ============================================================
     // SPAN-SEPARATED TARGET COMPONENTS (Pub vs Wit)
@@ -123,7 +122,6 @@ enum TrapdoorMonomial {
     // ============================================================
     // δ²·polynomial TERMS (Armed, deg_ρ = 1)
     // ============================================================
-    // CRITICAL: These must be SEPARATE from DeltaSq (quotient).
     // δ²·u ≠ δ²·v ≠ δ² (they're algebraically distinct directions!)
     // 
     // In PVUGC:
@@ -419,6 +417,20 @@ fn run_audit(subject: &dyn AuditSubject) {
         pub_polys.push(extractor.get_column_polys(i));
     }
 
+    // Instance assignment vector (including column 0). This is the actual
+    // public input assignment used to weight U/V/W_pub in the target and
+    // in D_pub. We require it to match num_pub.
+    let instance = cs
+        .borrow()
+        .expect("cs should be available")
+        .instance_assignment
+        .clone();
+    assert_eq!(
+        instance.len(),
+        num_pub,
+        "instance_assignment length must equal num_pub"
+    );
+
     let is_linear = check_linearity(&pub_polys, num_pub);
     if is_linear {
         println!("[PASS] Linearity Check.");
@@ -475,15 +487,15 @@ fn run_audit(subject: &dyn AuditSubject) {
     
     println!("--- End Span Separation ---\n");
 
-    // 2. Independence Check
-    let h_const = compute_h_const(&pub_polys, &extractor.domain);
-    let target = build_target(&pub_polys, &h_const);
+    // 2. Independence Check (Lean CRS: no explicit H·δ² quotient direction)
+    let target = build_target(&pub_polys, &instance);
 
     let num_checks = 1;
     let all_safe = run_independence_checks(
         "",
         &extractor,
         &pub_polys,
+        &instance,
         &target,
         num_pub + num_wit,
         num_checks,
@@ -553,11 +565,14 @@ fn run_audit(subject: &dyn AuditSubject) {
 
 fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
     for col in 1..num_pub {
-        if extractor.a_cols[col].is_empty() || extractor.b_cols[col].is_empty() {
+        // Work with net coefficients per row to avoid false flags from +c/-c pairs.
+        let a_net = to_sparse_row_vec(&extractor.a_cols[col]);
+        let b_net = to_sparse_row_vec(&extractor.b_cols[col]);
+        if a_net.is_empty() || b_net.is_empty() {
             continue;
         }
-        let rows_b: HashSet<usize> = extractor.b_cols[col].iter().map(|(row, _)| *row).collect();
-        for (row, _) in &extractor.a_cols[col] {
+        let rows_b: HashSet<usize> = b_net.keys().copied().collect();
+        for row in a_net.keys() {
             if rows_b.contains(row) {
                 println!(
                     "  [FAIL] Column {} appears in both A and B on row {}",
@@ -577,24 +592,28 @@ fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) ->
 
     // Mark rows where Public Inputs (excluding 1) appear in A and B
     for i in 1..num_pub {
-        for &(row, _) in &extractor.a_cols[i] {
+        let a_net = to_sparse_row_vec(&extractor.a_cols[i]);
+        let b_net = to_sparse_row_vec(&extractor.b_cols[i]);
+        for (&row, _) in a_net.iter() {
             rows_pub_a[row] = true;
         }
-        for &(row, _) in &extractor.b_cols[i] {
+        for (&row, _) in b_net.iter() {
             rows_pub_b[row] = true;
         }
     }
 
     // Check Witness columns
     for j in num_pub..num_vars {
+        let a_net = to_sparse_row_vec(&extractor.a_cols[j]);
+        let b_net = to_sparse_row_vec(&extractor.b_cols[j]);
         // If Witness in A, check if Row has Public in B
-        for &(row, _) in &extractor.a_cols[j] {
+        for (&row, _) in a_net.iter() {
             if rows_pub_b[row] {
                 return false;
             }
         }
         // If Witness in B, check if Row has Public in A
-        for &(row, _) in &extractor.b_cols[j] {
+        for (&row, _) in b_net.iter() {
             if rows_pub_a[row] {
                 return false;
             }
@@ -613,7 +632,7 @@ fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) ->
 /// - col_name: "A", "B", or "C" for display  
 /// - get_col: closure to get column entries from extractor
 ///
-/// This now uses an exact sparse Gaussian-elimination check in Lagrange
+/// This uses an exact sparse Gaussian-elimination check in Lagrange
 /// coefficient space (no random sampling), so results are deterministic and
 /// not sensitive to the number of witness columns.
 type SparseRowVec = BTreeMap<usize, Fr>;
@@ -624,7 +643,11 @@ fn to_sparse_row_vec(entries: &Vec<(usize, Fr)>) -> SparseRowVec {
     let mut v = SparseRowVec::new();
     for (row, coeff) in entries {
         if !coeff.is_zero() {
-            v.insert(*row, *coeff);
+            let entry = v.entry(*row).or_insert(Fr::zero());
+            *entry += *coeff;
+            if entry.is_zero() {
+                v.remove(row);
+            }
         }
     }
     v
@@ -730,9 +753,11 @@ where
         return true;
     }
     
-    // Collect all rows where public inputs (1..num_pub) have entries in this matrix
+    // Collect all rows where public columns (0..num_pub) have entries in this matrix
+    // This includes column 0 (constant "1") for full formal symmetry between
+    // the target (which includes column 0) and the span separation check.
     let mut pub_rows: HashSet<usize> = HashSet::new();
-    for i in 1..num_pub {
+    for i in 0..num_pub {
         for &(row, _) in get_col(extractor, i) {
             pub_rows.insert(row);
         }
@@ -787,7 +812,7 @@ where
     );
 
     // Build a sparse row-basis from ALL witness columns in this matrix.
-    let mut basis = RowBasis::new();
+    let mut wit_basis = RowBasis::new();
     for j in num_pub..num_vars {
         let entries = get_col(extractor, j);
         if entries.is_empty() {
@@ -795,28 +820,38 @@ where
         }
         let v = to_sparse_row_vec(entries);
         if !v.is_empty() {
-            basis.insert(v);
+            wit_basis.insert(v);
         }
     }
 
     let mut all_separated = true;
-    let num_pub_to_check = num_pub - 1; // Skip column 0 (constant)
+    let num_pub_to_check = num_pub; // Include all public columns (including constant)
 
-    for (idx, i) in (1..num_pub).enumerate() {
+    // After reducing publics modulo witness span, also ensure their residual span
+    // has full rank. This detects cases where no single public column is in the
+    // witness span, but some nontrivial linear combination is.
+    let mut pub_reduced_basis = RowBasis::new();
+    let mut nonzero_pub = 0usize;
+
+    for (idx, i) in (0..num_pub).enumerate() {
         let entries = get_col(extractor, i);
         if entries.is_empty() {
             // Zero polynomial: trivially separated
             continue;
         }
+        nonzero_pub += 1;
         let pub_vec = to_sparse_row_vec(entries);
-        let reduced = basis.reduce(pub_vec);
+        let reduced = wit_basis.reduce(pub_vec);
         if reduced.is_empty() {
             println!(
                 "  [{}_SPAN FAIL] Public column {} is IN span of witness columns", 
                 matrix_name, i
             );
             all_separated = false;
+            // No need to keep going; we already know there's overlap.
+            continue;
         }
+        pub_reduced_basis.insert(reduced);
 
         // Progress for public columns (purely cosmetic)
         if (idx + 1) % 5 == 0 || idx + 1 == num_pub_to_check {
@@ -832,6 +867,22 @@ where
     }
     if num_pub_to_check > 0 {
         println!(" done");
+    }
+
+    // If every non-zero public column survived reduction but their reduced span
+    // has lower rank than the number of non-zero publics, then some nontrivial
+    // public linear combination lies in the witness span.
+    if all_separated {
+        let rank = pub_reduced_basis.pivots.len();
+        if rank != nonzero_pub {
+            println!(
+                "  [{}_SPAN FAIL] Nontrivial linear combination of public columns lies in witness span (rank {} < {}).",
+                matrix_name,
+                rank,
+                nonzero_pub
+            );
+            return false;
+        }
     }
 
     all_separated
@@ -921,13 +972,13 @@ impl MatrixExtractor {
         let mut w_evals = vec![Fr::zero(); self.domain.size()];
 
         for &(row, val) in &self.a_cols[col] {
-            u_evals[row] = val;
+            u_evals[row] += val;
         }
         for &(row, val) in &self.b_cols[col] {
-            v_evals[row] = val;
+            v_evals[row] += val;
         }
         for &(row, val) in &self.c_cols[col] {
-            w_evals[row] = val;
+            w_evals[row] += val;
         }
 
         (
@@ -945,12 +996,28 @@ impl MatrixExtractor {
 
         let eval_sparse = |sparse: &Vec<(usize, Fr)>| -> Fr {
             let mut acc = Fr::zero();
+            let mut root_sum: Option<Fr> = None;
             for &(row, val) in sparse {
                 let omega_i = self.domain.element(row);
                 let denom = r - omega_i;
-                acc += (val * omega_i) * denom.inverse().unwrap();
+                if denom.is_zero() {
+                    // r coincides with a domain point ω_i where the column has value `val`.
+                    // Multiple entries on the same row must be summed.
+                    let s = root_sum.get_or_insert(Fr::zero());
+                    *s += val;
+                    continue;
+                }
+                // Only accumulate barycentric terms when we have not hit a root.
+                // If r == ω_k for some k, the true value is just the sum of coeffs at row k.
+                if root_sum.is_none() {
+                    acc += (val * omega_i) * denom.inverse().unwrap();
+                }
             }
-            acc * common
+            if let Some(s) = root_sum {
+                s
+            } else {
+                acc * common
+            }
         };
 
         (
@@ -980,48 +1047,34 @@ fn check_linearity(
     true
 }
 
-fn compute_h_const(
-    pub_polys: &[(
-        DensePolynomial<Fr>,
-        DensePolynomial<Fr>,
-        DensePolynomial<Fr>,
-    )],
-    domain: &GeneralEvaluationDomain<Fr>,
-) -> DensePolynomial<Fr> {
-    let mut a_pub = DensePolynomial::zero();
-    let mut b_pub = DensePolynomial::zero();
-    let mut c_pub = DensePolynomial::zero();
-    for (u, v, w) in pub_polys {
-        a_pub += u;
-        b_pub += v;
-        c_pub += w;
-    }
-    let numerator = &(&a_pub * &b_pub) - &c_pub;
-    let (h, _) = numerator.divide_by_vanishing_poly(*domain);
-    h
-}
-
 fn build_target(
     pub_polys: &[(
         DensePolynomial<Fr>,
         DensePolynomial<Fr>,
         DensePolynomial<Fr>,
     )],
-    h_const: &DensePolynomial<Fr>,
+    pub_coeffs: &[Fr],
 ) -> TrapdoorPolyVector {
     // Reconstruct L_pub components
     // L_pub = Sum x_i (beta u_i + alpha v_i + w_i)
-    // Normalized Target (x delta) = alpha*beta*delta + delta * L_pub - H*delta^2
-    // = alpha*beta*delta + beta*delta*U + alpha*delta*V + delta*W - H*delta^2
+    // Normalized Target (x delta) = alpha*beta*delta + delta * L_pub
+    // = alpha*beta*delta + beta*delta*U + alpha*delta*V + delta*W
 
     let mut u_sum = DensePolynomial::zero();
     let mut v_sum = DensePolynomial::zero();
     let mut w_sum = DensePolynomial::zero();
 
-    for (u, v, w) in pub_polys {
-        u_sum += u;
-        v_sum += v;
-        w_sum += w;
+    // Weighted sums: U_pub = Σ a_i u_i, V_pub = Σ a_i v_i, W_pub = Σ a_i w_i
+    // where a_i are the instance assignments (including column 0).
+    assert_eq!(pub_polys.len(), pub_coeffs.len());
+    for ((u, v, w), a_i) in pub_polys.iter().zip(pub_coeffs.iter()) {
+        if a_i.is_zero() {
+            continue;
+        }
+        let a = *a_i;
+        u_sum += &(&*u * a);
+        v_sum += &(&*v * a);
+        w_sum += &(&*w * a);
     }
 
     // TARGET uses PUBLIC polynomials (U_pub, V_pub, W_pub) from standard IC(x)
@@ -1034,29 +1087,32 @@ fn build_target(
         (TrapdoorMonomial::BetaDeltaUPub, u_sum),   // β·δ·U_pub
         (TrapdoorMonomial::AlphaDeltaVPub, v_sum),  // α·δ·V_pub
         (TrapdoorMonomial::DeltaWPub, w_sum),       // δ·W_pub
-        (TrapdoorMonomial::DeltaSq, -h_const.clone()),
     ])
 }
 
+/// Dense basis over the abstract monomial space used for independence checks.
+///
+/// We key rows by their pivot index in a BTreeMap so that reduction always
+/// processes pivots in ascending order, avoiding order-dependent artifacts.
 struct Basis {
-    rows: Vec<Vec<Fr>>,
-    pivots: Vec<usize>,
+    rows: BTreeMap<usize, Vec<Fr>>,
 }
 
 impl Basis {
     fn new() -> Self {
         Self {
-            rows: Vec::new(),
-            pivots: Vec::new(),
+            rows: BTreeMap::new(),
         }
     }
 
     fn reduce(&self, mut v: Vec<Fr>) -> Vec<Fr> {
-        for (i, row) in self.rows.iter().enumerate() {
-            let p = self.pivots[i];
-            if !v[p].is_zero() {
-                let factor = v[p];
-                for k in p..v.len() {
+        for (&pivot, row) in self.rows.iter() {
+            if pivot >= v.len() {
+                continue;
+            }
+            if !v[pivot].is_zero() {
+                let factor = v[pivot];
+                for k in pivot..v.len() {
                     v[k] -= factor * row[k];
                 }
             }
@@ -1066,11 +1122,10 @@ impl Basis {
 
     fn insert(&mut self, v: Vec<Fr>) {
         let reduced = self.reduce(v);
-        if let Some(p) = reduced.iter().position(|x| !x.is_zero()) {
-            let inv = reduced[p].inverse().unwrap();
+        if let Some(pivot) = reduced.iter().position(|x| !x.is_zero()) {
+            let inv = reduced[pivot].inverse().unwrap();
             let normalized: Vec<Fr> = reduced.iter().map(|x| *x * inv).collect();
-            self.rows.push(normalized);
-            self.pivots.push(p);
+            self.rows.insert(pivot, normalized);
         }
     }
 }
@@ -1082,6 +1137,7 @@ fn check_independence_streaming(
         DensePolynomial<Fr>,
         DensePolynomial<Fr>,
     )],
+    pub_coeffs: &[Fr],
     target: &TrapdoorPolyVector,
     num_vars: usize,
     seed: u64,
@@ -1097,7 +1153,6 @@ fn check_independence_streaming(
     }
     let all_monos = vec![
         TrapdoorMonomial::AlphaBetaDelta,
-        TrapdoorMonomial::DeltaSq,
         // Span-separated monomials (Pub vs Wit - critical for security!)
         TrapdoorMonomial::BetaDeltaUPub,
         TrapdoorMonomial::BetaDeltaUWit,
@@ -1120,7 +1175,7 @@ fn check_independence_streaming(
         TrapdoorMonomial::AlphaDeltaSq,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
-        // δ²·polynomial terms (distinct from quotient's DeltaSq!)
+        // δ²·polynomial terms
         TrapdoorMonomial::DeltaSqUWit,
         TrapdoorMonomial::DeltaSqVPub,
         TrapdoorMonomial::DeltaSqVWit,
@@ -1165,8 +1220,12 @@ fn check_independence_streaming(
     };
 
     let mut v_pub_r = Fr::zero();
-    for (_, v, _) in pub_polys {
-        v_pub_r += v.evaluate(&r);
+    assert_eq!(pub_polys.len(), pub_coeffs.len());
+    for ((_, v, _), a_i) in pub_polys.iter().zip(pub_coeffs.iter()) {
+        if a_i.is_zero() {
+            continue;
+        }
+        v_pub_r += v.evaluate(&r) * a_i;
     }
 
     let total_cols = num_vars;
@@ -1189,34 +1248,40 @@ fn check_independence_streaming(
 
         let (u_val, v_val, w_val) = extractor.evaluate_column(k, r);
 
-        // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
-        // NOTE: In PVUGC, public A-queries are zeroed, so for k < num_pub, u_val = 0.
-        // For witness k >= num_pub, this uses U_wit.
-        // We use BetaDeltaUWit because only witness columns have non-zero A-queries.
-        add_basis_vec(
-            "u_k * D_pub * delta",
-            k,
-            vec![
-                (TrapdoorMonomial::BetaDeltaUWit, u_val),
-                (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
-            ],
-        );
+        // 1–3. Raw U-side handles from u_k:
+        //
+        // In the Lean CRS, public A-queries for true public inputs (columns 1..num_pub-1)
+        // are zeroed in the proving key, and column 0 (constant "1") is treated as part
+        // of the baked trapdoor (α), not as a U_wit direction. We therefore only model
+        // these U_wit handles for k >= num_pub (witness columns).
+        if k >= num_pub {
+            // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
+            // Uses BetaDeltaUWit because only witness columns have non-zero A-queries.
+            add_basis_vec(
+                "u_k * D_pub * delta",
+                k,
+                vec![
+                    (TrapdoorMonomial::BetaDeltaUWit, u_val),
+                    (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
+                ],
+            );
 
-        // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
-        // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
-        // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSqUWit (NOT plain DeltaSq!)
-        add_basis_vec(
-            "u_k * D_delta * delta",
-            k,
-            vec![(TrapdoorMonomial::DeltaSqUWit, u_val)],
-        );
+            // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
+            // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
+            // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSqUWit
+            add_basis_vec(
+                "u_k * D_delta * delta",
+                k,
+                vec![(TrapdoorMonomial::DeltaSqUWit, u_val)],
+            );
 
-        // 3. u_k * D_j * delta -> u * v_j * delta
-        add_basis_vec(
-            "u_k * D_j * delta",
-            k,
-            vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
-        );
+            // 3. u_k * D_j * delta -> u * v_j * delta
+            add_basis_vec(
+                "u_k * D_j * delta",
+                k,
+                vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
+            );
+        }
 
         if k >= num_pub {
             // 4. L_k * D_pub * delta -> (beta*u+alpha*v+w)(beta+V)
@@ -1288,7 +1353,7 @@ fn check_independence_streaming(
     // - The adversary gets AlphaDeltaVPub bundled with AlphaBetaDelta
     // - The target ALSO includes AlphaDeltaVPub (from standard IC)
     // - So the bundled handle contributes directly to target!
-    // - Security depends on the REMAINING target (BetaDeltaUPub, DeltaWPub, DeltaSq)
+    // - Security depends on the REMAINING target (BetaDeltaUPub, DeltaWPub)
     //   which CANNOT be synthesized from witness handles if span separation holds!
     add_basis_vec(
         "Alpha * y_cols_rho[0] (D_pub bundled)",
@@ -1330,6 +1395,7 @@ fn run_independence_checks(
         DensePolynomial<Fr>,
         DensePolynomial<Fr>,
     )],
+    pub_coeffs: &[Fr],
     target: &TrapdoorPolyVector,
     num_vars: usize,
     num_checks: usize,
@@ -1344,6 +1410,7 @@ fn run_independence_checks(
         let (is_safe, dependency) = check_independence_streaming(
             extractor,
             pub_polys,
+            pub_coeffs,
             target,
             num_vars,
             seed,
