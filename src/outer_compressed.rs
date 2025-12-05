@@ -170,10 +170,64 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             cs.clone(),
             &self.vk_inner,
         )?;
+        use ark_relations::r1cs::{LinearCombination, Variable};
+        use ark_ff::{Field, One};
+
+        // SECURE SPAN-SEPARATED PUBLIC INPUT BINDING
+        //
+        // Goal: Public inputs in B only (for span separation) while ensuring
+        // the verifier uses the SAME values (for soundness).
+        //
+        // Approach:
+        // 1. Allocate public input as simple scalar (span-separated)
+        // 2. BooleanInputVar as WITNESS (for verifier's scalar mult)
+        // 3. Constrain: x_pub = reconstructed_from_bits(input_var)
+        //    This links them cryptographically, not just by prover honesty!
+        
+        let one_lc = LinearCombination::from((OuterScalar::<C>::one(), Variable::One));
+        
+        // Step 1: Allocate span-separated public inputs
+        let mut x_pub_vars = Vec::new();
+        for x_val in &self.x_inner {
+            let x_outer: OuterScalar<C> = convert_inner_to_outer::<C>(*x_val);
+            let x_pub = cs.new_input_variable(|| Ok(x_outer))?;
+            x_pub_vars.push(x_pub);
+        }
+        
+        // Step 2: BooleanInputVar as WITNESS (for verifier's scalar multiplication)
         let input_var =
-        BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_input(cs.clone(), || {
-            Ok(self.x_inner.clone())
-        })?;
+            BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_witness(cs.clone(), || {
+                Ok(self.x_inner.clone())
+            })?;
+        
+        // Step 3: Link public scalars to input_var bits via BINDING constraints
+        // Each element in input_var.into_iter() gives us a Vec<Boolean> for one inner input
+        // We reconstruct the scalar and constrain it to equal x_pub
+        for (x_pub, bits) in x_pub_vars.iter().zip(input_var.clone().into_iter()) {
+            // bits is Vec<Boolean<OuterScalar<C>>> for this input
+            // Build linear combination: sum of bit_i * 2^i
+            let mut reconstructed_lc = LinearCombination::<OuterScalar<C>>::zero();
+            let mut power_of_two = OuterScalar::<C>::one();
+            
+            for bit in &bits {
+                // bit.lc() gives the linear combination for this boolean
+                let bit_lc = bit.lc();
+                // Add power_of_two * bit to the reconstruction
+                for (coeff, var) in bit_lc.iter() {
+                    reconstructed_lc += (power_of_two * coeff, *var);
+                }
+                power_of_two = power_of_two + power_of_two;
+            }
+            
+            // Enforce: 1 * x_pub = reconstructed
+            // This puts x_pub in B (for span separation) AND binds it to input_var
+            let mut lc_b = LinearCombination::<OuterScalar<C>>::zero();
+            lc_b += (OuterScalar::<C>::one(), *x_pub);
+            
+            cs.enforce_constraint(one_lc.clone(), lc_b, reconstructed_lc)?;
+        }
+        
+        // Step 4: Use witness input_var in verifier (now bound to x_pub!)
         let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
             Ok(self.proof_inner)
         })?;
@@ -182,9 +236,18 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &vk_var, &input_var, &proof_var,
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;
-       // enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
+}
+/// Convert inner scalar field element to outer scalar field element.
+/// For recursion-friendly cycles (BLS12-377/BW6-761), this embeds the smaller
+/// inner field into the larger outer field.
+fn convert_inner_to_outer<C: RecursionCycle>(x: InnerScalar<C>) -> OuterScalar<C> {
+    use ark_ff::PrimeField;
+    // Convert via BigInt representation
+ // Convert via byte representation - works for any field pair
+    let bytes = x.into_bigint().to_bytes_le();
+    OuterScalar::<C>::from_le_bytes_mod_order(&bytes)
 }
 use ark_groth16::r1cs_to_qap::PvugcReduction;
 
