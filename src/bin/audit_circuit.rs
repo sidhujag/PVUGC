@@ -119,6 +119,19 @@ enum TrapdoorMonomial {
     AlphaDeltaSq, // ρ * alpha * delta^2
     BetaV,       // ρ * v * beta
     PureVV,      // ρ * v * v
+    
+    // ============================================================
+    // δ²·polynomial TERMS (Armed, deg_ρ = 1)
+    // ============================================================
+    // CRITICAL: These must be SEPARATE from DeltaSq (quotient).
+    // δ²·u ≠ δ²·v ≠ δ² (they're algebraically distinct directions!)
+    // 
+    // In PVUGC:
+    // - Public A-queries are zeroed (u_pub = 0), so only DeltaSqUWit needed
+    // - Public B-queries are NOT zeroed (v_pub ≠ 0), so we need BOTH Pub and Wit
+    DeltaSqUWit, // ρ * delta^2 * u_wit (from e(u_k, δ^ρ), k >= num_pub)
+    DeltaSqVPub, // ρ * delta^2 * v_pub (from e(v_k, δ^ρ), k < num_pub)
+    DeltaSqVWit, // ρ * delta^2 * v_wit (from e(v_k, δ^ρ), k >= num_pub)
 }
 
 struct TrapdoorPolyVector {
@@ -861,7 +874,9 @@ struct MatrixExtractor {
 impl MatrixExtractor {
     fn new(cs: ConstraintSystemRef<Fr>) -> Self {
         let matrices = cs.to_matrices().expect("matrix extraction");
-        let domain_size = cs.num_constraints().next_power_of_two();
+        // CRITICAL: Domain size must match Groth16/arkworks indexing!
+        // arkworks uses (constraints + instance_vars), NOT just constraints.
+        let domain_size = cs.num_constraints() + cs.num_instance_variables();
         let domain = GeneralEvaluationDomain::<Fr>::new(domain_size).expect("domain");
 
         let num_vars = cs.num_instance_variables() + cs.num_witness_variables();
@@ -1111,6 +1126,10 @@ fn check_independence_streaming(
         TrapdoorMonomial::AlphaDeltaSq,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
+        // δ²·polynomial terms (distinct from quotient's DeltaSq!)
+        TrapdoorMonomial::DeltaSqUWit,
+        TrapdoorMonomial::DeltaSqVPub,
+        TrapdoorMonomial::DeltaSqVWit,
     ];
     for m in all_monos {
         mono_set.insert(m);
@@ -1191,11 +1210,11 @@ fn check_independence_streaming(
 
         // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
         // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
-        // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSq
+        // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSqUWit (NOT plain DeltaSq!)
         add_basis_vec(
             "u_k * D_delta * delta",
             k,
-            vec![(TrapdoorMonomial::DeltaSq, u_val)],
+            vec![(TrapdoorMonomial::DeltaSqUWit, u_val)],
         );
 
         // 3. u_k * D_j * delta -> u * v_j * delta
@@ -1250,11 +1269,28 @@ fn check_independence_streaming(
         // 7. Raw B-Query Handles (b_g1_query)
         // Available for ALL variables (including public).
         // Actual: e([v_k]_1, [δ]_2^ρ) = ρ·δ·v_k
-        // Normalized: δ · (ρ·δ·v_k) = ρ·δ²·v_k → DeltaSq
-        add_basis_vec("Raw B DeltaSq", k, vec![(TrapdoorMonomial::DeltaSq, v_val)]);
+        // Normalized: δ · (ρ·δ·v_k) = ρ·δ²·v_k
+        // Use DeltaSqVPub for public columns, DeltaSqVWit for witness columns
+        if k < num_pub {
+            add_basis_vec("Raw B DeltaSqVPub", k, vec![(TrapdoorMonomial::DeltaSqVPub, v_val)]);
+        } else {
+            add_basis_vec("Raw B DeltaSqVWit", k, vec![(TrapdoorMonomial::DeltaSqVWit, v_val)]);
+        }
         // v_k (G1) * beta (G2) -> v * beta
         add_basis_vec("Raw B BetaV", k, vec![(TrapdoorMonomial::BetaV, v_val)]);
         add_basis_vec("Raw B PureVV", k, vec![(TrapdoorMonomial::PureVV, v_val)]);
+        
+        // 8. Alpha * Y_k (per-column) - from e([α]_1, [v_k]_2^ρ)
+        // This gives ρ·α·v_k for each column. For witness columns, this contributes
+        // to AlphaDeltaVWit. For public columns, it contributes to AlphaDeltaVPub.
+        // We add per-column with v_val to properly model the adversary's capability.
+        if k >= num_pub {
+            add_basis_vec(
+                "Alpha * Y_k (witness)",
+                k,
+                vec![(TrapdoorMonomial::AlphaDeltaVWit, v_val)],
+            );
+        }
     }
     println!(
         "\r[Independence Check {}/{}] Progress: 100%",
@@ -1280,22 +1316,7 @@ fn check_independence_streaming(
         ],
     );
 
-    // 9. Alpha * Y_wit[j] - from e([α]_1, y_cols_rho[j]) for witness columns
-    // This gives ρ·α·v_j for each witness column, contributing to AlphaDeltaVWit.
-    // 
-    // CRITICAL: If span separation holds (V_pub ⊥ V_wit), this handle CANNOT
-    // be used to cancel the AlphaDeltaVPub pollution from handle #9.
-    // We model this by using a SEPARATE monomial (AlphaDeltaVWit).
-    //
-    // The adversary has the full span of {α·v_j} for all witness j, but this
-    // cannot synthesize α·V_pub if the V polynomials are span-separated.
-    add_basis_vec(
-        "Alpha * y_cols_rho[wit] (V_wit span)",
-        usize::MAX,
-        vec![(TrapdoorMonomial::AlphaDeltaVWit, Fr::one())],
-    );
-
-    // 10. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
+    // 9. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
     // Under δ-normalization this becomes ρ·α·δ² → AlphaDeltaSq
     add_basis_vec(
         "Alpha * delta_rho",
