@@ -45,7 +45,7 @@ use arkworks_groth16::{
     test_fixtures::get_fixture,
 };
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Fr = OuterFr;
@@ -441,7 +441,6 @@ fn run_audit(subject: &dyn AuditSubject) {
     let v_span_separated = check_span_separation_matrix(
         &extractor, num_pub, num_pub + num_wit, "V", "B",
         |e, i| &e.b_cols[i],
-        |e, i, r| { let (_, v, _) = e.evaluate_column(i, r); v },
     );
     if v_span_separated {
         println!("[PASS] V Span Separation (V_pub ⊥ V_wit) → α-handle attack blocked.");
@@ -453,7 +452,6 @@ fn run_audit(subject: &dyn AuditSubject) {
     let u_span_separated = check_span_separation_matrix(
         &extractor, num_pub, num_pub + num_wit, "U", "A",
         |e, i| &e.a_cols[i],
-        |e, i, r| { let (u, _, _) = e.evaluate_column(i, r); u },
     );
     if u_span_separated {
         println!("[PASS] U Span Separation (U_pub ⊥ U_wit) → β·U synthesis blocked.");
@@ -465,7 +463,6 @@ fn run_audit(subject: &dyn AuditSubject) {
     let w_span_separated = check_span_separation_matrix(
         &extractor, num_pub, num_pub + num_wit, "W", "C",
         |e, i| &e.c_cols[i],
-        |e, i, r| { let (_, _, w) = e.evaluate_column(i, r); w },
     );
     if w_span_separated {
         println!("[PASS] W Span Separation (W_pub ⊥ W_wit) → W synthesis blocked.");
@@ -615,19 +612,117 @@ fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) ->
 /// - matrix_name: "U", "V", or "W" for display
 /// - col_name: "A", "B", or "C" for display  
 /// - get_col: closure to get column entries from extractor
-/// - eval_col: closure to evaluate column polynomial at a point
-fn check_span_separation_matrix<F, G>(
+///
+/// This now uses an exact sparse Gaussian-elimination check in Lagrange
+/// coefficient space (no random sampling), so results are deterministic and
+/// not sensitive to the number of witness columns.
+type SparseRowVec = BTreeMap<usize, Fr>;
+
+/// Convert a sparse column representation (row, coeff) into a sparse row vector
+/// backed by a BTreeMap. Zero coefficients are dropped.
+fn to_sparse_row_vec(entries: &Vec<(usize, Fr)>) -> SparseRowVec {
+    let mut v = SparseRowVec::new();
+    for (row, coeff) in entries {
+        if !coeff.is_zero() {
+            v.insert(*row, *coeff);
+        }
+    }
+    v
+}
+
+/// Sparse row-basis over the QAP domain.
+///
+/// Each basis vector is stored in row-sparse form and normalized so that its
+/// pivot row has coefficient 1. This lets us do exact linear dependence checks
+/// in Lagrange coefficient space without any random sampling.
+struct RowBasis {
+    /// pivot_row -> normalized sparse vector with pivot_row coefficient = 1
+    pivots: BTreeMap<usize, SparseRowVec>,
+}
+
+impl RowBasis {
+    fn new() -> Self {
+        Self {
+            pivots: BTreeMap::new(),
+        }
+    }
+
+    /// Reduce v using the current basis (Gaussian elimination over sparse rows).
+    /// Returns the residue v', which is zero iff v is in the span of the basis.
+    fn reduce(&self, mut v: SparseRowVec) -> SparseRowVec {
+        for (&p, pv) in self.pivots.iter() {
+            if let Some(&coeff) = v.get(&p) {
+                if !coeff.is_zero() {
+                    // v -= coeff * pv
+                    for (&r, &c) in pv.iter() {
+                        let entry = v.entry(r).or_insert(Fr::zero());
+                        *entry -= coeff * c;
+                        if entry.is_zero() {
+                            v.remove(&r);
+                        }
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Insert a new vector into the basis (if it is not already in the span).
+    fn insert(&mut self, v: SparseRowVec) {
+        let mut v = self.reduce(v);
+        // Find first non-zero entry as pivot (smallest row index).
+        if let Some((&pivot_row, &pivot_coeff)) = v.iter().next() {
+            // Normalize so that pivot coefficient is 1.
+            let inv = pivot_coeff.inverse().unwrap();
+            for coeff in v.values_mut() {
+                *coeff *= inv;
+            }
+
+            // Eliminate this pivot from existing basis vectors to keep them reduced.
+            let mut rows_to_update = Vec::new();
+            for (&existing_pivot, existing_vec) in self.pivots.iter() {
+                if existing_vec.contains_key(&pivot_row) {
+                    rows_to_update.push(existing_pivot);
+                }
+            }
+
+            for row in rows_to_update {
+                if let Some(mut existing_vec) = self.pivots.remove(&row) {
+                    let coeff = *existing_vec
+                        .get(&pivot_row)
+                        .expect("pivot row must be present");
+                    if !coeff.is_zero() {
+                        for (&r, &c) in v.iter() {
+                            let entry = existing_vec.entry(r).or_insert(Fr::zero());
+                            *entry -= coeff * c;
+                            if entry.is_zero() {
+                                existing_vec.remove(&r);
+                            }
+                        }
+                    }
+                    // Re-insert only if non-zero
+                    if !existing_vec.is_empty() {
+                        self.pivots.insert(row, existing_vec);
+                    }
+                }
+            }
+
+            // Finally, insert the new basis vector.
+            self.pivots.insert(pivot_row, v);
+        }
+    }
+}
+
+fn check_span_separation_matrix<F>(
     extractor: &MatrixExtractor, 
     num_pub: usize, 
     num_vars: usize,
     matrix_name: &str,
     col_name: &str,
     get_col: F,
-    eval_col: G,
 ) -> bool 
 where
     F: Fn(&MatrixExtractor, usize) -> &Vec<(usize, Fr)>,
-    G: Fn(&MatrixExtractor, usize, Fr) -> Fr + Sync,
 {
     let num_wit = num_vars - num_pub;
     if num_wit == 0 {
@@ -669,186 +764,77 @@ where
     }
     
     if overlapping_witnesses.is_empty() {
-        println!("  [{}_SPAN] No witness {}-entries overlap with public {}-rows.", 
-                 matrix_name, col_name, col_name);
-        println!("  [{}_SPAN] By Lagrange orthogonality: {}_pub NOT in span({}_wit)", 
-                 matrix_name, matrix_name.to_lowercase(), matrix_name.to_lowercase());
+        println!(
+            "  [{}_SPAN] No witness {}-entries overlap with public {}-rows.", 
+            matrix_name, col_name, col_name
+        );
+        println!(
+            "  [{}_SPAN] By Lagrange orthogonality: {}_pub NOT in span({}_wit)", 
+            matrix_name,
+            matrix_name.to_lowercase(),
+            matrix_name.to_lowercase()
+        );
         return true;
     }
     
-    // There ARE overlapping witnesses - need full span check
-    // Example: p on {r1}, w1 on {r1,r2}, w2 on {r2} -> p = w1 - w2 is in span
-    println!("  [{}_SPAN] {} witness columns have {}-entries overlapping public rows", 
-             matrix_name, overlapping_witnesses.len(), col_name);
-    
-    // Use sampling to verify if polynomial span separation holds
-    // Include ALL witness columns (num_pub..num_vars), not just overlapping ones
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(98765);
-    
-    // Include ALL witness columns
-    let all_witnesses: Vec<usize> = (num_pub..num_vars).collect();
-    let num_witnesses = all_witnesses.len();
-    
-    if num_witnesses == 0 {
-        println!("  [{}_SPAN] No witness columns - trivially separated", matrix_name);
-        return true;
-    }
-    
-    // Need more samples than witness columns for reliable span test
-    // But cap it to avoid excessive computation
-    let num_samples = std::cmp::min(std::cmp::max(100, num_witnesses + 20), 300);
-    
-    println!("  [{}_SPAN] Building evaluation matrix: {} samples x {} witnesses...", 
-             matrix_name, num_samples, num_witnesses);
-    
-    let mut samples: Vec<Fr> = Vec::new();
-    for _ in 0..num_samples {
-        let mut sample = Fr::rand(&mut rng);
-        while sample.is_zero() {
-            sample = Fr::rand(&mut rng);
-        }
-        samples.push(sample);
-    }
-    
-    // Pre-build witness evaluation matrix (shared across public columns)
-    // Each sample row is computed independently
-    let start_time = std::time::Instant::now();
-    let progress = AtomicUsize::new(0);
-    
-    println!("  [{}_SPAN] Using {} CPU cores for parallel evaluation...", 
-             matrix_name, rayon::current_num_threads());
-    
-    let wit_matrix: Vec<Vec<Fr>> = samples
-        .par_iter()
-        .map(|sample| {
-            let row: Vec<Fr> = all_witnesses
-                .iter()
-                .map(|&j| eval_col(extractor, j, *sample))
-                .collect();
-            
-            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            if done % 50 == 0 || done == num_samples {
-                eprint!("\r  [{}_SPAN] Evaluating witnesses: {}/{} samples...", 
-                       matrix_name, done, num_samples);
-            }
-            row
-        })
-        .collect();
-    
-    eprintln!(" done ({:.2?})", start_time.elapsed());
-    
-    let mut all_separated = true;
-    let num_pub_to_check = num_pub - 1; // Skip column 0 (constant)
-    
-    for (idx, i) in (1..num_pub).enumerate() {
-        // Get public polynomial evaluations
-        let mut pub_evals: Vec<Fr> = Vec::new();
-        for sample in &samples {
-            pub_evals.push(eval_col(extractor, i, *sample));
-        }
-        
-        // Check if public polynomial is identically zero (trivially separated)
-        if pub_evals.iter().all(|x| x.is_zero()) {
+    // There ARE overlapping witnesses - need full span check in coefficient space.
+    // Example: p on {r1}, w1 on {r1,r2}, w2 on {r2} -> p = w1 - w2 is in span.
+    println!(
+        "  [{}_SPAN] {} witness columns have {}-entries overlapping public rows", 
+        matrix_name,
+        overlapping_witnesses.len(),
+        col_name
+    );
+
+    // Build a sparse row-basis from ALL witness columns in this matrix.
+    let mut basis = RowBasis::new();
+    for j in num_pub..num_vars {
+        let entries = get_col(extractor, j);
+        if entries.is_empty() {
             continue;
         }
-        
-        let in_span = check_vector_in_column_span(&wit_matrix, &pub_evals);
-        
-        if in_span {
-            println!("  [{}_SPAN FAIL] Public column {} is IN span of ALL {} witness columns", 
-                     matrix_name, i, num_witnesses);
+        let v = to_sparse_row_vec(entries);
+        if !v.is_empty() {
+            basis.insert(v);
+        }
+    }
+
+    let mut all_separated = true;
+    let num_pub_to_check = num_pub - 1; // Skip column 0 (constant)
+
+    for (idx, i) in (1..num_pub).enumerate() {
+        let entries = get_col(extractor, i);
+        if entries.is_empty() {
+            // Zero polynomial: trivially separated
+            continue;
+        }
+        let pub_vec = to_sparse_row_vec(entries);
+        let reduced = basis.reduce(pub_vec);
+        if reduced.is_empty() {
+            println!(
+                "  [{}_SPAN FAIL] Public column {} is IN span of witness columns", 
+                matrix_name, i
+            );
             all_separated = false;
         }
-        
-        // Progress for public columns
+
+        // Progress for public columns (purely cosmetic)
         if (idx + 1) % 5 == 0 || idx + 1 == num_pub_to_check {
-            print!("\r  [{}_SPAN] Checking public columns: {}/{}...", 
-                   matrix_name, idx + 1, num_pub_to_check);
+            print!(
+                "\r  [{}_SPAN] Checking public columns (exact): {}/{}...", 
+                matrix_name,
+                idx + 1,
+                num_pub_to_check
+            );
             use std::io::Write;
-            std::io::stdout().flush().ok();
+            let _ = std::io::stdout().flush();
         }
     }
     if num_pub_to_check > 0 {
         println!(" done");
     }
-    
-    all_separated
-}
 
-/// Check if target vector is in the column span of matrix
-/// Uses Gaussian elimination with augmented matrix
-fn check_vector_in_column_span(matrix: &[Vec<Fr>], target: &[Fr]) -> bool {
-    if matrix.is_empty() || matrix[0].is_empty() {
-        // No witness columns - target must be zero
-        return target.iter().all(|x| x.is_zero());
-    }
-    
-    let num_rows = matrix.len();
-    let num_cols = matrix[0].len();
-    
-    // With more rows than columns, we can properly check span membership
-    // Build augmented matrix [M | target] and check consistency
-    
-    let mut aug: Vec<Vec<Fr>> = Vec::new();
-    for (row_idx, row) in matrix.iter().enumerate() {
-        let mut aug_row = row.clone();
-        aug_row.push(target[row_idx]); // Augment with target
-        aug.push(aug_row);
-    }
-    
-    // Gaussian elimination
-    let mut pivot_row = 0;
-    for col in 0..num_cols {
-        // Find pivot
-        let mut found = false;
-        for row in pivot_row..num_rows {
-            if !aug[row][col].is_zero() {
-                // Swap rows
-                aug.swap(row, pivot_row);
-                found = true;
-                break;
-            }
-        }
-        
-        if !found {
-            continue; // No pivot in this column
-        }
-        
-        // Normalize pivot row
-        let inv = aug[pivot_row][col].inverse().unwrap();
-        for j in col..=num_cols {
-            aug[pivot_row][j] *= inv;
-        }
-        
-        // Eliminate other rows
-        for row in 0..num_rows {
-            if row != pivot_row && !aug[row][col].is_zero() {
-                let factor = aug[row][col];
-                // Copy pivot row values to avoid borrow conflict
-                let pivot_vals: Vec<Fr> = aug[pivot_row][col..=num_cols].to_vec();
-                for (j_offset, pivot_val) in pivot_vals.iter().enumerate() {
-                    let j = col + j_offset;
-                    aug[row][j] -= factor * pivot_val;
-                }
-            }
-        }
-        
-        pivot_row += 1;
-        if pivot_row >= num_rows {
-            break;
-        }
-    }
-    
-    // After elimination, check if system is consistent
-    // A row of form [0, 0, ..., 0 | b] where b != 0 means inconsistent
-    for row in &aug {
-        let all_zero_except_last = row[..num_cols].iter().all(|x| x.is_zero());
-        if all_zero_except_last && !row[num_cols].is_zero() {
-            return false; // Inconsistent - target NOT in span
-        }
-    }
-    
-    true // Target IS in the column span
+    all_separated
 }
 
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
@@ -874,10 +860,18 @@ struct MatrixExtractor {
 impl MatrixExtractor {
     fn new(cs: ConstraintSystemRef<Fr>) -> Self {
         let matrices = cs.to_matrices().expect("matrix extraction");
-        // CRITICAL: Domain size must match Groth16/arkworks indexing!
-        // arkworks uses (constraints + instance_vars), NOT just constraints.
-        let domain_size = cs.num_constraints() + cs.num_instance_variables();
-        let domain = GeneralEvaluationDomain::<Fr>::new(domain_size).expect("domain");
+        // CRITICAL: Domain must match the Groth16/QAP domain used in proving.
+        // Standard Groth16 uses a domain of size (num_constraints + num_inputs),
+        // padded up to the nearest supported FFT size if necessary. Mirror the
+        // logic from `compute_witness_bases` so the audit sees the same U/V/W
+        // polynomials as the real prover.
+        let num_constraints = cs.num_constraints();
+        let num_inputs = cs.num_instance_variables(); // includes constant 1
+        let qap_domain_size = num_constraints + num_inputs;
+        let domain = GeneralEvaluationDomain::<Fr>::new(qap_domain_size)
+            .or_else(|| GeneralEvaluationDomain::<Fr>::new(qap_domain_size.next_power_of_two()))
+            .expect("domain");
+        let domain_size = domain.size();
 
         let num_vars = cs.num_instance_variables() + cs.num_witness_variables();
         let mut a_cols = vec![Vec::new(); num_vars];
