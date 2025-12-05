@@ -22,7 +22,6 @@
 //! ## Key Modeling Features
 //!
 //! - **ρ-Degree Separation**: Distinguishes Static (deg_ρ=0) vs Armed (deg_ρ=1) handles.
-//!   Static GT table entries CANNOT reach the dynamic KEM target.
 //! - **Span-Separated Pub/Wit**: Uses separate monomials (e.g., AlphaDeltaVPub vs AlphaDeltaVWit)
 //!   to properly model algebraic orthogonality when span separation holds.
 //!
@@ -126,16 +125,6 @@ enum TrapdoorMonomial {
     AlphaDeltaSq, // ρ * alpha * delta^2
     BetaV,       // ρ * v * beta
     PureVV,      // ρ * v * v
-
-    // ============================================================
-    // STATIC GT TABLE HANDLES (Static, deg_ρ = 0)
-    // ============================================================
-    // These are precomputed GT elements, NOT armed with ρ.
-    // They CANNOT synthesize the target because target has deg_ρ = 1.
-    // We keep them as separate monomials to prevent incorrect cancellation.
-    AlphaBetaStatic,  // alpha * beta (deg_ρ = 0)
-    AlphaDeltaStatic, // alpha * delta (deg_ρ = 0)
-    AlphaVStatic,     // alpha * v (deg_ρ = 0)
 }
 
 struct TrapdoorPolyVector {
@@ -1128,10 +1117,6 @@ fn check_independence_streaming(
         TrapdoorMonomial::AlphaDeltaSq,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
-        // Static GT table handles (deg_ρ = 0, cannot reach armed target)
-        TrapdoorMonomial::AlphaBetaStatic,
-        TrapdoorMonomial::AlphaDeltaStatic,
-        TrapdoorMonomial::AlphaVStatic,
     ];
     for m in all_monos {
         mono_set.insert(m);
@@ -1282,31 +1267,7 @@ fn check_independence_streaming(
         check_idx, total_checks
     );
 
-    // 8. Static GT table handles (deg_rho = 0).
-    // T_beta = e(alpha, beta)  → AlphaBetaStatic
-    add_basis_vec(
-        "GT T_beta (alpha*beta, no delta)",
-        usize::MAX,
-        vec![(TrapdoorMonomial::AlphaBetaStatic, Fr::one())],
-    );
-
-    // T_delta = e(alpha, delta) → AlphaDeltaStatic
-    add_basis_vec(
-        "GT T_delta (alpha*delta, no delta^2)",
-        usize::MAX,
-        vec![(TrapdoorMonomial::AlphaDeltaStatic, Fr::one())],
-    );
-
-    // T_v[i] = e(alpha, B_i) for *all* B-columns.
-    // The adversary gets the span of {alpha * v_i}; we model that as one generic AlphaVStatic direction.
-    // You can refine this later if you want multiple independent directions.
-    add_basis_vec(
-        "GT T_v aggregate (alpha*v, no delta)",
-        usize::MAX,
-        vec![(TrapdoorMonomial::AlphaVStatic, Fr::one())],
-    );
-
-    // 9. Alpha * D_pub (bundled) - from e([α]_1, y_cols_rho[0])
+    // 8. Alpha * D_pub (bundled) - from e([α]_1, y_cols_rho[0])
     // This is the BUNDLED handle: adversary gets AlphaBetaDelta + AlphaDeltaVPub together.
     // They CANNOT separate these components - they come as a package.
     //
@@ -1325,7 +1286,7 @@ fn check_independence_streaming(
         ],
     );
 
-    // 10. Alpha * Y_wit[j] - from e([α]_1, y_cols_rho[j]) for witness columns
+    // 9. Alpha * Y_wit[j] - from e([α]_1, y_cols_rho[j]) for witness columns
     // This gives ρ·α·v_j for each witness column, contributing to AlphaDeltaVWit.
     // 
     // CRITICAL: If span separation holds (V_pub ⊥ V_wit), this handle CANNOT
@@ -1340,7 +1301,7 @@ fn check_independence_streaming(
         vec![(TrapdoorMonomial::AlphaDeltaVWit, Fr::one())],
     );
 
-    // 11. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
+    // 10. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
     // Under δ-normalization this becomes ρ·α·δ² → AlphaDeltaSq
     add_basis_vec(
         "Alpha * delta_rho",
