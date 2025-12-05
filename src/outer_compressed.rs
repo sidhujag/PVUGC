@@ -615,6 +615,40 @@ mod tests {
         }
     }
 
+    /// Test that our bit reconstruction matches convert_inner_to_outer.
+    /// This verifies the binding constraint correctly links public inputs to verifier bits.
+    #[test]
+    fn test_bit_encoding_matches_convert() {
+        use ark_ff::{BigInteger, PrimeField, Field, One, Zero};
+        
+        // Test with several values
+        let test_values = [0u64, 1, 42, 12345, u64::MAX / 2];
+        
+        for &val in &test_values {
+            let x_inner = InnerScalar::<DefaultCycle>::from(val);
+            
+            // Method 1: convert_inner_to_outer (what x_pub uses)
+            let x_outer_direct = convert_inner_to_outer::<DefaultCycle>(x_inner);
+            
+            // Method 2: reconstruct from LE bits (what binding constraint does)
+            let bits = x_inner.into_bigint().to_bits_le();
+            let mut x_outer_reconstructed = OuterScalar::<DefaultCycle>::zero();
+            let mut power_of_two = OuterScalar::<DefaultCycle>::one();
+            for bit in bits {
+                if bit {
+                    x_outer_reconstructed += power_of_two;
+                }
+                power_of_two = power_of_two + power_of_two;
+            }
+            
+            assert_eq!(
+                x_outer_direct, x_outer_reconstructed,
+                "Encoding mismatch for value {}! direct={:?}, reconstructed={:?}",
+                val, x_outer_direct, x_outer_reconstructed
+            );
+        }
+    }
+
     impl ProvidesFixture for Mnt4Mnt6Cycle {
         fn load_fixture() -> GlobalFixtureAdapter<Self> {
             let fx = get_fixture_mnt();
