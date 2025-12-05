@@ -1280,17 +1280,6 @@ fn check_independence_streaming(
         add_basis_vec("Raw B BetaV", k, vec![(TrapdoorMonomial::BetaV, v_val)]);
         add_basis_vec("Raw B PureVV", k, vec![(TrapdoorMonomial::PureVV, v_val)]);
         
-        // 8. Alpha * Y_k (per-column) - from e([α]_1, [v_k]_2^ρ)
-        // This gives ρ·α·v_k for each column. For witness columns, this contributes
-        // to AlphaDeltaVWit. For public columns, it contributes to AlphaDeltaVPub.
-        // We add per-column with v_val to properly model the adversary's capability.
-        if k >= num_pub {
-            add_basis_vec(
-                "Alpha * Y_k (witness)",
-                k,
-                vec![(TrapdoorMonomial::AlphaDeltaVWit, v_val)],
-            );
-        }
     }
     println!(
         "\r[Independence Check {}/{}] Progress: 100%",
@@ -1316,7 +1305,17 @@ fn check_independence_streaming(
         ],
     );
 
-    // 9. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
+    // 9. Alpha * y_cols_rho[wit] - from e([α]_1, y_cols_rho[j]) for all witness j
+    // The arming transcript includes ALL individual Y_j^ρ, so the adversary can
+    // compute e([α]_1, [v_j]_2^ρ) = ρ·α·v_j for any witness column j.
+    // This spans the full AlphaDeltaVWit direction.
+    add_basis_vec(
+        "Alpha * y_cols_rho[wit] (V_wit span)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::AlphaDeltaVWit, Fr::one())],
+    );
+
+    // 10. Alpha * delta_rho - from e([α]_1, delta_rho) = ρ·α·δ
     // Under δ-normalization this becomes ρ·α·δ² → AlphaDeltaSq
     add_basis_vec(
         "Alpha * delta_rho",
