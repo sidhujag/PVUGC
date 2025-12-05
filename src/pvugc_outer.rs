@@ -28,29 +28,6 @@ use std::time::Instant;
 
 type StatementVec<C> = Vec<InnerScalar<C>>;
 
-/// Create a sanitized proving key with alpha_g1 zeroed.
-/// The calculate_coeff function adds a_query[0] AND vk.alpha_g1 separately.
-/// So to remove alpha once: just zero vk.alpha_g1.
-/// Then: A' = r*delta + a_query[0] + MSM + 0 = A - alpha (correct!)
-pub fn pk_without_alpha<E: Pairing>(pk: &Groth16PK<E>) -> Groth16PK<E> {
-    let mut pk_clone = pk.clone();
-    pk_clone.vk.alpha_g1 = E::G1Affine::zero();
-    pk_clone
-}
-pub fn derive_gt_table_from_pk<E: Pairing>(
-    pk: &Groth16PK<E>,
-) -> (PairingOutput<E>, PairingOutput<E>, Vec<PairingOutput<E>>) {
-    let alpha = pk.vk.alpha_g1;
-    let t_beta = E::pairing(alpha, pk.vk.beta_g2);
-    let t_delta = E::pairing(alpha, pk.vk.delta_g2);
-    let t_v: Vec<_> = pk
-        .b_g2_query
-        .iter()
-        .map(|g| E::pairing(alpha, *g))
-        .collect();
-    (t_beta, t_delta, t_v)
-}
-
 /// Build PVUGC VK and Lean PK from the OUTER proving key.
 ///
 /// IMPORTANT: When the Groth16 verifier gadget is enabled in the outer circuit,
@@ -129,9 +106,11 @@ where
         println!("[Setup] Found cached setup at {}, loading...", cache_path);
         let file = File::open(&cache_path).expect("failed to open cached setup");
         let reader = BufReader::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
-        let (pk, t_gt): (LeanProvingKey<C::OuterE>, Vec<PairingOutput<C::OuterE>>) =
-            CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
-                .expect("failed to deserialize setup");
+        let (pk, t_gt): (
+            LeanProvingKey<C::OuterE>,
+            Vec<PairingOutput<C::OuterE>>,
+        ) = CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
+            .expect("failed to deserialize setup");
         println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
         (pk, t_gt)
     } else {
@@ -139,36 +118,39 @@ where
         let wb_result = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
         println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
 
-
-        let (t_beta, t_delta, t_v) = derive_gt_table_from_pk(pk_outer);
-        let pk_outer_sanitized = pk_without_alpha(pk_outer);
+        audit_witness_bases::<C>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
 
         let lean_pk = LeanProvingKey {
-            vk: pk_outer_sanitized.vk.clone(),
+            vk: pk_outer.vk.clone(),
             beta_g1: pk_outer.beta_g1,
             delta_g1: pk_outer.delta_g1,
-            a_query: pk_outer.a_query.clone(),
+            a_query_wit: {
+                let mut q = pk_outer.a_query.clone();
+                let num_public = pk_outer.vk.gamma_abc_g1.len();
+                // Zero out public input slots (1..num_public) to ensure no public input handles are leaked in A.
+                // Index 0 is constant '1', which must be preserved.
+                for i in 1..num_public {
+                    if i < q.len() {
+                        q[i] = <C::OuterE as Pairing>::G1Affine::zero();
+                    }
+                }
+                q
+            },
             b_g1_query: pk_outer.b_g1_query.clone(),
             b_g2_query: pk_outer.b_g2_query.clone(),
             h_query_wit: wb_result.h_query_wit,
             l_query: pk_outer.l_query.clone(),
-            t_beta,
-            t_delta,
-            t_v,
         };
 
         println!("[Setup] Computing q_points from gap (using custom samples)...");
         let t_const_gt = compute_t_const_points_gt_from_gap::<C, F>(
-            &pk_outer_sanitized,
+            pk_outer,
             &lean_pk,
             vk_inner,
             &sample_statements,
             &inner_proof_generator,
         );
-        println!(
-            "[Setup] t_const_points_gt computed in {:?}",
-            start.elapsed()
-        );
+        println!("[Setup] t_const_points_gt computed in {:?}", start.elapsed());
         println!("[Setup] Serializing setup to {}...", cache_path);
         let file = File::create(&cache_path).expect("failed to create cache file");
         let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
@@ -179,13 +161,11 @@ where
         (lean_pk, t_const_gt)
     };
 
-    // Use t_beta from lean_pk (which has the precomputed e(α, β) from original PK)
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
         t_const_gt,
-        lean_pk.t_beta,  // = e(α, β) for lean verification
     );
 
     println!("[Setup] Complete.");
@@ -304,6 +284,7 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
         }
     }
+
 
     println!("[Quotient] Converting SRS to Lagrange Basis (Parallel Group IFFT)....");
     let fft_start = Instant::now();
@@ -654,6 +635,39 @@ fn parallel_fft_scalar<F: PrimeField>(a: &mut [F], domain: &GeneralEvaluationDom
     }
 }
 
+fn audit_witness_bases<C: RecursionCycle>(
+    wb: &WitnessBasesResult<C::OuterE>,
+    num_public: usize,
+) {
+    // 1. Check for pure public pairs in h_query_wit
+    for &(i, j, _) in &wb.h_query_wit {
+        let i_idx = i as usize;
+        let j_idx = j as usize;
+        let pure_public =
+            i_idx > 0 && i_idx < num_public && j_idx > 0 && j_idx < num_public;
+        assert!(
+            !pure_public,
+            "h_query_wit leaked pure public pair ({}, {})",
+            i,
+            j
+        );
+        
+        // 2. Check that public inputs (columns 1..num_public) do NOT appear in A-side (index i).
+        // In h_query_wit(i, j), 'i' corresponds to A-side and 'j' to B-side (or vice versa depending on impl,
+        // but typically index i is A-side var, index j is B-side var in the product a_i * b_j).
+        // Our 1*x=x constraint puts '1' (index 0) in A, and 'x' (index k) in B.
+        // So pairs are (0, k). 'i' is 0. 'j' is k.
+        // We must forbid 'i' being a public input index (1..num_public).
+        // If 'i' is a public input, it means a public input is in A!
+        if i_idx > 0 && i_idx < num_public {
+             panic!(
+                "[SECURITY AUDIT FAIL] Public input column {} found in Matrix A (via pair {}, {}). \
+                 Public inputs must only appear in Matrix B (One-Sided Property).",
+                i_idx, i, j
+            );
+        }
+    }
+}
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a: &mut [G],
     domain: &GeneralEvaluationDomain<F>,
@@ -721,16 +735,13 @@ where
         lean_pk,
         vk_inner,
         sample_statements,
-        inner_proof_generator,
+        inner_proof_generator
     );
 
     // Map to GT: T_i = e(Q_i, delta)
     // We compute this once and then discard q_points_g1.
     let delta_g2 = pk_outer.vk.delta_g2;
-    q_points_g1
-        .iter()
-        .map(|q| C::OuterE::pairing(*q, delta_g2))
-        .collect()
+    q_points_g1.iter().map(|q| C::OuterE::pairing(*q, delta_g2)).collect()
 }
 
 fn compute_q_const_points_from_gap<C, F>(

@@ -79,13 +79,11 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     
     let t_points_dummy =
         vec![PairingOutput(<<C::OuterE as Pairing>::TargetField as ark_ff::Field>::ONE); pk_outer.vk.gamma_abc_g1.len()];
-    let alpha_g1_beta_g2 = C::OuterE::pairing(pk_outer.vk.alpha_g1, pk_outer.vk.beta_g2);
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         pk_outer.vk.beta_g2,
         pk_outer.vk.delta_g2,
         pk_outer.b_g2_query.clone(),
         t_points_dummy,
-        alpha_g1_beta_g2,
     );
 
     // Outer-recursive keys: reuse setup_outer_params once per process

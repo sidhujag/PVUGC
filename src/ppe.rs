@@ -23,9 +23,6 @@ pub struct PvugcVk<E: Pairing> {
     /// t_const_points_gt[0] is e(q_const[0], delta).
     /// t_const_points_gt[1..] correspond to public inputs.
     pub t_const_points_gt: std::sync::Arc<Vec<PairingOutput<E>>>,
-    /// Precomputed e(α, β) for lean verification (since α is not in the lean CRS)
-    /// This is t_beta from the GT tables.
-    pub alpha_g1_beta_g2: PairingOutput<E>,
 }
 
 impl<E: Pairing> PvugcVk<E> {
@@ -35,7 +32,6 @@ impl<E: Pairing> PvugcVk<E> {
         delta_g2: E::G2Affine,
         b_g2_query: Vec<E::G2Affine>,
         t_const_points_gt: Vec<PairingOutput<E>>,
-        alpha_g1_beta_g2: PairingOutput<E>,
     ) -> Self {
         let hints = vec![true; b_g2_query.len()];
         Self {
@@ -44,7 +40,6 @@ impl<E: Pairing> PvugcVk<E> {
             b_g2_query: std::sync::Arc::new(b_g2_query),
             witness_zero_hints: std::sync::Arc::new(hints),
             t_const_points_gt: std::sync::Arc::new(t_const_points_gt),
-            alpha_g1_beta_g2,
         }
     }
 
@@ -141,6 +136,9 @@ pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
         g.mul_bigint(order).is_zero()
     };
 
+    if !is_good_g1(&vk.alpha_g1) {
+        return false;
+    }
     if !is_good_g2(&vk.beta_g2) {
         return false;
     }
@@ -207,9 +205,6 @@ pub fn compute_groth16_target<E: Pairing>(
 
 /// Compute baked target R_baked(vk, x) = R_raw - T_const
 /// where T_const = e(Q(x), delta)
-/// 
-/// Note: This version uses vk.alpha_g1 to compute e(α, β).
-/// For lean verification (where alpha_g1 is zeroed), use compute_baked_target_lean instead.
 pub fn compute_baked_target<E: Pairing>(
     vk: &Groth16VK<E>,
     pvugc_vk: &PvugcVk<E>,
@@ -231,54 +226,7 @@ pub fn compute_baked_target<E: Pairing>(
         t_acc = PairingOutput(t_acc.0 * term);
     }
 
-    // 3. Add T_const (which is e(Q, delta))
-    Ok(r_raw + t_acc)
-}
-
-/// Compute baked target for lean verification using precomputed e(α, β).
-/// This version doesn't require alpha_g1, using pvugc_vk.alpha_g1_beta_g2 instead.
-pub fn compute_baked_target_lean<E: Pairing>(
-    vk: &Groth16VK<E>,
-    pvugc_vk: &PvugcVk<E>,
-    public_inputs: &[E::ScalarField],
-) -> Result<PairingOutput<E>> {
-    use ark_ec::CurveGroup;
-
-    let ic_bases = &vk.gamma_abc_g1;
-    let expected_inputs = ic_bases.len().saturating_sub(1);
-    if public_inputs.len() != expected_inputs {
-        return Err(Error::PublicInputLength {
-            expected: expected_inputs,
-            actual: public_inputs.len(),
-        });
-    }
-
-    // Compute L(x)
-    let mut l = ic_bases[0].into_group();
-    for (gamma, x_i) in ic_bases.iter().skip(1).zip(public_inputs.iter()) {
-        let g: <E as Pairing>::G1 = gamma.into_group();
-        l += g * x_i;
-    }
-
-    if l.is_zero() {
-        return Err(Error::ZeroInstanceCommitment);
-    }
-
-    // R_raw = e(α, β) + e(L, γ) - using PRECOMPUTED alpha_g1_beta_g2
-    let alpha_beta = pvugc_vk.alpha_g1_beta_g2;
-    let l_gamma = E::pairing(l, vk.gamma_g2);
-    let r_raw = alpha_beta + l_gamma;
-
-    // Compute T_const(x)
-    if pvugc_vk.t_const_points_gt.len() != public_inputs.len() + 1 {
-        return Err(Error::MismatchedSizes);
-    }
-
-    let mut t_acc = pvugc_vk.t_const_points_gt[0];
-    for (i, x_i) in public_inputs.iter().enumerate() {
-        let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
-        t_acc = PairingOutput(t_acc.0 * term);
-    }
+    // 3. Subtract T_const (which is e(Q, delta))
     Ok(r_raw + t_acc)
 }
 
