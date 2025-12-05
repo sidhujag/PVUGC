@@ -20,8 +20,6 @@ use winter_math::fields::f64::BaseElement as GL; // Goldilocks field
 use winter_math::FieldElement;
 use winterfell::Proof;
 
-extern crate alloc; // For BTreeMap and Vec
-
 fn enforce_expected_queries(actual: usize, expected: usize) {
     assert_eq!(
         actual, expected,
