@@ -182,7 +182,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
         // 1. Allocate public input as simple scalar (span-separated)
         // 2. BooleanInputVar as WITNESS (for verifier's scalar mult)
         // 3. Constrain: x_pub = reconstructed_from_bits(input_var)
-        //    This links them cryptographically, not just by prover honesty!
+        //    This links them cryptographically
         
         let one_lc = LinearCombination::from((OuterScalar::<C>::one(), Variable::One));
         
