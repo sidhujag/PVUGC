@@ -18,10 +18,10 @@ pub struct PvugcVk<E: Pairing> {
     /// Hints must align 1:1 with `b_g2_query`.
     pub witness_zero_hints: std::sync::Arc<Vec<bool>>,
     /// Baked Quotient Points (T_const in GT)
-    /// These allow the decapper to compute the constant quotient term H_const(x)
-    /// and subtract it from the target, ensuring security against H-based attacks.
-    /// t_const_points_gt[0] is e(q_const[0], delta).
-    /// t_const_points_gt[1..] correspond to public inputs.
+    /// These allow computing the baked target that includes the quotient term H_pub(x).
+    /// The lean prover omits H from C, so extraction naturally gains e(H_pub, δ).
+    /// We precompute T_i = e(H_i(τ), δ) so the target can include T_const(x) = Π T_i^{x_i}.
+    /// t_const_points_gt[0] is the constant term, [1..] correspond to public inputs.
     pub t_const_points_gt: std::sync::Arc<Vec<PairingOutput<E>>>,
 }
 
@@ -203,15 +203,13 @@ pub fn compute_groth16_target<E: Pairing>(
     Ok(r)
 }
 
-/// Compute baked target R_baked(vk, x) = R_raw - T_const
-/// where T_const = e(Q(x), delta)
+/// Compute baked target R_baked(vk, x) = R_raw + T_const
+/// where T_const = e(H_pub(x), delta) compensates for missing quotient in lean proof
 pub fn compute_baked_target<E: Pairing>(
     vk: &Groth16VK<E>,
     pvugc_vk: &PvugcVk<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
-    use ark_ec::CurveGroup;
-
     // 1. Compute raw target
     let r_raw = compute_groth16_target(vk, public_inputs)?;
 
@@ -226,7 +224,8 @@ pub fn compute_baked_target<E: Pairing>(
         t_acc = PairingOutput(t_acc.0 * term);
     }
 
-    // 3. Subtract T_const (which is e(Q, delta))
+    // 3. ADD T_const to compensate for missing H·δ in lean proof
+    // (Lean prover omits quotient, so extraction gains e(H_pub, δ))
     Ok(r_raw + t_acc)
 }
 

@@ -47,7 +47,9 @@ The adversary can construct new handles via:
 2.  **Pairing:** Given $h_1 \in \mathbb{G}_1, h_2 \in \mathbb{G}_2$, compute $e(h_1, h_2)$. Label: $L(h_1) \cdot L(h_2)$.
 
 **Goal:** Construct a handle with label equal to the Target Label:
-$$ L_{Target} = \rho \cdot \left(\alpha \beta + \sum_{i=0}^{\ell} x_i u_i(\tau)\right) - T_{const} $$
+$$ L_{Target} = \rho \cdot \left(\alpha \beta + \sum_{i=0}^{\ell} x_i u_i(\tau) + T_{const}\right) $$
+
+where $T_{const} = e(H_{pub}(x,\tau), \delta)$ is the baked quotient term. The `+` sign arises because the Lean prover omits the quotient polynomial $H_{pub}$ from C, so honest extraction naturally includes the $e(H_{pub}, \delta)$ term that would otherwise cancel.
 
 *Why no $\gamma$ term?* The IC bases in the Lean CRS are $u_i(\tau)/\gamma$. Honest decapsulation pairs $\sum x_i \cdot IC_i$ with the unarmed $[\gamma]_2$, so the $\gamma$ cancels before arming with $\rho$. Adversaries still never obtain an armed $[\gamma]_2^\rho$, but the monomial enforced in the protocol is $\rho \cdot \sum x_i u_i(\tau)$.
 
