@@ -5,6 +5,7 @@ use ark_ec::pairing::Pairing;
 use ark_ff::{One, Zero};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
+use ark_snark::SNARK;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_relations::r1cs::{
@@ -49,11 +50,12 @@ fn test_constant_one_is_public() {
     // Generate CRS
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     let y_bases = extract_y_bases(&pvugc_vk);
 
@@ -126,11 +128,12 @@ fn test_gamma_g2_rejection() {
 
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     let y_bases = extract_y_bases(&pvugc_vk);
 

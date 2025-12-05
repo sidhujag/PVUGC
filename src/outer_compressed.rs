@@ -9,12 +9,10 @@
 //! for experimentation.  Switching cycles lets downstream callers trade security for
 //! faster recursion-friendly parameter generation.
 
-use crate::api::enforce_public_inputs_are_outputs;
 use crate::ppe::PvugcVk;
 use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
 use ark_ec::pairing::{Pairing, PairingOutput};
-use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{BigInteger, PrimeField, Field};
+use ark_ff::{BigInteger, Field, PrimeField};
 use ark_groth16::constraints::{Groth16VerifierGadget, ProofVar, VerifyingKeyVar};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::boolean::Boolean;
@@ -159,7 +157,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             &self.vk_inner,
         )?;
         use ark_relations::r1cs::{LinearCombination, Variable};
-        use ark_ff::{Field, One};
+        use ark_ff::One;
 
         // SECURE SPAN-SEPARATED PUBLIC INPUT BINDING
         //
@@ -599,7 +597,7 @@ mod tests {
     /// This verifies the binding constraint correctly links public inputs to verifier bits.
     #[test]
     fn test_bit_encoding_matches_convert() {
-        use ark_ff::{BigInteger, PrimeField, Field, One, Zero};
+        use ark_ff::{BigInteger, PrimeField, One, Zero};
         
         // Test with several values
         let test_values = [0u64, 1, 42, 12345, u64::MAX / 2];

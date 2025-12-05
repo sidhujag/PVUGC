@@ -8,12 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ark_ec::pairing::Pairing;
-use ark_ec::AffineRepr;
 use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use ark_std::rand::rngs::StdRng;
-use ark_std::rand::SeedableRng; // Import AffineRepr for .zero()
+use ark_std::rand::SeedableRng;
 
 use crate::outer_compressed::{
     self,
@@ -75,7 +74,6 @@ fn build_fixture_for_cycle<C: RecursionCycle>() -> GlobalFixture<C> {
     // With GT-Baking, we need PairingOutput elements instead of G1.
     // Since this is a dummy fixture for AddCircuit (which doesn't use baking), we can use identity in GT.
     use ark_ec::pairing::PairingOutput;
-    use ark_ff::Field;
     
     let t_points_dummy =
         vec![PairingOutput(<<C::OuterE as Pairing>::TargetField as ark_ff::Field>::ONE); pk_outer.vk.gamma_abc_g1.len()];

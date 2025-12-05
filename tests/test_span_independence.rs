@@ -7,7 +7,9 @@ use ark_ec::AffineRepr;
 use ark_ff::{PrimeField, UniformRand, Zero};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-use ark_std::{ops::Mul, test_rng, vec::Vec};
+use ark_snark::SNARK;
+use ark_std::{ops::Mul, vec::Vec};
+use ark_std::rand::{rngs::StdRng, SeedableRng};
 
 /// Simple test circuit for span testing
 #[derive(Clone)]
@@ -59,7 +61,7 @@ fn is_in_span<E: Pairing>(target: E::G2Affine, basis: &[E::G2Affine]) -> bool {
     const MAX_COEFF: i32 = 100;
     const SAMPLES: usize = 1000;
 
-    let mut rng = test_rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
     // Random sampling approach: try random small coefficients
     for _ in 0..SAMPLES {
@@ -156,7 +158,7 @@ fn is_in_span<E: Pairing>(target: E::G2Affine, basis: &[E::G2Affine]) -> bool {
 
 #[test]
 fn test_no_cross_circuit_span_attack() {
-    let mut rng = test_rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
     // Generate two different circuits with same trusted setup randomness
     // This tests if combining bases from different circuits could yield γ₂
@@ -197,7 +199,7 @@ fn test_no_cross_circuit_span_attack() {
 
 #[test]
 fn test_armed_basis_linear_independence() {
-    let mut rng = test_rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
     let circuit = TestCircuit::<Fr> {
         a: Some(Fr::rand(&mut rng)),

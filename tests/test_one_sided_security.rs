@@ -1,6 +1,7 @@
 //! Security Tests for One-Sided GS PVUGC
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
+use ark_groth16::r1cs_to_qap::PvugcReduction;
 use ark_ec::{pairing::Pairing, pairing::PairingOutput, AffineRepr, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
@@ -58,13 +59,12 @@ fn test_cannot_compute_k_from_arms_alone() {
 
     // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    // Dummy Q points for non-baked tests
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
+    // Empty GT points for tests that don't need baked quotient
     let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
     let cols = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &vault_utxo).unwrap();
     let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
@@ -196,12 +196,11 @@ fn test_verify_rejects_mismatched_statement() {
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
 
     // Canonical Γ required by verifier
@@ -241,12 +240,11 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
     };
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
     let statement_x = vec![Fr::from(25u64)];
     // Arming bases
@@ -390,12 +388,11 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
     };
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
 
     let vault_utxo = vec![Fr::from(25u64)];
@@ -467,12 +464,11 @@ fn test_r_independence_from_rho() {
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
 
     // Two fresh exponents ρ1 != 0 and ρ2 != 0
@@ -540,12 +536,11 @@ fn test_rejects_gamma2_in_statement_bases() {
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
 
     let public_x = vec![Fr::from(25u64)];
@@ -601,12 +596,11 @@ fn test_size_caps_enforced_in_verify() {
     };
     let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let q_dummy = vec![G1Affine::zero(); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        q_dummy,
+        vec![],
     );
     let public_x = vec![Fr::from(25u64)];
 

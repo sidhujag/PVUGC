@@ -44,9 +44,7 @@ use arkworks_groth16::{
     test_circuits::AddCircuit,
     test_fixtures::get_fixture,
 };
-use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Fr = OuterFr;
 
@@ -490,7 +488,8 @@ fn run_audit(subject: &dyn AuditSubject) {
     // 2. Independence Check (Lean CRS: no explicit H·δ² quotient direction)
     let target = build_target(&pub_polys, &instance);
 
-    let num_checks = 1;
+    // Use multiple random evaluation points for robustness of the independence check.
+    let num_checks = 4;
     let all_safe = run_independence_checks(
         "",
         &extractor,

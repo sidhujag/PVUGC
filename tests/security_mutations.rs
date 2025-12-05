@@ -104,11 +104,12 @@ fn build_fixture(seed: u64) -> Fixture {
     let (pk, vk) = Groth16::<PairingE>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let public_inputs = vec![Fr::from(25u64)];
 
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
 
     let rho = Fr::rand(&mut rng);
     let (bases, column_arms, _r, honest_key) =

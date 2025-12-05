@@ -6,7 +6,6 @@ use ark_crypto_primitives::sponge::{
     poseidon::{constraints::PoseidonSpongeVar, PoseidonSponge as PoseidonSpongeNative},
     CryptographicSponge,
 };
-use ark_ec::AffineRepr;
 use ark_groth16::r1cs_to_qap::LibsnarkReduction;
 use ark_groth16::{Groth16, ProvingKey as Groth16ProvingKey, VerifyingKey as Groth16VerifyingKey};
 use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar, uint8::UInt8};
@@ -238,7 +237,7 @@ fn arm(passphrase: &str, ctx: &str, path: PathBuf) {
     // Use pairing::Pairing trait to access G1Affine type
     use ark_ec::pairing::Pairing;
     use ark_ec::pairing::PairingOutput;
-    use ark_ff::{Field, One};
+    use ark_ff::Field;
     let q_dummy = vec![PairingOutput(<<E as Pairing>::TargetField as Field>::ONE); vk.gamma_abc_g1.len()];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
