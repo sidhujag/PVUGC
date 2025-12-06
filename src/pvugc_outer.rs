@@ -20,7 +20,6 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -84,7 +83,7 @@ where
     // Sanitize cycle name for filename and derive a hash of the verifying key (circuit)
     // so caches from different circuits never collide. The hash is based only on the
     // circuit structure (VK), not on sample statements.
-    let safe_name = C::name().replace('/', "_").replace(' ', "_")
+    let safe_name = C::name().replace('/', "_").replace(' ', "_");
     let cache_path = format!("outer_lean_setup_pk_vk_{}_{}.bin", safe_name);
 
     let cache_file = std::path::Path::new(&cache_path);
