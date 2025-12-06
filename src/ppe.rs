@@ -30,7 +30,6 @@ impl<E: Pairing> PvugcVk<E> {
         b_g2_query: Vec<E::G2Affine>,
         t_const_points_gt: Vec<PairingOutput<E>>,
     ) -> Self {
-        let hints = vec![true; b_g2_query.len()];
         Self {
             beta_g2,
             delta_g2,
