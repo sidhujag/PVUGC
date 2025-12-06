@@ -60,9 +60,9 @@ R(vk, x) = e([α]_1, [β]_2) · e(L(x), [γ]_2)
 ```
 where L(x) = Σᵢ xᵢ·ICᵢ is the public-input linear combination.
 
-**Key observation:** The armed bases {D_pub, D_j, D_δ} are derived from {[β]_2, b_g2_query (witness columns), [δ]_2}. Critically, **[γ]_2 is never armed**.
+**Key observation:** The armed bases {[β]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} are derived from {[β]_2, b_g2_query (witness columns), [δ]_2}. Critically, **[γ]_2 is never armed**.
 
-**Independence claim:** Since [γ]_2 ∉ span{armed bases}, the component e(L(x), [γ]_2) in R(vk,x) cannot be computed from the armed transcript alone. The adversary can compute e([α]_1, D_pub) and other pairings with armed bases, but these never produce terms involving [γ]_2^ρ.
+**Independence claim:** Since [γ]_2 ∉ span{armed bases}, the component e(L(x), [γ]_2) in R(vk,x) cannot be computed from the armed transcript alone. The adversary can pair [α]_1 with armed bases, but these never produce terms involving [γ]_2^ρ.
 
 **For the reduction:** We treat R(vk, x) as a fixed statement-derived GT element. The reduction embeds the DDH challenge element Y = g2^v into [γ]_2, allowing the simulator to detect whether the adversary computed R(vk, x)^ρ. This works because R(vk, x) contains a factor e(L(x), [γ]_2) that depends on [γ]_2, which the adversary cannot access in armed form.
 
@@ -117,7 +117,7 @@ from the verifying key and public input. The protocol enforces five guardrails:
 4. Each arming uses a fresh exponent ρ.
 5. Never arm any G₁ element (arming U^ρ would reveal e(U, [γ]_2)^ρ via public pairings).
 
-Under these conditions, **R(vk, x) contains a factor e(L(x), [γ]_2) that cannot be computed from the armed transcript** since [γ]_2^ρ is never published (Lemma 2). We define the **correlated GT-XPDH game** as: armed bases {D_pub, D_j, D_δ} are derived from (vk, x) under the guardrails, the challenger samples ρ, and sets R = R(vk, x). An adversary wins if it outputs R^ρ.
+Under these conditions, **R(vk, x) contains a factor e(L(x), [γ]_2) that cannot be computed from the armed transcript** since [γ]_2^ρ is never published (Lemma 2). We define the **correlated GT-XPDH game** as: armed bases {[β]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} are derived from (vk, x) under the guardrails, the challenger samples ρ, and sets R = R(vk, x). An adversary wins if it outputs R^ρ.
 
 ### Theorem 1′ (Tight DDH reduction for the correlated game)
 
@@ -141,9 +141,9 @@ In the algebraic generic bilinear group model, let A issue at most q oracle quer
 
 Adv_GT-XPDH(A) ≤ ~O(q^2 / r).
 
-Sketch. Assign formal indeterminates a, i_x to the G₁ sources and y_β, y_γ, y_δ, {y_j} to the G₂ sources. Every GT handle maintained by A is labeled with an explicit polynomial E_H in these variables. Pairing with a masked right leg Y^ρ ∈ {D_pub, D_j (j>ℓ), D_δ} contributes a monomial of the form ρ·L(U)·y_* (degree ≤ 3), where L(U) is the linear form describing the left leg U ∈ G₁ and y_* ∈ {y_pub, y_j (j>ℓ), y_δ}. Operations inside G_T add such polynomials and scale them by known integers, so the ρ-bearing part of any reachable E_H lies in
+Sketch. Assign formal indeterminates a, i_x to the G₁ sources and y_β, y_γ, y_δ, {y_j} to the G₂ sources. Every GT handle maintained by A is labeled with an explicit polynomial E_H in these variables. Pairing with a masked right leg Y^ρ ∈ {[β]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} contributes a monomial of the form ρ·L(U)·y_* (degree ≤ 3), where L(U) is the linear form describing the left leg U ∈ G₁ and y_* ∈ {y_β, y_j (j>ℓ), y_δ}. Operations inside G_T add such polynomials and scale them by known integers, so the ρ-bearing part of any reachable E_H lies in
 
-    ρ · span{ y_pub, y_j (j>ℓ), y_δ }
+    ρ · span{ y_β, y_j (j>ℓ), y_δ }
 
 and never includes a ρ·y_γ term. The target exponent is E_* = ρ·r_* = ρ·(a·y_β + i_x·y_γ), whose ρ·y_γ coefficient equals i_x ≠ 0 for valid statements. Therefore E_H = E_* can hold only via an accidental algebraic equality among the ≤ q produced handles. The standard algebraic/generic-group collision analysis (Schwartz–Zippel style) bounds this probability by ~O(q^2 / r). ∎
 
@@ -166,15 +166,11 @@ Consequently the PVUGC key Ki = Hash(ser_GT(Mi) ∥ …) remains hidden and the 
 
 ## Self-decapper resistance
 
-**Security dependency.** Under public-(B) aggregation, $[\gamma]_2$ exclusion, and public-output coverage, let
-$$
-T := \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j)\right) \cdot e(X^{(B)}_\delta, [\delta]_2)
-$$
-be the publicly evaluable B-leg aggregation. Any tuple that makes GS-PPE hold without a valid Groth16 proof must solve
-$$
-e(C, [\delta]_2) = R(\mathsf{vk}, x) \cdot T^{-1},
-$$
-i.e., discrete logarithm in $\mathbb{G}_T$. Therefore a "self-decapper" would have to solve discrete logarithms across the pairing (e.g., recover $z = \log_{g_T}(R \cdot T^{-1})$ and either $\log_{g_2}([\delta]_2)$ or $\log_{g_1}(C)$). The PPE constraint ensures that honest proofs satisfy the verification equation.
+**Security dependency.** With public inputs in C-matrix only ($v_{pub} = 0$), $[\gamma]_2$ is excluded from armed bases. The PPE constraint ensures that honest proofs satisfy the verification equation.
+
+**Key observation:** Statement binding is through $R(\mathsf{vk}, x)$ which includes $e(L(x), [\gamma]_2)$ where $L(x) = \sum x_i \cdot IC_i$ and $IC_i = w_i/\gamma$. Since $[\gamma]_2$ is never armed, the adversary cannot compute $R^\rho$ without producing a valid Groth16 proof.
+
+This reduces to **DDH in $\mathbb{G}_2$**: the reduction embeds the DDH challenge element into $[\gamma]_2$, allowing detection of whether the adversary computed $R(\mathsf{vk}, x)^\rho$.
 
 ---
 

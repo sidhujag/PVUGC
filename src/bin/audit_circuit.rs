@@ -434,7 +434,7 @@ fn run_audit(subject: &dyn AuditSubject) {
     // This is the "gold standard" check for quotient reachability
     println!("\n=== Span Membership Test (Quotient Reachability) ===");
     
-    let span_test_passed = verify_q_const_span_membership(&extractor, num_pub, num_wit);
+    let span_test_passed = verify_public_only_in_c_and_w_span_separated(&extractor, num_pub, num_wit);
     if span_test_passed {
         println!("[PASS] DECISIVE: Q_const ∉ span(H_{{ij}})");
         println!("       → Adversary CANNOT synthesize T_const^ρ from e(H_ij, δ^ρ)");
@@ -625,96 +625,125 @@ fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool 
     true
 }
 
-/// Decisive span membership test: verify Q_const ∉ span(H_{ij})
-/// 
-/// This is the "gold standard" check GPT requested:
-/// 1. Verify u_pub = 0 for all public columns (public not in A-matrix)
-/// 2. Verify v_pub = 0 for all public columns (public not in B-matrix)  
-/// 3. Verify W-span separation: W_pub ⊥ W_wit
+
+/// Decisive *structural* guardrail for the new architecture (pub only in C):
+/// 1) u_pub = 0  (public columns absent from A)
+/// 2) v_pub = 0  (public columns absent from B)
+/// 3) W-span separation: rows(C_pub) ∩ rows(C_wit) = ∅
 ///
-/// If all three hold, then by algebraic construction:
-/// - H_{ij} ∈ span(L_wit) where L_wit are witness-only Lagrange directions
-/// - Q_const ∈ span(L_pub) where L_pub are public-input Lagrange directions
-/// - These are orthogonal, so Q_const ∉ span(H_{ij})
-fn verify_q_const_span_membership(
+/// NOTE: "num_pub" MUST include the ONE wire at index 0.
+pub fn verify_public_only_in_c_and_w_span_separated(
     extractor: &MatrixExtractor,
     num_pub: usize,
     num_wit: usize,
 ) -> bool {
     let num_vars = num_pub + num_wit;
-    
-    // Check 1: u_pub = 0 for all public columns 1..num_pub (index 0 is ONE)
+
+    // Sanity: extractor dimensions match.
+    if extractor.a_cols.len() < num_vars
+        || extractor.b_cols.len() < num_vars
+        || extractor.c_cols.len() < num_vars
+    {
+        println!(
+            "  [Span] FAIL: extractor columns too small: a={}, b={}, c={}, need {}",
+            extractor.a_cols.len(),
+            extractor.b_cols.len(),
+            extractor.c_cols.len(),
+            num_vars
+        );
+        return false;
+    }
+
+    // Check 1: u_pub = 0 for public columns 1..num_pub-1 (exclude ONE at 0).
     let mut u_pub_nonzero = false;
     for col in 1..num_pub {
-        let a_entries = to_sparse_row_vec(&extractor.a_cols[col]);
-        if !a_entries.is_empty() {
-            println!("  [Span] FAIL: u_pub ≠ 0 - Public column {} has {} A-matrix entries", col, a_entries.len());
+        if extractor.a_cols[col].iter().any(|&(_, v)| !v.is_zero()) {
+            println!(
+                "  [Span] FAIL: u_pub ≠ 0 - public column {} appears in A ({} entries)",
+                col,
+                extractor.a_cols[col].len()
+            );
             u_pub_nonzero = true;
         }
     }
-    
     if !u_pub_nonzero {
-        println!("  [Span] PASS: u_pub = 0 - No public columns (1..{}) in A-matrix", num_pub);
+        println!(
+            "  [Span] PASS: u_pub = 0 - no public columns (1..{}) in A",
+            num_pub.saturating_sub(1)
+        );
     }
-    
-    // Check 2: v_pub = 0 for all public columns 1..num_pub
+
+    // Check 2: v_pub = 0 for public columns 1..num_pub-1.
     let mut v_pub_nonzero = false;
     for col in 1..num_pub {
-        let b_entries = to_sparse_row_vec(&extractor.b_cols[col]);
-        if !b_entries.is_empty() {
-            println!("  [Span] FAIL: v_pub ≠ 0 - Public column {} has {} B-matrix entries", col, b_entries.len());
+        if extractor.b_cols[col].iter().any(|&(_, v)| !v.is_zero()) {
+            println!(
+                "  [Span] FAIL: v_pub ≠ 0 - public column {} appears in B ({} entries)",
+                col,
+                extractor.b_cols[col].len()
+            );
             v_pub_nonzero = true;
         }
     }
-    
     if !v_pub_nonzero {
-        println!("  [Span] PASS: v_pub = 0 - No public columns (1..{}) in B-matrix", num_pub);
+        println!(
+            "  [Span] PASS: v_pub = 0 - no public columns (1..{}) in B",
+            num_pub.saturating_sub(1)
+        );
     }
-    
-    // Check 3: W-span separation (W_pub ⊥ W_wit)
-    // Build row sets for public and witness C-matrix entries
+
+    // Check 3: W-span separation by disjoint row support in C.
     let mut w_pub_rows: HashSet<usize> = HashSet::new();
     let mut w_wit_rows: HashSet<usize> = HashSet::new();
-    
+
+    // Public columns in C: 1..num_pub-1 (exclude ONE at 0)
     for col in 1..num_pub {
-        let c_entries = to_sparse_row_vec(&extractor.c_cols[col]);
-        for &row in c_entries.keys() {
-            w_pub_rows.insert(row);
+        for &(row, val) in &extractor.c_cols[col] {
+            if !val.is_zero() {
+                w_pub_rows.insert(row);
+            }
         }
     }
-    
+
+    // Witness columns in C: num_pub..num_vars-1
     for col in num_pub..num_vars {
-        let c_entries = to_sparse_row_vec(&extractor.c_cols[col]);
-        for &row in c_entries.keys() {
-            w_wit_rows.insert(row);
+        for &(row, val) in &extractor.c_cols[col] {
+            if !val.is_zero() {
+                w_wit_rows.insert(row);
+            }
         }
     }
-    
-    let shared_rows: Vec<_> = w_pub_rows.intersection(&w_wit_rows).copied().collect();
-    let w_span_separated = shared_rows.is_empty();
-    
-    if w_span_separated {
-        println!("  [Span] PASS: W-span separation - W_pub and W_wit have disjoint row support");
-        println!("         W_pub rows: {}, W_wit rows: {}", w_pub_rows.len(), w_wit_rows.len());
+
+    let mut shared = Vec::new();
+    for r in w_pub_rows.intersection(&w_wit_rows) {
+        shared.push(*r);
+        if shared.len() >= 16 {
+            break;
+        }
+    }
+
+    let w_sep = shared.is_empty();
+    if w_sep {
+        println!("  [Span] PASS: W-span separation - disjoint C row support");
+        println!(
+            "         W_pub rows: {}, W_wit rows: {}",
+            w_pub_rows.len(),
+            w_wit_rows.len()
+        );
     } else {
-        println!("  [Span] WARN: W-span may overlap - {} shared rows", shared_rows.len());
-        if shared_rows.len() <= 10 {
-            println!("         Shared rows: {:?}", shared_rows);
-        } else {
-            println!("         First 10 shared rows: {:?}", &shared_rows[..10]);
-        }
+        println!(
+            "  [Span] FAIL: W-span overlap - {} shared rows (showing up to 16): {:?}",
+            w_pub_rows.len().min(w_wit_rows.len()),
+            shared
+        );
     }
-    
-    // Final verdict
-    let passed = !u_pub_nonzero && !v_pub_nonzero && w_span_separated;
-    
+
+    let passed = !u_pub_nonzero && !v_pub_nonzero && w_sep;
     if passed {
         println!("\n  --- Span Membership Verdict ---");
-        println!("  PROOF: u_pub=0, v_pub=0 → H_{{ij}} only encodes (U_wit * V_wit) / Z");
-        println!("         Q_const encodes W_pub / Z, and W_pub ⊥ W_wit by separation.");
-        println!("         Therefore: Q_const ∉ span(H_{{ij}})");
+        println!("  u_pub=0, v_pub=0 and W_pub ⊥ W_wit (row support) confirmed.");
+        println!("  This is the required structural precondition for the baked-quotient model.");
     }
-    
     passed
 }
 

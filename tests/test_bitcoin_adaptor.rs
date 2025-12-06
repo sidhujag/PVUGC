@@ -492,7 +492,7 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         y: Some(witness),
     };
 
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
     use ark_ff::Field;
     let t_dummy = vec![
@@ -1304,7 +1304,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         x: Some(public_input),
         y: Some(witness),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
     use ark_ff::Field;
     let t_dummy = vec![
@@ -1472,7 +1472,7 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
         x: Some(public_input),
         y: Some(witness),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
     use ark_ff::Field;
     let t_dummy = vec![

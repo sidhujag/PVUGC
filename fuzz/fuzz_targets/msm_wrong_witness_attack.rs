@@ -88,15 +88,22 @@ fuzz_target!(|data: &[u8]| {
     };
     
     // Generate CRS
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(correct_circuit.clone(), &mut rng)
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(correct_circuit.clone(), &mut rng)
         .expect("Setup failed");
     
     // Build PVUGC structures
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as ark_ec::pairing::Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
     
     // Get column bases
     let (y_bases, delta, _) = build_one_sided_ppe::<E>(&pvugc_vk, &vk, &[x])

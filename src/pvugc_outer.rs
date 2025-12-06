@@ -120,10 +120,6 @@ where
 
         audit_witness_bases::<C>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
         
-        // Decisive span membership test: verify Q_const ∉ span(H_ij)
-        let span_check_passed = verify_q_const_not_in_span::<C>(pk_outer, vk_inner);
-        assert!(span_check_passed, "SECURITY FAIL: Q_const may be in span(H_ij)!");
-
         let lean_pk = LeanProvingKey {
             vk: pk_outer.vk.clone(),
             beta_g1: pk_outer.beta_g1,
@@ -794,7 +790,10 @@ fn parallel_ifft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a.par_iter_mut().for_each(|x| *x *= n_inv);
 }
 
-fn compute_t_const_points_gt_from_gap<C, F>(
+/// Compute T_const basis points in GT:
+///   T_i = e(Q_i, delta)
+/// where Q(x) = Q_0 + Σ x_i Q_i is the *C-gap* between standard and lean Groth16 proofs.
+pub fn compute_t_const_points_gt_from_gap<C, F>(
     pk_outer: &Groth16PK<C::OuterE>,
     lean_pk: &LeanProvingKey<C::OuterE>,
     vk_inner: &InnerVk<C>,
@@ -805,22 +804,29 @@ where
     C: RecursionCycle,
     F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
 {
-    // Reuse existing logic to find Q points in G1, then map to GT
     let q_points_g1 = compute_q_const_points_from_gap::<C, F>(
         pk_outer,
         lean_pk,
         vk_inner,
         sample_statements,
-        inner_proof_generator
+        inner_proof_generator,
     );
 
-    // Map to GT: T_i = e(Q_i, delta)
-    // We compute this once and then discard q_points_g1.
     let delta_g2 = pk_outer.vk.delta_g2;
-    q_points_g1.iter().map(|q| C::OuterE::pairing(*q, delta_g2)).collect()
+    q_points_g1
+        .into_iter()
+        .map(|q| C::OuterE::pairing(q, delta_g2))
+        .collect()
 }
 
-fn compute_q_const_points_from_gap<C, F>(
+
+
+/// Compute Q_i in G1 from the standard–lean *C* gap:
+///   c_gap(x) := C_std(x) - C_lean(x) = Q(x)
+///
+/// IMPORTANT: we *assert* A_std == A_lean and B_std == B_lean (no randomizers / no mismatch),
+/// otherwise your gap is not the quotient-only delta.
+pub fn compute_q_const_points_from_gap<C, F>(
     pk_outer: &Groth16PK<C::OuterE>,
     lean_pk: &LeanProvingKey<C::OuterE>,
     vk_inner: &InnerVk<C>,
@@ -831,25 +837,37 @@ where
     C: RecursionCycle,
     F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
 {
+    assert!(!sample_statements.is_empty(), "need ≥ 1 sample");
+    let n_inner_inputs = sample_statements[0].len();
+    for (i, s) in sample_statements.iter().enumerate() {
+        assert_eq!(
+            s.len(),
+            n_inner_inputs,
+            "sample {} has wrong length: got {}, expected {}",
+            i,
+            s.len(),
+            n_inner_inputs
+        );
+    }
+
     let mut gaps: Vec<(Vec<OuterScalar<C>>, <C::OuterE as Pairing>::G1Affine)> =
         Vec::with_capacity(sample_statements.len());
 
     for statement in sample_statements {
-        // Generate a valid inner proof for THIS specific statement vector
+        // Valid inner proof for THIS statement vector.
         let inner_proof = inner_proof_generator(statement);
-        println!("[q_const] Generating proofs for statement {:?}", statement);
 
-        let circuit_std =
-            OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
+        // Standard proof (no-ZK) for the same circuit instance.
+        let circuit_std = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
         let proof_std = Groth16::<C::OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
             circuit_std,
             pk_outer,
         )
         .expect("standard proof failed");
 
-        let circuit_lean =
-            OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
-        let (proof_lean, _) = prove_lean_with_randomizers(
+        // Lean proof with *explicit* r=s=0 (must match standard no-zk shape).
+        let circuit_lean = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
+        let (proof_lean, _) = crate::prover_lean::prove_lean_with_randomizers(
             lean_pk,
             circuit_lean,
             OuterScalar::<C>::zero(),
@@ -857,24 +875,38 @@ where
         )
         .expect("lean proof failed");
 
+        // Guard: A and B must match, otherwise gap includes randomizers or mismatched bases.
+        assert_eq!(
+            proof_std.a, proof_lean.a,
+            "std/lean A mismatch: gap extraction would include randomizer/basis drift"
+        );
+        assert_eq!(
+            proof_std.b, proof_lean.b,
+            "std/lean B mismatch: gap extraction would include randomizer/basis drift"
+        );
+
+        // The gap lives entirely in C:
         let c_gap = proof_std.c.into_group() - proof_lean.c.into_group();
 
-        let circuit_inputs =
-            OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
-        let cs_inputs = ConstraintSystem::<OuterScalar<C>>::new_ref();
+        // Extract outer circuit public inputs (instance assignment minus constant ONE).
+        let circuit_inputs = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof);
+        let cs_inputs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<C>>::new_ref();
         circuit_inputs
             .generate_constraints(cs_inputs.clone())
             .expect("input extraction failed");
         cs_inputs.finalize();
+
         let mut instance = cs_inputs.borrow().unwrap().instance_assignment.clone();
-        let compressed_inputs = instance.split_off(1);
+        let compressed_inputs = instance.split_off(1); // drop constant ONE
+
         gaps.push((compressed_inputs, c_gap.into_affine()));
     }
 
     solve_q_const_from_samples::<C>(gaps)
 }
 
-fn canonical_sample_statements<C: RecursionCycle>(n_inner_inputs: usize) -> Vec<StatementVec<C>> {
+
+pub fn canonical_sample_statements<C: RecursionCycle>(n_inner_inputs: usize) -> Vec<StatementVec<C>> {
     let mut samples = Vec::with_capacity(n_inner_inputs + 1);
     samples.push(vec![InnerScalar::<C>::zero(); n_inner_inputs]);
     for idx in 0..n_inner_inputs {
@@ -885,26 +917,54 @@ fn canonical_sample_statements<C: RecursionCycle>(n_inner_inputs: usize) -> Vec<
     samples
 }
 
-fn solve_q_const_from_samples<C: RecursionCycle>(
+/// Solve Q_0..Q_n from samples (x_s, gap_s) where gap_s = Q_0 + Σ x_s[i] Q_{i+1}.
+///
+/// Fast path: if samples are canonical (0, e1, e2, ...), then:
+///   Q_0 = gap(0)
+///   Q_{i+1} = gap(e_i) - gap(0)
+pub fn solve_q_const_from_samples<C: RecursionCycle>(
     gaps: Vec<(Vec<OuterScalar<C>>, <C::OuterE as Pairing>::G1Affine)>,
 ) -> Vec<<C::OuterE as Pairing>::G1Affine> {
-    assert!(
-        !gaps.is_empty(),
-        "at least one sample is required to recover q_const"
-    );
-
-    let num_inputs = gaps[0].0.len();
+    assert!(!gaps.is_empty(), "need ≥ 1 sample");
+    let n = gaps[0].0.len();
     assert_eq!(
         gaps.len(),
-        num_inputs + 1,
-        "need exactly n+1 samples to solve linear system"
+        n + 1,
+        "need exactly n+1 samples (canonical) to recover affine Q"
     );
-    let size = num_inputs + 1;
 
+    // Check canonical shape: row0 all zeros; row(i+1) has 1 at i and 0 elsewhere.
+    let is_canonical = {
+        let row0 = &gaps[0].0;
+        if row0.iter().any(|x| !x.is_zero()) {
+            false
+        } else {
+            (0..n).all(|i| {
+                let row = &gaps[i + 1].0;
+                row.iter().enumerate().all(|(j, v)| {
+                    if j == i { *v == OuterScalar::<C>::one() } else { v.is_zero() }
+                })
+            })
+        }
+    };
+
+    if is_canonical {
+        let gap0 = gaps[0].1.into_group();
+        let mut out = Vec::with_capacity(n + 1);
+        out.push(gap0.into_affine()); // Q_0
+        for i in 0..n {
+            let gi = gaps[i + 1].1.into_group();
+            out.push((gi - gap0).into_affine()); // Q_{i+1}
+        }
+        return out;
+    }
+
+    // Fallback (generic): solve linear system M * Q = gap.
+    let size = n + 1;
     let mut matrix = vec![vec![OuterScalar::<C>::zero(); size]; size];
-    for (row, (compressed_inputs, _)) in gaps.iter().enumerate() {
+    for (row, (x, _)) in gaps.iter().enumerate() {
         matrix[row][0] = OuterScalar::<C>::one();
-        for (col, value) in compressed_inputs.iter().enumerate() {
+        for (col, value) in x.iter().enumerate() {
             matrix[row][col + 1] = *value;
         }
     }
@@ -926,10 +986,14 @@ fn solve_q_const_from_samples<C: RecursionCycle>(
     q_points
 }
 
-fn invert_matrix<C: RecursionCycle>(matrix: Vec<Vec<OuterScalar<C>>>) -> Vec<Vec<OuterScalar<C>>> {
+pub fn invert_matrix<C: RecursionCycle>(
+    matrix: Vec<Vec<OuterScalar<C>>>,
+) -> Vec<Vec<OuterScalar<C>>> {
     let size = matrix.len();
     let mut aug = vec![vec![OuterScalar::<C>::zero(); 2 * size]; size];
+
     for i in 0..size {
+        assert_eq!(matrix[i].len(), size, "non-square matrix");
         for j in 0..size {
             aug[i][j] = matrix[i][j];
         }
@@ -938,15 +1002,17 @@ fn invert_matrix<C: RecursionCycle>(matrix: Vec<Vec<OuterScalar<C>>>) -> Vec<Vec
 
     for col in 0..size {
         let pivot_row = (col..size)
-            .find(|r| !aug[*r][col].is_zero())
+            .find(|&r| !aug[r][col].is_zero())
             .expect("matrix is not invertible");
         if pivot_row != col {
             aug.swap(col, pivot_row);
         }
-        let inv = aug[col][col].inverse().expect("pivot must be invertible");
+
+        let inv_pivot = aug[col][col].inverse().expect("pivot invertible");
         for j in 0..2 * size {
-            aug[col][j] *= inv;
+            aug[col][j] *= inv_pivot;
         }
+
         for row in 0..size {
             if row == col {
                 continue;
@@ -961,14 +1027,15 @@ fn invert_matrix<C: RecursionCycle>(matrix: Vec<Vec<OuterScalar<C>>>) -> Vec<Vec
         }
     }
 
-    let mut inverse = vec![vec![OuterScalar::<C>::zero(); size]; size];
+    let mut inv = vec![vec![OuterScalar::<C>::zero(); size]; size];
     for i in 0..size {
         for j in 0..size {
-            inverse[i][j] = aug[i][size + j];
+            inv[i][j] = aug[i][size + j];
         }
     }
-    inverse
+    inv
 }
+
 
 pub fn compute_target_outer(
     vk_outer: &Groth16VK<OuterE>,

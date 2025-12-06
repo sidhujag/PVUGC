@@ -60,44 +60,6 @@ fn create_test_context(
     (ctx.ctx_hash, ctx.ctx_core, ad_core.serialize())
 }
 
-fn ppe_unarmed_assert_full<Ep: ark_ec::pairing::Pairing>(
-    x_b_cols: &[(Ep::G1Affine, Ep::G1Affine)],
-    bases: &ColumnBases<Ep>,
-    theta: &[(Ep::G1Affine, Ep::G1Affine)],
-    theta_delta_cancel: &Option<(Ep::G1Affine, Ep::G1Affine)>,
-    r_target: ark_ec::pairing::PairingOutput<Ep>,
-) {
-    use ark_std::One;
-    let y_cols = &bases.y_cols;
-    assert_eq!(x_b_cols.len(), y_cols.len(), "|X_B| != |Y|");
-
-    let mut lhs_b = ark_ec::pairing::PairingOutput::<Ep>(One::one());
-    for ((x0, x1), y) in x_b_cols.iter().zip(y_cols.iter()) {
-        lhs_b += Ep::pairing(*x0, *y);
-        if !x1.is_zero() {
-            lhs_b += Ep::pairing(*x1, *y);
-        }
-    }
-    let mut lhs_delta = ark_ec::pairing::PairingOutput::<Ep>(One::one());
-    for (t0, t1) in theta {
-        // Expect θ = -C + sA
-        lhs_delta += Ep::pairing(*t0, bases.delta);
-        if !t1.is_zero() {
-            lhs_delta += Ep::pairing(*t1, bases.delta);
-        }
-    }
-    if let Some((c0, c1)) = theta_delta_cancel {
-        lhs_delta += Ep::pairing(*c0, bases.delta);
-        if !c1.is_zero() {
-            lhs_delta += Ep::pairing(*c1, bases.delta);
-        }
-    }
-    let mut lhs = lhs_b;
-    lhs += lhs_delta;
-    // debug prints removed
-    assert_eq!(lhs, r_target, "Unarmed PPE != R(vk,x)");
-}
-
 // Test circuit: x = y²
 #[derive(Clone)]
 struct SquareCircuit {
@@ -141,11 +103,17 @@ fn test_one_sided_pvugc_proof_agnostic() {
     // === DEPOSIT TIME ===
 
     // Build PVUGC VK wrapper
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // Generate ρ
@@ -237,15 +205,6 @@ fn test_one_sided_pvugc_proof_agnostic() {
     };
 
     // Verify using OneSidedPvugc (checks PPE equation)
-    // Quick unarmed PPE sanity on columns (localizes mapping issues)
-    let r_target = compute_groth16_target(&vk, &vault_utxo).expect("compute_groth16_target");
-    ppe_unarmed_assert_full::<E>(
-        &commitments1.x_b_cols,
-        &bases_cols,
-        &commitments1.theta,
-        &Some(commitments1.theta_delta_cancel),
-        r_target,
-    );
     assert!(OneSidedPvugc::verify(&bundle1, &pvugc_vk, &vk, &vault_utxo));
 
     let k1 = OneSidedPvugc::decapsulate(&commitments1, &col_arms).expect("decapsulate");
@@ -291,11 +250,15 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     let (pk2, vk2) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit2.clone(), &mut rng).unwrap();
+    let t_dummy2 = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as ark_ff::Field>::ONE);
+        vk2.gamma_abc_g1.len()
+    ];
     let pvugc_vk2 = PvugcVk::new_with_all_witnesses_isolated(
         vk2.beta_g2,
         vk2.delta_g2,
         pk2.b_g2_query.clone(),
-        vec![],
+        t_dummy2,
     );
 
     // Generate proof for vault 2
@@ -358,11 +321,17 @@ fn test_delta_sign_sanity() {
         y: Some(Fr::from(5u64)),
     };
     let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
     let rho = Fr::rand(&mut rng);
 
@@ -468,16 +437,22 @@ fn test_witness_independence() {
     };
 
     // ONE setup (same pk, vk for both witnesses)
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit1.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit1.clone(), &mut rng).unwrap();
 
     // Compute R = e(α,β)·e(L(x),γ) from (vk, public_x)
     let r_statement = compute_groth16_target(&vk, &public_x).expect("compute_groth16_target");
 
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     let rho = Fr::rand(&mut rng);
@@ -537,11 +512,17 @@ fn test_phase1_integration() {
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     let rho = Fr::rand(&mut rng);

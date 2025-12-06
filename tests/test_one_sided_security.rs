@@ -168,11 +168,17 @@ fn test_verify_rejects_mismatched_statement() {
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // Canonical Γ required by verifier
@@ -355,11 +361,17 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
     };
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     let vault_utxo = vec![Fr::from(25u64)];
@@ -424,11 +436,17 @@ fn test_r_independence_from_rho() {
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // Two fresh exponents ρ1 != 0 and ρ2 != 0
@@ -489,11 +507,17 @@ fn test_rejects_gamma2_in_statement_bases() {
     let (pk, vk) =
         Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     let public_x = vec![Fr::from(25u64)];
@@ -544,11 +568,17 @@ fn test_size_caps_enforced_in_verify() {
     };
     let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
     let public_x = vec![Fr::from(25u64)];
 

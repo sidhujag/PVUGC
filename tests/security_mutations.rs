@@ -98,7 +98,7 @@ fn build_fixture(seed: u64) -> Fixture {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<PairingE>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<PairingE, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let public_inputs = vec![Fr::from(25u64)];
 
     // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1

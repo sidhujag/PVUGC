@@ -156,6 +156,9 @@ pub fn decap<E: Pairing>(
 /// It synthesizes the circuit, samples randomizers r/s, creates the proof,
 /// and builds commitments using the known assignment.
 ///
+/// IMPORTANT: Uses PvugcReduction for the R1CS-to-QAP mapping. The proving key
+/// must have been created with PvugcReduction as well.
+///
 /// Returns: (Proof, OneSidedCommitments, full_assignment, s)
 pub fn prove_and_build_commitments<E, C, R>(
     pk: &ark_groth16::ProvingKey<E>,
@@ -176,6 +179,7 @@ where
     R: ark_std::rand::Rng,
 {
     use ark_ff::UniformRand;
+    use ark_groth16::r1cs_to_qap::PvugcReduction;
     use ark_relations::r1cs::{ConstraintSystem, OptimizationGoal};
 
     // Sample randomizers
@@ -197,8 +201,8 @@ where
     .concat();
     let num_inputs = prover.instance_assignment.len();
 
-    // Create proof with known r, s
-    let proof = ark_groth16::Groth16::<E>::create_proof_with_reduction_and_matrices(
+    // Create proof with known r, s using PvugcReduction
+    let proof = ark_groth16::Groth16::<E, PvugcReduction>::create_proof_with_reduction_and_matrices(
         pk,
         r,
         s,

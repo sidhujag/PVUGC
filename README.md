@@ -17,14 +17,14 @@ PVUGC satisfies the following cryptographic properties:
 - **Witness-Independence:** Extracted keys depend only on the statement (vk, public_inputs), not on witness values
 - **Gating:** Key extraction is impossible without a valid proof
 - **Permissionless Extraction:** No committee, threshold cryptography, or additional coordination required at extraction time
-- **Statement-Only Setup:** Armed bases depend only on public verification keys and a single secret scalar ρ
+- **Statement-Independent Arming:** Armed bases depend only on VK (not on public inputs); statement dependence isolated to target R(vk, x)
 - **Offline Arming:** One-time setup phase; armer goes offline permanently
 
 ## 3. Technical Approach
 
 ### 3.1 One-Sided Groth-Sahai Framework
 
-The protocol employs a specialized Groth-Sahai construction optimized for Groth16 verification. Unlike traditional two-sided approaches requiring rank decomposition of coefficient matrices, the one-sided variant leverages the fact that Groth16 verifying key components (β, δ, and b_g2_query) can serve as statement-only pairing bases.
+The protocol employs a specialized Groth-Sahai construction optimized for Groth16 verification. Unlike traditional two-sided approaches requiring rank decomposition of coefficient matrices, the one-sided variant leverages the fact that Groth16 verifying key components (β, δ, and witness b_g2_query) can serve as statement-independent pairing bases. Statement dependence is isolated to the target R(vk, x), which contains the γ-factor that is never armed.
 
 The verification equation becomes:
 
@@ -37,8 +37,8 @@ where C_ℓ are commitments to proof elements, U_ℓ are aggregations of VK base
 ### 3.2 Three-Phase Execution
 
 **Phase 1: Offline Arming (Deposit)**
-- ARMER generates secret ρ, derives statement-only bases from Groth16 VK
-- Computes armed bases: U_ℓ^ρ, δ^ρ
+- ARMER generates secret ρ, derives statement-independent bases from Groth16 VK
+- Computes armed bases: [β + b_0]^ρ, [v_j]^ρ, δ^ρ
 - Publishes armed bases; ρ never leaves ARMER
 
 **Phase 2: Online Proving (Spend)**
@@ -55,12 +55,12 @@ where C_ℓ are commitments to proof elements, U_ℓ are aggregations of VK base
 
 | Property | One-Sided | Two-Sided |
 |----------|-----------|-----------|
-| **Setup** | VK-derived, statement-only | CRS-based, per-statement |
+| **Setup** | VK-derived, statement-independent | CRS-based, per-statement |
 | **Coefficient Matrix** | Thin aggregation | Full rank decomposition |
 | **Bases Required** | O(n) | O(rank²) |
 | **Proof Elements** | Single (θ) | Multiple (θ, π per rank) |
 | **Integration** | Native to Groth16 | Via auxiliary recomposition |
-| **Randomness Cancellation** | Possible | Not Possible |
+| **Statement Dependence** | Isolated to target R(vk, x) | Spread across armed bases |
 
 ## 4. Mathematical Foundation
 

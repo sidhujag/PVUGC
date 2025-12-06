@@ -6,7 +6,7 @@ use ark_crypto_primitives::sponge::{
     poseidon::{constraints::PoseidonSpongeVar, PoseidonSponge as PoseidonSpongeNative},
     CryptographicSponge,
 };
-use ark_groth16::r1cs_to_qap::LibsnarkReduction;
+use ark_groth16::r1cs_to_qap::PvugcReduction;
 use ark_groth16::{Groth16, ProvingKey as Groth16ProvingKey, VerifyingKey as Groth16VerifyingKey};
 use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, fields::fp::FpVar, uint8::UInt8};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
@@ -227,7 +227,7 @@ fn arm(passphrase: &str, ctx: &str, path: PathBuf) {
     };
     let mut os_rng = OsRng;
     let (pk, vk) =
-        Groth16::<E, LibsnarkReduction>::circuit_specific_setup(circuit, &mut os_rng).unwrap();
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut os_rng).unwrap();
     // Use pairing::Pairing trait to access G1Affine type
     use ark_ec::pairing::Pairing;
     use ark_ec::pairing::PairingOutput;
@@ -313,7 +313,7 @@ fn decap(passphrase: &str, ctx: &str, path: PathBuf) {
     let mut rng = OsRng;
     let (proof, commitments, _assignment, _s) = 
         arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
-    let ok = Groth16::<E, LibsnarkReduction>::verify(&vk, &[h_pkg], &proof).unwrap();
+    let ok = Groth16::<E, PvugcReduction>::verify(&vk, &[h_pkg], &proof).unwrap();
     if !ok {
         eprintln!("DECAP: Groth16 preimage proof verification failed");
         std::process::exit(1);

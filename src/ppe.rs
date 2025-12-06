@@ -119,6 +119,7 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
 /// Validate subgroup membership for Groth16 VK elements
 /// - G1: alpha_g1 and all gamma_abc_g1 entries must be in the prime-order subgroup
 /// - G2: beta_g2, gamma_g2, delta_g2 must be in the prime-order subgroup
+/// - Critical elements (alpha_g1, beta_g2, gamma_g2, delta_g2) must not be identity
 pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
     let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
 
@@ -136,16 +137,17 @@ pub fn validate_groth16_vk_subgroups<E: Pairing>(vk: &Groth16VK<E>) -> bool {
         g.mul_bigint(order).is_zero()
     };
 
-    if !is_good_g1(&vk.alpha_g1) {
+    // Critical VK elements must not be identity (zero)
+    if vk.alpha_g1.is_zero() || !is_good_g1(&vk.alpha_g1) {
         return false;
     }
-    if !is_good_g2(&vk.beta_g2) {
+    if vk.beta_g2.is_zero() || !is_good_g2(&vk.beta_g2) {
         return false;
     }
-    if !is_good_g2(&vk.gamma_g2) {
+    if vk.gamma_g2.is_zero() || !is_good_g2(&vk.gamma_g2) {
         return false;
     }
-    if !is_good_g2(&vk.delta_g2) {
+    if vk.delta_g2.is_zero() || !is_good_g2(&vk.delta_g2) {
         return false;
     }
     if vk.gamma_abc_g1.iter().any(|g| !is_good_g1(g)) {
@@ -203,19 +205,23 @@ pub fn compute_groth16_target<E: Pairing>(
     Ok(r)
 }
 
-/// Compute baked target R_baked(vk, x) = R_raw + T_const
-/// where T_const = e(H_pub(x), delta) compensates for missing quotient in lean proof
+/// Compute baked target:
+///   R_baked(vk, x) = R_raw(vk, x) * T_const(x)
+///
+/// T_const(x) is the GT-baked compensation for the quotient term missing in the lean proof:
+///   T_const(x) = e(Q(x), delta)
 pub fn compute_baked_target<E: Pairing>(
     vk: &Groth16VK<E>,
     pvugc_vk: &PvugcVk<E>,
     public_inputs: &[E::ScalarField],
 ) -> Result<PairingOutput<E>> {
-    // 1. Compute raw target
+    // 1) Raw Groth16 target in GT: R_raw = e(alpha, beta) * e(IC(x), gamma)
     let r_raw = compute_groth16_target(vk, public_inputs)?;
 
-    // 2. Compute baked quotient term T_const(x) in GT
+    // 2) Reconstruct T_const(x) from baked GT points:
+    //    T_const(x) = T_0 * Π_i T_{i+1}^{x_i}
     if pvugc_vk.t_const_points_gt.len() != public_inputs.len() + 1 {
-        return Err(Error::MismatchedSizes); // Should define a better error
+        return Err(Error::MismatchedSizes);
     }
 
     let mut t_acc = pvugc_vk.t_const_points_gt[0];
@@ -224,8 +230,8 @@ pub fn compute_baked_target<E: Pairing>(
         t_acc = PairingOutput(t_acc.0 * term);
     }
 
-    // 3. ADD T_const to compensate for missing H·δ in lean proof
-    // (Lean prover omits quotient, so extraction gains e(H_pub, δ))
+    // 3) Bake it into the target:
+    // PairingOutput uses additive notation, so "+" here means GT multiplication.
     Ok(r_raw + t_acc)
 }
 
