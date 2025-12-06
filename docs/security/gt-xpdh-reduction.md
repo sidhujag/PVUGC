@@ -62,7 +62,7 @@ where L(x) = Σᵢ xᵢ·ICᵢ is the public-input linear combination.
 
 **Key observation:** The armed bases {[β]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} are derived from {[β]_2, b_g2_query (witness columns), [δ]_2}. Critically, **[γ]_2 is never armed**.
 
-**Independence claim:** Since [γ]_2 ∉ span{armed bases}, the component e(L(x), [γ]_2) in R(vk,x) cannot be computed from the armed transcript alone. The adversary can pair [α]_1 with armed bases, but these never produce terms involving [γ]_2^ρ.
+**Independence claim:** Since [γ]_2 ∉ span{armed bases}, the **ρ-armed** component e(L(x), [γ]_2)^ρ (and hence R(vk,x)^ρ) cannot be computed from the armed transcript alone. The adversary can pair [α]_1 with armed bases, but these never produce terms involving [γ]_2^ρ.
 
 **For the reduction:** We treat R(vk, x) as a fixed statement-derived GT element. The reduction embeds the DDH challenge element Y = g2^v into [γ]_2, allowing the simulator to detect whether the adversary computed R(vk, x)^ρ. This works because R(vk, x) contains a factor e(L(x), [γ]_2) that depends on [γ]_2, which the adversary cannot access in armed form.
 
@@ -116,6 +116,8 @@ from the verifying key and public input. The protocol enforces five guardrails:
 3. CRS hygiene holds: `[γ]_2 ∉ span{[β]_2, b_g2_query, [δ]_2}`.
 4. Each arming uses a fresh exponent ρ.
 5. Never arm any G₁ element (arming U^ρ would reveal e(U, [γ]_2)^ρ via public pairings).
+
+These guardrails are the reduction-level restatement of the Lean-CRS / baked-quotient architecture in `algebraic_framework.md`: public inputs bound in the C-matrix only (u_pub = v_pub = 0, w_pub ≠ 0), W-span separation between public and witness C-rows, and the explicit exclusion of any armed [γ]_2 handle.
 
 Under these conditions, **R(vk, x) contains a factor e(L(x), [γ]_2) that cannot be computed from the armed transcript** since [γ]_2^ρ is never published (Lemma 2). We define the **correlated GT-XPDH game** as: armed bases {[β]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} are derived from (vk, x) under the guardrails, the challenger samples ρ, and sets R = R(vk, x). An adversary wins if it outputs R^ρ.
 

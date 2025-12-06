@@ -662,13 +662,15 @@ fn audit_witness_bases<C: RecursionCycle>(
             j
         );
         
-        // 2. Check that public inputs (columns 1..num_public) do NOT appear in A-side (index i).
-        // In h_query_wit(i, j), 'i' corresponds to A-side and 'j' to B-side (or vice versa depending on impl,
-        // but typically index i is A-side var, index j is B-side var in the product a_i * b_j).
-        // Our 1*x=x constraint puts '1' (index 0) in A, and 'x' (index k) in B.
-        // So pairs are (0, k). 'i' is 0. 'j' is k.
-        // We must forbid 'i' being a public input index (1..num_public).
-        // If 'i' is a public input, it means a public input is in A!
+        // 2. Check that public inputs (columns 1..num_public) do NOT appear in A-side (index i),
+        //    matching the "public in C only" architecture used in the security docs.
+        // In h_query_wit(i, j), 'i' corresponds to the A-matrix variable and 'j' to the B-matrix
+        // variable in the product a_i * b_j. Our secure outer circuit binds public inputs via
+        //   1 * reconstructed(bits) = x_pub
+        // which places x_pub only in the C-matrix. The 1-wire (index 0) lives in A, but the
+        // actual public columns (1..num_public) must be A-free.
+        // We therefore forbid 'i' being a public input index (1..num_public); if it is, a public
+        // input appeared in A, violating u_pub = 0.
         if i_idx > 0 && i_idx < num_public {
              panic!(
                 "[SECURITY AUDIT FAIL] Public input column {} found in Matrix A (via pair {}, {}). \

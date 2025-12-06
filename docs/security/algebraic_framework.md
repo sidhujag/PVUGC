@@ -38,6 +38,7 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
         *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha,\beta,\delta^{-1}$)
         *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
         *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
+        *   $[\alpha]_1$: $\alpha$ (Groth16 trapdoor; public VK element)
     *   $\mathbb{G}_2$ — verification key elements
         *   $[\beta]_2, [\gamma]_2, [\delta]_2$
         *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
@@ -67,7 +68,11 @@ $$ L(K_{core}) = \rho \cdot (\alpha\beta + W_{pub}) $$
 where $W_{pub}$ is the public-input contribution to the C-polynomial (since $U_{pub} = V_{pub} = 0$). The Lean CRS bakes the public quotient correction into $\mathbb{G}_T$, so the effective baked target becomes:
 $$ L_{Target} = \rho \cdot \left(\alpha\beta + W_{pub} + Q_{const}\delta\right) $$
 
-where $Q_{const}(x)$ is the affine correction computed from the gap between standard and lean proofs.
+where $Q_{const}(x)$ is the affine correction computed from the gap between standard and lean proofs. Concretely, under the Groth16 equation
+\[
+e(A, B) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot e(H(x,w), [\delta]_2)
+\]
+and the decomposition $H(x,w) = Q_{const}(x) + H_{wit}(w)$, arming the $B$- and $[\delta]_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{Target}$ as written above.
 
 **Why [α]₁ can be public:** Even though the adversary has $[\alpha]_1$, they cannot extract $K_{core}$ because:
 - With $v_{pub} = 0$, pairing $[\alpha]_1$ with armed B-handles yields no statement-dependent pollution
@@ -109,6 +114,8 @@ We track the degrees of the independent indeterminates $\rho$ (arming secret) an
 | VK constants $[\beta]_2, [\gamma]_2, [\delta]_2$ | $\mathbb{G}_2$ | 0 | $\le 1$ | unarmed |
 | Armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j]_2^\rho$ | $\mathbb{G}_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
 
+Recall from the **Explicit Exclusions (Lean CRS)** above that there are no armed $\mathbb{G}_2$ handles involving $\gamma$ (no $[\gamma]_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
+
 When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
 
 1. If $H_2$ is armed ($Deg_\rho = 1$), then $Deg_\gamma(E) = Deg_\gamma(H_1) \le 0$ because no $\mathbb{G}_1$ handle has positive $\gamma$ degree.
@@ -139,7 +146,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 - Result: W-span separation is the sole active defense; U/V-span are trivially satisfied
 
 ### 2.4 The Baked Quotient Invariant (Blocks Quotient Forging)
-**Claim:** The adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
+**Claim:** Under the audit-enforced span-membership condition $Q_{const} \notin \text{span}(H_{ij})$, the adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
 
 *   **What the Adversary CAN Do:**
     *   The adversary **can** compute $T_{const}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $\mathbb{G}_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
@@ -148,7 +155,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
     *   They have **no $\mathbb{G}_1$ handle** for $Q_{const}(x,\tau)$: the quotient correction bases are missing from the $\mathbb{G}_1$ span (Lean CRS explicitly excludes them).
     *   They have **no way to apply $\rho$ inside $\mathbb{G}_T$**: the only source of $\rho$ is in the armed $\mathbb{G}_2$ handles, and pairing is $\mathbb{G}_1 \times \mathbb{G}_2 \to \mathbb{G}_T$. There is no operation that takes a $\mathbb{G}_T$ element and multiplies it by $\rho$.
 
-*   **Conclusion:** The adversary cannot synthesize $[Q_{const}(x,\tau)]_1$ in $\mathbb{G}_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
+*   **Conclusion:** Given the missing $\mathbb{G}_1$ bases for $Q_{const}$ and the fact that $Q_{const} \notin \text{span}(H_{ij})$ is enforced by audit, the adversary cannot synthesize $[Q_{const}(x,\tau)]_1$ in $\mathbb{G}_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
 
 ## 3. Completeness for Honest Prover
 
@@ -307,11 +314,11 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 | **W-Span Separation** | $W_{pub} \perp W_{wit}$ | Residue synthesis attack |
 | **Lean CRS (Baked Quotient)** | Quotient in $\mathbb{G}_T$ only; no PoT | Quotient forgery in $\mathbb{G}_1$ |
 | **Linear Circuit Design** | Public inputs appear linearly | Non-linear quotient terms |
-| **Span Membership** | $Q_{const} \notin \text{span}(H_{ij})$ | Baked quotient synthesis |
+| **Span Membership** | Audit-enforced condition $Q_{const} \notin \text{span}(H_{ij})$ | Baked quotient synthesis |
 
 **Note:** U-span and V-span separation are trivially satisfied ($u_{pub} = v_{pub} = 0$) and need not be explicitly verified.
 
-**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $\text{rows}(C_{pub}) \cap \text{rows}(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const} \notin \text{span}(H_{ij})$. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
+**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $\text{rows}(C_{pub}) \cap \text{rows}(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const} \notin \text{span}(H_{ij})$, and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
 
 ### 6.2 Security Properties Achieved
 
