@@ -84,7 +84,7 @@ where
     // so caches from different circuits never collide. The hash is based only on the
     // circuit structure (VK), not on sample statements.
     let safe_name = C::name().replace('/', "_").replace(' ', "_");
-    let cache_path = format!("outer_lean_setup_pk_vk_{}_{}.bin", safe_name);
+    let cache_path = format!("outer_lean_setup_pk_vk_{}.bin", safe_name);
 
     let cache_file = std::path::Path::new(&cache_path);
     let (lean_pk, t_const_gt) = if cache_file.exists() {
