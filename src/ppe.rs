@@ -14,9 +14,6 @@ pub struct PvugcVk<E: Pairing> {
     pub delta_g2: E::G2Affine,
     /// Arc-wrapped to avoid expensive clones (BW6-761 has dozens of large G2 points)
     pub b_g2_query: std::sync::Arc<Vec<E::G2Affine>>,
-    /// Per-column hints indicating whether the column is allowed to be armed.
-    /// Hints must align 1:1 with `b_g2_query`.
-    pub witness_zero_hints: std::sync::Arc<Vec<bool>>,
     /// Baked Quotient Points (T_const in GT)
     /// These allow computing the baked target that includes the quotient term H_pub(x).
     /// The lean prover omits H from C, so extraction naturally gains e(H_pub, δ).
@@ -38,38 +35,8 @@ impl<E: Pairing> PvugcVk<E> {
             beta_g2,
             delta_g2,
             b_g2_query: std::sync::Arc::new(b_g2_query),
-            witness_zero_hints: std::sync::Arc::new(hints),
             t_const_points_gt: std::sync::Arc::new(t_const_points_gt),
         }
-    }
-
-    /// Ensure witness isolation hints cover all columns and mark the witness tail as safe.
-    pub fn enforce_isolated_witness_block(
-        &self,
-        total_instance: usize,
-    ) -> crate::error::Result<()> {
-        if self.witness_zero_hints.len() != self.b_g2_query.len() {
-            return Err(crate::error::Error::InvalidWitnessIsolationHints);
-        }
-        if self
-            .witness_zero_hints
-            .iter()
-            .skip(total_instance)
-            .any(|hint| !*hint)
-        {
-            return Err(crate::error::Error::UnsafeWitnessColumns);
-        }
-        Ok(())
-    }
-    /// Placeholder hook for the Gröbner-audit predicate. Once the symbolic
-    /// remainder is known, evaluate it on `public_inputs` and error if it
-    /// vanishes. Currently a no-op so the arming flow already enforces the
-    /// guard location.
-    pub fn enforce_public_residual_safe(
-        &self,
-        _public_inputs: &[E::ScalarField],
-    ) -> crate::error::Result<()> {
-        Ok(())
     }
 }
 

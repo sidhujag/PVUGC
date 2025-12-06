@@ -2,12 +2,8 @@
 
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::{One, PrimeField};
+use ark_ff::One;
 use ark_groth16::{Proof as Groth16Proof, VerifyingKey as Groth16VK};
-use ark_relations::{
-    lc,
-    r1cs::{ConstraintSystemRef, LinearCombination, SynthesisError, Variable},
-};
 
 use crate::adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
 use crate::arming::{arm_columns, ColumnArms, ColumnBases};
@@ -66,8 +62,6 @@ fn split_statement_only_bases<E: Pairing>(
     if pvugc_vk.b_g2_query.len() < required_bases {
         return Err(Error::MismatchedSizes);
     }
-    pvugc_vk.enforce_isolated_witness_block(total_instance)?;
-    pvugc_vk.enforce_public_residual_safe(public_inputs)?;
 
     let mut aggregate = pvugc_vk.beta_g2.into_group();
     aggregate += pvugc_vk.b_g2_query[0].into_group();
@@ -570,29 +564,3 @@ impl OneSidedPvugc {
     }
 }
 
-/// Ensure that every public input (including the implicit 1-wire)
-/// participates in at least one C-column entry.
-pub fn enforce_public_inputs_are_outputs<F: PrimeField>(
-    cs: ConstraintSystemRef<F>,
-) -> Result<(), SynthesisError> {
-    if cs.is_none() {
-        return Ok(());
-    }
-
-    let one_lc: LinearCombination<F> = lc!() + (F::one(), Variable::One);
-    cs.enforce_constraint(one_lc.clone(), one_lc.clone(), one_lc.clone())?;
-
-    let num_instance = cs.num_instance_variables();
-    if num_instance <= 1 {
-        return Ok(());
-    }
-
-    for idx in 1..num_instance {
-        let var = Variable::Instance(idx);
-        let lc_var: LinearCombination<F> = lc!() + var;
-        // Enforce 1 * x = x to put x in B and C, but NOT in A
-        cs.enforce_constraint(one_lc.clone(), lc_var.clone(), lc_var)?;
-    }
-
-    Ok(())
-}

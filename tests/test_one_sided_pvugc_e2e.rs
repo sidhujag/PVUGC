@@ -10,7 +10,6 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;
@@ -79,7 +78,6 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
 
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -414,7 +412,6 @@ fn test_witness_independence() {
             })?;
             let sum = &y_var + &z_var;
             x_var.enforce_equal(&sum)?;
-            enforce_public_inputs_are_outputs(cs)?;
             Ok(())
         }
     }

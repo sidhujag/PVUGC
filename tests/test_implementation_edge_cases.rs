@@ -8,10 +8,7 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_snark::SNARK;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, SynthesisError,
-};
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use arkworks_groth16::ppe::{compute_groth16_target, extract_y_bases, PvugcVk};
 
 #[derive(Clone)]
@@ -32,7 +29,6 @@ impl ConstraintSynthesizer<Fr> for TestCircuit {
         let y_squared = &y * &y;
         x.enforce_equal(&y_squared)?;
 
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -101,19 +97,6 @@ fn test_degenerate_target_rejected() {
 
     assert!(!r.0.is_zero());
     assert!(!r.0.is_one());
-}
-
-#[test]
-fn test_enforce_public_outputs_prevents_floating_one() {
-    let cs = ConstraintSystem::<Fr>::new_ref();
-    cs.set_optimization_goal(ark_relations::r1cs::OptimizationGoal::Constraints);
-
-    let _x1 = cs.new_input_variable(|| Ok(Fr::from(10u64))).unwrap();
-    let _x2 = cs.new_input_variable(|| Ok(Fr::from(20u64))).unwrap();
-
-    enforce_public_inputs_are_outputs(cs.clone()).unwrap();
-
-    assert!(cs.num_constraints() >= 3);
 }
 
 #[test]

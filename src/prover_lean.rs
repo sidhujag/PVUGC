@@ -22,8 +22,6 @@ pub struct LeanProvingKey<E: Pairing> {
     pub vk: ark_groth16::VerifyingKey<E>,
     pub beta_g1: E::G1Affine,
     pub delta_g1: E::G1Affine,
-    /// `enforce_public_input` ensures statement binding (through B and C) and copy constraints are removed from `r1cs_to_qap.rs`,
-    /// so this carries no clean public input handles.
     pub a_query_wit: Vec<E::G1Affine>,
     pub b_g1_query: Vec<E::G1Affine>,
     pub b_g2_query: Vec<E::G2Affine>,

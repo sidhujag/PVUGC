@@ -11,7 +11,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_snark::SNARK;
 use ark_std::Zero;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
-use arkworks_groth16::api::{enforce_public_inputs_are_outputs, VerifyLimits};
+use arkworks_groth16::api::VerifyLimits;
 use arkworks_groth16::api::{
     DEFAULT_MAX_B_COLUMNS, DEFAULT_MAX_THETA_ROWS, DEFAULT_MAX_TOTAL_PAIRINGS,
 };
@@ -37,7 +37,6 @@ impl ConstraintSynthesizer<Fr> for TestCircuit {
         })?;
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

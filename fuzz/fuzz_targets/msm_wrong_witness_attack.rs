@@ -18,7 +18,6 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_snark::SNARK;
 use ark_std::{vec::Vec, rand::{SeedableRng, Rng}};
 
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, compute_groth16_target};
 
 /// Test circuit: x (public) = y² (witness)
@@ -40,7 +39,6 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
         let y_squared = &y * &y;
         x.enforce_equal(&y_squared)?;
         
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

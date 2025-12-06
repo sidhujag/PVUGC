@@ -16,7 +16,6 @@ use ark_std::{
 use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
-    api::enforce_public_inputs_are_outputs,
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
     decap::prove_and_build_commitments,
@@ -43,7 +42,6 @@ impl ConstraintSynthesizer<Fr> for SquareCircuit {
             self.y.ok_or(SynthesisError::AssignmentMissing)
         })?;
         x_var.enforce_equal(&(y_var.clone() * y_var))?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

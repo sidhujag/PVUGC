@@ -19,7 +19,6 @@ use k256::{Scalar, U256};
 use rand_core::OsRng;
 use sha2::{Digest, Sha256}; // Added for .zero()
 
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::poseidon_fr381_t3::{
     absorb_bytes_native_fr, absorb_bytes_var_fr, POSEIDON381_PARAMS_T3_V1,
 };
@@ -197,7 +196,6 @@ impl ConstraintSynthesizer<Fr> for PreimageCircuit {
         let hash_computed = sponge.squeeze_field_elements(1)?[0].clone();
 
         hash_var.enforce_equal(&hash_computed)?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
