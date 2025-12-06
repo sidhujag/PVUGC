@@ -295,7 +295,6 @@ For the derived key $K = R^\rho$ to be **statement-dependent** (binding the armi
     where $L(x) = \sum x_i \cdot IC_i$ and $IC_i = (\beta u_i + \alpha v_i + w_i)/\gamma = w_i/\gamma$ (since $u_i = v_i = 0$).
 *   **Key**: $K(x) = R(vk, x)^\rho$. Different statements yield different $L(x)$, hence different $R$, hence different $K$.
 *   **Security Benefit**: Eliminates the $\alpha \cdot V_{pub}$ pollution term; V-span becomes trivially satisfied.
-*   **Exclusion**: Public inputs MUST NOT appear in the A-matrix (verified by `bin/audit_circuit.rs`).
 
 ## 6. Conclusion
 

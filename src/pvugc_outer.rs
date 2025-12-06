@@ -9,7 +9,7 @@ use crate::outer_compressed::{
     OuterE, OuterFr, OuterScalar, RecursionCycle,
 };
 use crate::ppe::PvugcVk;
-use crate::prover_lean::{prove_lean_with_randomizers, LeanProvingKey};
+use crate::prover_lean::LeanProvingKey;
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, PrimeField, Zero};

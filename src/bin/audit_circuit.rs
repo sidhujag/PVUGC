@@ -632,7 +632,7 @@ fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool 
 /// 3) W-span separation: rows(C_pub) ∩ rows(C_wit) = ∅
 ///
 /// NOTE: "num_pub" MUST include the ONE wire at index 0.
-pub fn verify_public_only_in_c_and_w_span_separated(
+fn verify_public_only_in_c_and_w_span_separated(
     extractor: &MatrixExtractor,
     num_pub: usize,
     num_wit: usize,

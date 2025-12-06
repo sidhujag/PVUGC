@@ -1,7 +1,7 @@
 //! End-to-End Test for One-Sided GS PVUGC
 
 use ark_bls12_381::{Bls12_381, Fr};
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
+use ark_ec::{pairing::Pairing, CurveGroup, PrimeGroup};
 use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
@@ -11,7 +11,6 @@ use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
-use arkworks_groth16::arming::ColumnBases;
 use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;

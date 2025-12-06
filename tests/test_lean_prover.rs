@@ -3,18 +3,15 @@
 //! Verifies that the "Lean Prover" (using sparse H-bases) produces valid Groth16 proofs
 //! that are accepted by the standard Verifier.
 
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
-use ark_ff::{Field, One, PrimeField};
+use ark_ec::pairing::Pairing;
 use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use ark_snark::SNARK;
-use ark_std::rand::Rng;
 use ark_std::{rand::SeedableRng, UniformRand, Zero};
 use arkworks_groth16::outer_compressed::{
     DefaultCycle, InnerE, InnerScalar, OuterCircuit, OuterScalar,
 };
-use arkworks_groth16::ppe::{compute_baked_target, PvugcVk};
-use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers, LeanProvingKey};
+use arkworks_groth16::ppe::compute_baked_target;
+use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers};
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
 use arkworks_groth16::test_circuits::AddCircuit;
 use arkworks_groth16::test_fixtures::get_fixture;
