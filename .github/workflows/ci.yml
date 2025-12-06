@@ -68,6 +68,5 @@ jobs:
           cargo +nightly fuzz run cross_circuit_k_difference -- -runs=-1 -max_total_time=60 || true
           cargo +nightly fuzz run gt_span_small_coeff -- -runs=-1 -max_total_time=60 || true
           cargo +nightly fuzz run gs_malleation_binding -- -runs=-1 -max_total_time=60 || true
-          cargo +nightly fuzz run gs_linear_recomb_dlrep -- -runs=-1 -max_total_time=60 || true
           cargo +nightly fuzz run gs_random_recomb_budget -- -runs=-1 -max_total_time=60 || true
 

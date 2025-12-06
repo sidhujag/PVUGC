@@ -15,9 +15,9 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use ark_std::rand::SeedableRng;
 
-use arkworks_groth16::api::{enforce_public_inputs_are_outputs, OneSidedPvugc};
+use arkworks_groth16::api::OneSidedPvugc;
 use arkworks_groth16::ppe::{PvugcVk, compute_groth16_target};
-use arkworks_groth16::decap::OneSidedCommitments;
+use arkworks_groth16::decap::{OneSidedCommitments, prove_and_build_commitments};
 
 // Simple y^2 = x circuit: public x, witness y
 #[derive(Clone)]
@@ -30,7 +30,6 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
         let y = ark_r1cs_std::fields::fp::FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         let y2 = &y * &y;
         x.enforce_equal(&y2)?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -38,7 +37,7 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
 static SETUP: Lazy<Mutex<(ProvingKey<E>, VerifyingKey<E>)>> = Lazy::new(|| {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
     let circuit = SqCircuit { x: Some(Fr::from(25u64)), y: Some(Fr::from(5u64)) };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
     Mutex::new((pk, vk))
 });
 
@@ -75,7 +74,18 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Construct pvugc-vk wrapper from pk and vk
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()) };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as ark_ec::pairing::Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
 
     // Canonical column setup for statement 1
@@ -99,33 +109,22 @@ fuzz_target!(|data: &[u8]| {
     if let (Some(s1b), Some(s2b)) = (take_bytes::<8>(&mut data), take_bytes::<8>(&mut data)) {
         let mut rng1 = ark_std::rand::rngs::StdRng::seed_from_u64(u64::from_le_bytes(s1b));
         let mut rng2 = ark_std::rand::rngs::StdRng::seed_from_u64(u64::from_le_bytes(s2b));
+        
         // Proof 1 for x1
-        let mut rec1 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-        rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
-        let proof1 = Groth16::<E>::create_random_proof_with_hook(
-            SqCircuit { x: Some(x1), y: Some(y1) },
-            &pk,
-            &mut rng1,
-            &mut rec1,
-        ).unwrap();
-        let commitments1: OneSidedCommitments<E> = rec1.build_commitments();
+        let (proof1, commitments1, _assignment1, _s1) = 
+            prove_and_build_commitments(&pk, SqCircuit { x: Some(x1), y: Some(y1) }, &mut rng1).unwrap();
         let kd1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
         if kd1 != k1 {
             panic!("Decap mismatch for statement 1");
         }
+        
         // Setup and proof for statement 2 with its own arms
         let (_bases_cols2, col_arms2, _r2, _k2_setup) =
             OneSidedPvugc::setup_and_arm::<E>(&pvugc_vk, &vk, &statement2, &rho)
                 .expect("setup_and_arm for stmt2");
-        let mut rec2 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-        rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
-        let proof2 = Groth16::<E>::create_random_proof_with_hook(
-            SqCircuit { x: Some(x2), y: Some(y2) },
-            &pk,
-            &mut rng2,
-            &mut rec2,
-        ).unwrap();
-        let commitments2: OneSidedCommitments<E> = rec2.build_commitments();
+        
+        let (proof2, commitments2, _assignment2, _s2) = 
+            prove_and_build_commitments(&pk, SqCircuit { x: Some(x2), y: Some(y2) }, &mut rng2).unwrap();
         let kd2 = OneSidedPvugc::decapsulate::<E>(&commitments2, &col_arms2).expect("decapsulate");
         if kd2 != k2 {
             panic!("Decap mismatch for statement 2");
@@ -136,5 +135,3 @@ fuzz_target!(|data: &[u8]| {
         let _ = (proof1, proof2);
     }
 });
-
-

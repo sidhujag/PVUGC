@@ -17,7 +17,7 @@ Layer 2: Outer Circuit (BW6-761 Groth16)
 ├─ Public inputs: compressed via BooleanInputVar
 └─ Witness: inner proof (A, B, C)
 
-Layer 3: PVUGC (Grover–Sahai on BW6-761)
+Layer 3: PVUGC (Groth–Sahai on BW6-761)
 ├─ Extracts: K = R(vk, x)^ρ (statement-dependent, proof-agnostic)
 └─ Input: outer Groth16 proof and statement
 ```

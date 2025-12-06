@@ -28,8 +28,7 @@ use sha2::{Digest, Sha256};
 /// arming_pkg_hash = H_bytes("PVUGC/ARM" || {D_j} || D_δ || header_meta)
 /// presig_pkg_hash = H_bytes("PVUGC/PRESIG" || m || T || R || signer_set || coeffs)
 ///
-/// ctx_hash = H_bytes("PVUGC/CTX" || ctx_core || arming_pkg_hash
-///                    || presig_pkg_hash || dlrep_transcripts)
+/// ctx_hash = H_bytes("PVUGC/CTX" || ctx_core || arming_pkg_hash || presig_pkg_hash)
 /// ```
 #[derive(Clone, Debug)]
 pub struct PvugcContextBuilder {

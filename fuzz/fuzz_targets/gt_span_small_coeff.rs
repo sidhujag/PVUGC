@@ -16,7 +16,6 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_snark::SNARK;
 
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::arming::ColumnBases;
 use arkworks_groth16::ppe::{PvugcVk, build_one_sided_ppe, compute_groth16_target};
 
@@ -30,7 +29,6 @@ impl ConstraintSynthesizer<Fr> for SqCircuit {
         let y = FpVar::new_witness(cs.clone(), || self.y.ok_or(SynthesisError::AssignmentMissing))?;
         let y2 = &y * &y;
         x.enforce_equal(&y2)?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -65,10 +63,21 @@ fuzz_target!(|data: &[u8]| {
     // Setup a tiny circuit VK deterministically from seed
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
     let circuit = SqCircuit { x: Some(x), y: None };
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, ark_groth16::r1cs_to_qap::PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
-    // Build PVUGC VK using vk and pk-like fields where needed; here only vk is used
-    let pvugc_vk = PvugcVk::<E> { beta_g2: vk.beta_g2, delta_g2: vk.delta_g2, b_g2_query: std::sync::Arc::new(vec![]) };
+    // Build PVUGC VK using vk and pk-like fields where needed
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as ark_ec::pairing::Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
     // Derive column bases from VK Y-bases: {β} ∪ b_g2_query; if query empty, we still have β
     // Extract Y from pvugc_vk via build_one_sided_ppe path

@@ -38,12 +38,9 @@ pub struct VerifyingKey<E: Pairing> {
     pub gamma_g2: E::G2Affine,
     /// The `delta * H`, where `H` is the generator of `E::G2`.
     pub delta_g2: E::G2Affine,
-    /// The `(beta * a_i + alpha * b_i + c_i)/gamma * G`, where `G` is
-    /// the generator of `E::G1` (standard Groth16 IC used by verifier).
+    /// The `gamma^{-1} * (beta * a_i + alpha * b_i + c_i) * H`, where `H` is
+    /// the generator of `E::G1`.
     pub gamma_abc_g1: Vec<E::G1Affine>,
-    /// The unscaled `(beta * a_i + alpha * b_i + c_i) * G`, exposing the
-    /// γ-dependent IC for PVUGC.
-    pub gamma_abc_g1_raw: Vec<E::G1Affine>,
 }
 
 impl<E: Pairing> Default for VerifyingKey<E> {
@@ -54,7 +51,6 @@ impl<E: Pairing> Default for VerifyingKey<E> {
             gamma_g2: E::G2Affine::default(),
             delta_g2: E::G2Affine::default(),
             gamma_abc_g1: Vec::new(),
-            gamma_abc_g1_raw: Vec::new(),
         }
     }
 }
@@ -73,9 +69,6 @@ where
         self.gamma_abc_g1
             .iter()
             .for_each(|g| g.to_sponge_bytes(dest));
-        self.gamma_abc_g1_raw
-            .iter()
-            .for_each(|g| g.to_sponge_bytes(dest));
     }
 
     fn to_sponge_field_elements<F: PrimeField>(&self, dest: &mut Vec<F>) {
@@ -84,9 +77,6 @@ where
         self.gamma_g2.to_sponge_field_elements(dest);
         self.delta_g2.to_sponge_field_elements(dest);
         self.gamma_abc_g1
-            .iter()
-            .for_each(|g| g.to_sponge_field_elements(dest));
-        self.gamma_abc_g1_raw
             .iter()
             .for_each(|g| g.to_sponge_field_elements(dest));
     }
@@ -150,6 +140,4 @@ pub struct ProvingKey<E: Pairing> {
     pub h_query: Vec<E::G1Affine>,
     /// The elements `l_i * G` in `E::G1`.
     pub l_query: Vec<E::G1Affine>,
-    /// Correction bases for IC ( ((1-γ)/δ) * γ_abc_raw )
-    pub ic_correction_g1: Vec<E::G1Affine>,
 }

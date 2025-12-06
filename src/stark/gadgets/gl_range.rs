@@ -19,7 +19,7 @@
 //! Also used by `canonicalize_to_bytes()` to enforce canonical representation
 //! when comparing computed digests to proof bytes.
 
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;

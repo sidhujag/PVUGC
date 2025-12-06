@@ -22,7 +22,7 @@
 //!
 //! Use for internal arithmetic. Canonicalize only when comparing to proof bytes.
 
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_ff::{BigInteger, PrimeField};
 use ark_r1cs_std::{fields::fp::FpVar, prelude::*, uint8::UInt8};
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};

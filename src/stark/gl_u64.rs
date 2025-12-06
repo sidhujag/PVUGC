@@ -3,7 +3,7 @@
 //! Provides host-side arithmetic for witness computation in circuits.
 //! These operations are used ONLY in witness closures, not in constraints.
 
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_ff::{BigInteger, PrimeField, Zero};
 
 /// Goldilocks modulus: p = 2^64 - 2^32 + 1

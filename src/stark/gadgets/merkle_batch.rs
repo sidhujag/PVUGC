@@ -1,7 +1,7 @@
 use super::gl_fast::GlVar;
 use super::rpo_gl_light::{rpo_merge_light, RpoParamsGLLight};
 use super::utils::digest32_to_gl4;
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};

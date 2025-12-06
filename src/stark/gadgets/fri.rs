@@ -5,7 +5,7 @@
 use super::gl_fast::GlVar;
 use super::gl_fast::{gl_add_light, gl_sub_light};
 use super::rpo_gl_light::RpoParamsGLLight;
-use crate::outer_compressed::InnerFr;
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
