@@ -119,6 +119,10 @@ where
         println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
 
         audit_witness_bases::<C>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
+        
+        // Decisive span membership test: verify Q_const ∉ span(H_ij)
+        let span_check_passed = verify_q_const_not_in_span::<C>(pk_outer, vk_inner);
+        assert!(span_check_passed, "SECURITY FAIL: Q_const may be in span(H_ij)!");
 
         let lean_pk = LeanProvingKey {
             vk: pk_outer.vk.clone(),
@@ -327,8 +331,18 @@ fn compute_witness_bases<C: RecursionCycle>(
     let mut active_pairs = HashSet::new();
     for &i in &vars_a {
         for &j in &vars_b {
-            // Only consider pairs involving at least one witness
-            if i >= num_pub || j >= num_pub {
+            // Include only: (const, wit) and (wit, wit) pairs
+            // Exclude: (wit, pub), (pub, wit), (pub, pub)
+            // Rationale:
+            //   - (pub, pub): Both public → no witness contribution
+            //   - (pub, wit): Public in A-side → but u_pub = 0, so H = 0
+            //   - (wit, pub): Witness in A, public in B → produces 0 bases
+            //                 because "no shared A/B rows" (audit verified)
+            //   - (const, wit): Constant '1' × witness → needed for baked α
+            //   - (wit, wit): Witness × witness → core quotient computation
+            let i_is_const_or_wit = i == 0 || i >= num_pub;
+            let j_is_wit = j >= num_pub;
+            if i_is_const_or_wit && j_is_wit {
                 active_pairs.insert((i, j));
             }
         }
@@ -666,6 +680,68 @@ fn audit_witness_bases<C: RecursionCycle>(
                 i_idx, i, j
             );
         }
+    }
+    
+    // 3. Quotient Reachability Check - verify Q_pub is unreachable from h_query_wit span
+    // This confirms the "baked quotient in GT can't be ρ-exponentiated" security property.
+    println!("\n--- Quotient Reachability Check ---");
+    
+    let mut wit_wit_count = 0usize;
+    let mut const_wit_count = 0usize;
+    let mut wit_pub_count = 0usize;
+    let mut pub_wit_count = 0usize;
+    
+    for &(i, j, _) in &wb.h_query_wit {
+        let i_idx = i as usize;
+        let j_idx = j as usize;
+        
+        let i_is_const = i_idx == 0;
+        let i_is_pub = i_idx > 0 && i_idx < num_public;
+        let i_is_wit = i_idx >= num_public;
+        
+        let j_is_pub = j_idx > 0 && j_idx < num_public;
+        let j_is_wit = j_idx >= num_public;
+        
+        if i_is_wit && j_is_wit {
+            wit_wit_count += 1;
+        } else if i_is_const && j_is_wit {
+            const_wit_count += 1;
+        } else if i_is_wit && j_is_pub {
+            wit_pub_count += 1;
+        } else if i_is_pub && j_is_wit {
+            pub_wit_count += 1;
+        }
+    }
+    
+    println!("  h_query_wit composition:");
+    println!("    (const, wit): {} pairs", const_wit_count);
+    println!("    (wit, wit):   {} pairs", wit_wit_count);
+    println!("    (wit, pub):   {} pairs (should be 0 for optimal security)", wit_pub_count);
+    println!("    (pub, wit):   {} pairs (should be 0 - blocked by A=0 for pub)", pub_wit_count);
+    
+    // Security check: (wit, pub) pairs could theoretically leak if they exist,
+    // but the main audit's "Public columns never share A/B rows" check ensures they're zero bases.
+    // Still, we flag them for awareness.
+    if wit_pub_count > 0 {
+        println!("  ⚠️  WARNING: {} (wit,pub) pairs exist in h_query_wit.", wit_pub_count);
+        println!("      These should produce zero bases due to 'no shared A/B rows' property.");
+        println!("      Consider filtering them out explicitly for cleaner CRS.");
+    }
+    
+    if pub_wit_count > 0 {
+        panic!(
+            "[SECURITY AUDIT FAIL] {} (pub,wit) pairs in h_query_wit! \
+             Public inputs should have A=0, so these shouldn't exist.",
+            pub_wit_count
+        );
+    }
+    
+    // Final verdict on quotient reachability
+    let only_safe_pairs = pub_wit_count == 0;
+    if only_safe_pairs {
+        println!("[PASS] Quotient Reachability: h_query_wit contains no (pub,wit) pairs.");
+        println!("       → Q_pub is unreachable from h_query_wit span (by U-span separation).");
+        println!("       → Adversary cannot synthesize T_const^ρ via e(H_ij, δ^ρ).");
     }
 }
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(

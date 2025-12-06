@@ -1,6 +1,11 @@
 # PVUGC Security Analysis: Algebraic Framework & GBGM Model
 
-This document defines the algebraic framework used to prove the security of PVUGC's One-Sided Decapsulation logic under the **Hardened Arming** model (Aggregation + Baked Quotient).
+This document defines the algebraic framework used to prove the security of PVUGC's One-Sided Decapsulation logic. Security rests on four pillars:
+
+1. **Full Span Separation** — $U_{pub} \perp U_{wit}$, $V_{pub} \perp V_{wit}$, $W_{pub} \perp W_{wit}$ (verified by circuit audit)
+2. **Lean CRS** — No Powers of Tau; public quotient baked into $\mathbb{G}_T$
+3. **Linear Circuit Design** — Public inputs appear only linearly (no pub×pub or pub×wit constraints)
+4. **Aggregated Armed Handle** — Public B-columns aggregated into single armed handle $D_{pub} = \rho(\beta + \sum x_i v_i(\tau))$
 
 ## 1. The Algebraic Model (AGBGM)
 
@@ -21,8 +26,8 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $\mathbb{G}_1$ — circuit queries
         *   $A_k$ ($k > \ell$): $u_k(\tau)$ (clean witness-column bases, no $\rho$)
         *   $B^{(1)}_k$ ($k > \ell$): $v_k(\tau)$ in $\mathbb{G}_1$
-        *   $L_k$ ($k > \ell$): $\frac{\beta v_k(\tau) + \alpha u_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, still poisoned)
-        *   $IC_i$ ($i \le \ell$): $\frac{u_i(\tau)}{\gamma}$ (**note the inverse $\gamma$**)
+        *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha,\beta,\delta^{-1}$)
+        *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
         *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
     *   $\mathbb{G}_2$ — verification key elements
         *   $[\beta]_2, [\gamma]_2, [\delta]_2$
@@ -39,33 +44,46 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $D_\delta = \rho \cdot \delta$
     *   $D_j = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
 
-Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core “span separation” used later in §2.2–§2.3.
+Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in §2.1 and §2.3.
 
 ### 1.2 Adversary Capabilities
 The adversary can construct new handles via:
 1.  **Linear Combination:** Given handles $h_1, h_2$, compute $c_1 h_1 + c_2 h_2$. Label: $c_1 L(h_1) + c_2 L(h_2)$.
 2.  **Pairing:** Given $h_1 \in \mathbb{G}_1, h_2 \in \mathbb{G}_2$, compute $e(h_1, h_2)$. Label: $L(h_1) \cdot L(h_2)$.
 
-**Goal:** Construct a handle with label equal to the Target Label:
-$$ L_{Target} = \rho \cdot \left(\alpha \beta + \sum_{i=0}^{\ell} x_i u_i(\tau) + T_{const}\right) $$
+**Goal:** Construct a handle with label equal to the Target Label. In standard Groth16 R1CS notation:
+$$ L(K_{core}) = \rho\alpha\beta + \rho(\beta U_{pub} + \alpha V_{pub} + W_{pub}) $$
 
-where $T_{const} = e(H_{pub}(x,\tau), \delta)$ is the baked quotient term. The `+` sign arises because the Lean prover omits the quotient polynomial $H_{pub}$ from C, so honest extraction naturally includes the $e(H_{pub}, \delta)$ term that would otherwise cancel.
+where $U_{pub}, V_{pub}, W_{pub}$ are the public-input contributions to the A, B, C polynomials respectively. The Lean CRS bakes the public quotient into $\mathbb{G}_T$, so the effective target becomes:
+$$ L_{Target} = \rho \cdot \left(\alpha\beta + \beta U_{pub} + \alpha V_{pub} + W_{pub} + H_{pub}\delta\right) $$
 
-*Why no $\gamma$ term?* The IC bases in the Lean CRS are $u_i(\tau)/\gamma$. Honest decapsulation pairs $\sum x_i \cdot IC_i$ with the unarmed $[\gamma]_2$, so the $\gamma$ cancels before arming with $\rho$. Adversaries still never obtain an armed $[\gamma]_2^\rho$, but the monomial enforced in the protocol is $\rho \cdot \sum x_i u_i(\tau)$.
+**Why [α]₁ can be public:** Even though the adversary has $[\alpha]_1$, they cannot extract $K_{core}$ because:
+- Pairing $[\alpha]_1$ with armed bases yields terms like $\rho\alpha V_{wit}$
+- V-span separation ($V_{pub} \perp V_{wit}$) prevents canceling the $\rho\alpha V_{pub}$ pollution
+- Similarly, U/W-span separation blocks residue synthesis attacks
 
 ## 2. Security Invariants (The "Impossibility" Proofs)
 
-We argue security entirely inside the Algebraic Generic Bilinear Group Model. A WE adversary may issue arbitrary linear-combination and pairing queries—it is not constrained to produce Groth16-style $(A,B,C)$ tuples. Consequently we do **not** rely on Rank-1 structure; instead we show that the target decapsulation label lies outside the algebraic span reachable from the Lean CRS handles. The argument proceeds along two axes:
+We argue security entirely inside the Algebraic Generic Bilinear Group Model. A WE adversary may issue arbitrary linear-combination and pairing queries—it is not constrained to produce Groth16-style $(A,B,C)$ tuples. Security holds because the Target Label lies outside the algebraic span reachable from the Lean CRS handles.
 
-1. **Span analysis:** anything involving public-only quotient terms or clean polynomial bases is simply missing from the CRS.
-2. **Degree analysis:** the trapdoor indeterminates $\rho$ (arming) and $\gamma$ (Groth16) never cohabit a handle, so monomials that require both are unreachable.
+### 2.1 Attack Vector Analysis
 
-The first two invariants below—§2.2 (Linearity) and §2.3 (Baked Quotient)—form the primary defense. They guarantee the public-only quotient term lives outside the Lean CRS span regardless of any $\gamma$-related arguments. The $\gamma$ barrier (§2.1) is a belt-and-suspenders separation that further blocks direct attempts to arm the IC bases.
+There are two primary algebraic attack strategies:
 
-Security holds because the Target Label lies outside the linear span of the labels reachable by the adversary.
+**Attack A: Pollution Cancellation (V-Span Attack)**
+- The adversary uses public $[\alpha]_1$ to compute $H_\alpha = e([\alpha]_1, D_{pub})$ (where $D_{pub}$ is already $\rho$-masked)
+- This yields $L(H_\alpha) = \rho\alpha\beta + \rho\alpha V_{pub}$
+- To isolate $\rho\alpha\beta$, adversary must cancel the "pollution" term $\rho\alpha V_{pub}$
+- Available witness handles can only generate $\rho\alpha V_{wit}$
+- **Defense:** V-span separation ($V_{pub} \perp V_{wit}$) blocks this attack
 
-### 2.1 The Gamma Invariant (Supplementary Barrier)
-**Claim:** (Supplementary) The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS. This barrier is not relied upon for the main baked-quotient argument but it provides an additional algebraic separation.
+**Attack B: Residue Synthesis (U/W-Span Attack)**
+- The adversary tries to synthesize the remaining components: $Residue = \rho(\beta U_{pub} + W_{pub})$
+- Available witness handles generate only $\rho\beta U_{wit}$ and $\rho W_{wit}$
+- **Defense:** U-span separation ($U_{pub} \perp U_{wit}$) and W-span separation ($W_{pub} \perp W_{wit}$) block this attack
+
+### 2.2 The Gamma Invariant (Supplementary Barrier)
+**Claim:** (Supplementary) The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS. This barrier is not relied upon for the main span-separation argument but provides additional algebraic separation.
 
 **Proof (degree argument):**
 
@@ -85,16 +103,24 @@ When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
 
 Thus no pairing (nor any linear combination thereof) can yield a handle with $Deg_\rho = 1$ **and** $Deg_\gamma = 1$. Even if an adversary tried to arm the IC bases directly, the $\rho \cdot \gamma$ monomial would remain algebraically unreachable.
 
-### 2.2 The Linearity Invariant (Blocks Full Span / Public-Public)
-**Claim:** The adversary cannot forge the public residual $\Delta_{pub}$ using witness handles—even though it may possess clean witness-column bases from the CRS.
+### 2.3 Full Span Separation (Primary Defense)
+**Claim:** The adversary cannot forge the public residual using witness handles because the public and witness subspaces are orthogonal.
 
-*   **Proof:**
-    *   The public residual $\Delta_{pub}$ depends on the public inputs $x$.
-    *   The adversary has witness handles $A_k$, $B_k$, $H_{wit}$ and the armed $D_j$—all tied solely to witness columns.
-    *   **Constraint:** The **Trapdoor-Aware Audit** (and the Linearity property of the Outer Circuit) guarantees that the subspace spanned by the public residual is orthogonal to the subspace spanned by the witness columns (no pub×pub or pub×wit constraints).
-    *   **Result:** No linear combination of the available witness handles can equal $\Delta_{pub}$ (unless the R1CS is satisfied).
+**The Three Span Separations:**
 
-### 2.3 The Baked Quotient Invariant (Blocks Remainder Forging)
+| Matrix | Separation | Blocks |
+|--------|------------|--------|
+| U (A-matrix) | $U_{pub} \perp U_{wit}$ | Residue synthesis via A-queries |
+| V (B-matrix) | $V_{pub} \perp V_{wit}$ | Pollution cancellation via B-columns |
+| W (C-matrix) | $W_{pub} \perp W_{wit}$ | Residue synthesis via C-queries |
+
+**Proof:**
+- The adversary has witness handles $A_k$, $B_k$, $L_k$, $H_{wit}$, and armed $D_j$—all tied solely to witness columns
+- The **Circuit Audit** verifies that no pub×pub or pub×wit constraints exist
+- Therefore, no linear combination of witness handles can produce public-input-dependent terms
+- Result: Both Pollution Cancellation and Residue Synthesis attacks are blocked
+
+### 2.4 The Baked Quotient Invariant (Blocks Quotient Forging)
 **Claim:** The adversary cannot use the CRS to forge the quotient polynomial $H_{pub}(x)$ or its armed equivalent.
 
 *   **What the Adversary CAN Do:**
@@ -120,23 +146,16 @@ The "Honest Prover Dilemma" (Prover needs handles that Adversary abuses) is reso
 
 The security of the Lean CRS / Baked Quotient construction reduces to standard assumptions in the bilinear setting. We consider multiple related problems.
 
-### 4.1 Relevant Hardness Assumptions
-
-**Target Exponent Problem (TEP):**
-Given $([1]_1, [s]_1, [1]_2, [t]_2)$ and target $T \in \mathbb{G}_T$, find $a, b \in \mathbb{F}_r$ such that:
-$$e([a]_1, [b]_2) = T$$
-where $T = e([1]_1, [1]_2)^{st}$ (the adversary doesn't know $st$).
+### 4.1 The Core Assumption: GT-XPDH
 
 **GT-XPDH (Target Group Extended Power Diffie-Hellman):**
-Given $([1]_1, [\tau]_1, \ldots, [\tau^d]_1, [1]_2, [\delta]_2)$, distinguish:
-$$e([f(\tau)]_1, [\delta]_2) \quad \text{vs} \quad \text{random } T \in \mathbb{G}_T$$
-where $f(\tau)$ is a polynomial **not** in the span of the given $\mathbb{G}_1$ elements.
+Given statement-only bases $\{Y_j\}, \Delta \in \mathbb{G}_2$, their $\rho$-powers $\{Y_j^\rho\}, \Delta^\rho$, and independent target $R \in \mathbb{G}_T$, compute $R^\rho$.
 
-**q-SDH (q-Strong Diffie-Hellman):**
-Given $([1]_1, [\tau]_1, \ldots, [\tau^q]_1)$, compute $([1/(τ+c)]_1, c)$ for any $c$.
+**Theorem (Tight Reduction):** GT-XPDH reduces tightly to DDH in $\mathbb{G}_2$:
+- If adversary breaks GT-XPDH with advantage $\epsilon$, there exists solver for DDH in $\mathbb{G}_2$ with advantage $\geq \epsilon - 1/r$
+- **SXDH implies GT-XPDH** (only the $\mathbb{G}_2$-half of SXDH is needed)
 
-**Bilinear Knowledge of Exponent (KoE):**
-Any adversary producing $([A]_1, [B]_2)$ with $e(A, B) = T$ must "know" the exponents algebraically.
+See `gt-xpdh-reduction.md` for the complete proof.
 
 ### 4.2 The GBGM Simulation
 
@@ -241,49 +260,57 @@ For the DDH reduction to hold, the outer circuit must satisfy:
 
 | Constraint Type | A-column | B-column | Captured By |
 |-----------------|----------|----------|-------------|
-| Linear packing | $x_{outer} - \Sigma 2^i b_i$ | $1$ | $q_{const}$ (baked) |
+| Linear packing | $x - \Sigma 2^i b_i$ | $1$ | $q_{const}$ (baked) |
 | Witness × Witness | $w_i$ | $w_j$ | $h_{query\_wit}$ |
 | VK × Proof | constant | witness | $h_{query\_wit}$ |
 
-**Critical Invariant**: No constraint has $x_{outer}$ in **both** A and B columns.
+**Critical Invariant**: No constraint has public input $x$ in **both** A and B columns.
 
 ### 5.2 Statement Dependency Requirement
 
-For the derived key $K = R^\rho$ to be **statement-dependent** (binding the arming randomness $\rho$ to the specific public input $x$), the public input $x$ MUST appear in the B-matrix of the constraint system.
+For the derived key $K = R^\rho$ to be **statement-dependent** (binding the arming randomness $\rho$ to the specific public input $x$), the public input MUST appear in the B-matrix of the constraint system.
 
 *   **Requirement**: The constraint $1 \cdot x = x$ (or equivalent) must place $x$ in the B-matrix column.
 *   **Effect**: The B-polynomial becomes $B(x) = \beta + x \cdot v_{pub}(\tau)$. The armed handle becomes $D_{pub} = \rho \cdot B(x)$.
 *   **Security**: The key becomes $K(x) = e(A, D_{pub}) = e(A, \beta)^\rho \cdot e(A, v_{pub})^{\rho \cdot x}$. This binds $\rho$ to $x$ multiplicatively in the exponent.
 *   **Vulnerability (Avoided)**: If $x$ appears *only* in C (e.g., via $1 \cdot 0 = x$), then $B(x) = \beta$ (constant). The armed handle $D_{pub} = \rho \beta$ yields a constant key $K = e(A, \beta)^\rho$ valid for *any* statement, breaking the KEM property.
-*   **Exclusion**: Public inputs MUST NOT appear in the A-matrix to prevent adversary manipulation of the A-side pairing input. Our Outer Circuit already explemplifies this (see ../../bin/audit_circuit.rs).
+*   **Exclusion**: Public inputs MUST NOT appear in the A-matrix to prevent adversary manipulation of the A-side pairing input. The outer circuit enforces this (see `bin/audit_circuit.rs`).
 
 ## 6. Conclusion
 
-The algebraic framework confirms that the **Hardened Arming** architecture is secure in the AGBGM. The combination of:
+The algebraic framework confirms that PVUGC is secure in the AGBGM when the following minimum defenses are in place:
 
-1. **Aggregation** (one-sided PPE structure)
-2. **Gamma-Exclusion** (blocks GT-slicing attacks)
-3. **GT-Baked Quotient** (publishes $H_{pub}$ only as $\mathbb{G}_T$ projections $T_i = e(H_i(\tau), \delta)$, not as $\mathbb{G}_1$ handles)
-4. **Linearity/Audit** (ensures affine quotient, orthogonal to witness span)
-5. **GT-XPDH / TEP Reduction** (formal security proof)
+### 6.1 Minimum Required Defenses
 
-eliminates the reachable subspace for all known algebraic attack vectors and reduces security to the hardness of the **Target Exponent Problem (TEP)** and **GT-XPDH** in the Generic Bilinear Group Model.
+| Defense | Purpose | Blocks |
+|---------|---------|--------|
+| **Full Span Separation** | $U/V/W_{pub} \perp U/V/W_{wit}$ | Pollution cancellation, residue synthesis |
+| **Lean CRS (Baked Quotient)** | No PoT; public quotient in $\mathbb{G}_T$ only | Quotient forgery |
+| **Linear Circuit Design** | Public inputs appear linearly | Quotient non-separation |
+| **Aggregated Armed Handle** | $D_{pub} = \rho(\beta + \sum x_i v_i)$ | GT-slicing attacks |
 
-### 6.1 Assumption Hierarchy
+### 6.2 Security Properties Achieved
+
+1. **Standard Groth16 Algebra** — No complex modifications needed; $[\alpha]_1$ can remain public
+2. **Proof-Agnostic Decapsulation** — Any valid proof yields the same $K = R^\rho$
+3. **Statement-Dependent Keys** — Different $(vk, x)$ pairs yield different keys
+4. **GT-XPDH Hardness** — Reduces to DDH in $\mathbb{G}_2$ (standard assumption)
+
+The combination of these defenses eliminates all known algebraic attack vectors and reduces security to the hardness of **GT-XPDH** in the Generic Bilinear Group Model.
+
+### 6.3 Assumption Hierarchy
 
 ```
                     GBGM (Generic Bilinear Group Model)
                               ↓ implies
                     GT-XPDH (Target Group XPDH)
-                              ↓ implies
-                    TEP (Target Exponent Problem)
-                              ↓ related to
-                    q-SDH, co-CDH, Bilinear KoE
+                              ↓ tight reduction to
+                    DDH in G₂ (SXDH suffices)
 ```
 
 In the **standard model** (non-generic), security relies on:
-- **q-SDH**: Prevents polynomial evaluation attacks
-- **co-CDH**: Prevents cross-group discrete log extraction
-- **Bilinear KoE**: Ensures algebraic extractability
+- **SXDH**: DDH hardness in both $\mathbb{G}_1$ and $\mathbb{G}_2$ (only $\mathbb{G}_2$-half needed)
+- **Groth16 Knowledge Soundness**: Valid proofs only from witness knowledge
+- **Collision Resistance**: SHA-256 for Fiat-Shamir
 
-The GBGM provides the cleanest reduction, but the construction is believed secure under standard assumptions as well.
+The GBGM provides the cleanest reduction with bound $\tilde{O}(q^2/r)$ for $q$ oracle queries. See `gt-xpdh-reduction.md` for the full proof.

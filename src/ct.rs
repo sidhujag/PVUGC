@@ -206,7 +206,7 @@ pub fn compute_key_commitment_tag(k_bytes: &[u8], ad_core: &[u8], ciphertext: &[
     bytes32_from_sponge(&mut sponge)
 }
 
-/// Verify key-commitment tag (PoCE-B)
+/// Verify DEM tag (key-commitment binding)
 /// Returns true if τ_i matches computed tag
 pub fn verify_key_commitment(
     k_bytes: &[u8],

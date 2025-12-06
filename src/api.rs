@@ -12,20 +12,17 @@ use ark_relations::{
 use crate::adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
 use crate::arming::{arm_columns, ColumnArms, ColumnBases};
 use crate::ct::{serialize_gt, DemP2};
-use crate::dlrep::{verify_b_msm, verify_ties_per_column};
 use crate::error::{Error, Result as PvugcResult};
 use crate::poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
 use crate::ppe::validate_groth16_vk_subgroups;
 pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
-use crate::{compute_baked_target, DlrepBProof, DlrepPerColumnTies, OneSidedCommitments};
+use crate::{compute_baked_target, OneSidedCommitments};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
     pub groth16_proof: Groth16Proof<E>,
-    pub dlrep_b: DlrepBProof<E>,
-    pub dlrep_ties: DlrepPerColumnTies<E>,
     pub gs_commitments: OneSidedCommitments<E>,
 }
 
@@ -290,9 +287,9 @@ impl OneSidedPvugc {
         }
     }
 
-    /// Verify PoCE-B key-commitment (decap-time, decapper-local)
+    /// Verify DEM tag (decap-time, decapper-local)
     ///
-    /// Verifies that ciphertext is key-committed to the derived key using DEM-Poseidon
+    /// Verifies that ciphertext tag matches derived key using DEM-Poseidon
     pub fn verify_key_commitment<E: Pairing>(
         derived_m: &PairingOutput<E>, // R^ρ derived from attestation
         ctx_hash: &[u8],              // Context hash
@@ -316,7 +313,7 @@ impl OneSidedPvugc {
         crate::ct::verify_key_commitment(&k_bytes, &ad_core, ct_i, &tau_array)
     }
 
-    /// Compute PoCE-B key-commitment tag for a ciphertext (deposit-time helper)
+    /// Compute DEM tag for a ciphertext (deposit-time helper)
     ///
     /// τ = Poseidon("PVUGC/DEM/tag" || K || ad_digest || ct), where K is derived from R^ρ
     pub fn compute_key_commitment_tag_for_ciphertext<E: Pairing>(
@@ -393,34 +390,8 @@ impl OneSidedPvugc {
                 Ok(split) => split,
                 Err(_) => return false,
             };
-        let b_prime =
-            (bundle.groth16_proof.b.into_group() - public_b_leg.into_group()).into_affine();
 
-        // Verify over witness columns only
-        let dlrep_b_ok =
-            verify_b_msm::<E>(b_prime, &witness_bases, pvugc_vk.delta_g2, &bundle.dlrep_b);
-        if !dlrep_b_ok {
-            return false;
-        }
-
-        // 3. Verify per-column same-scalar ties over G1 for variable columns only
-        let a = bundle.groth16_proof.a;
-        // x_cols for variable B-columns align with witness bases → skip aggregated column 0
-        let mut x_cols: Vec<E::G1Affine> =
-            Vec::with_capacity(bundle.gs_commitments.x_b_cols.len().saturating_sub(1));
-        for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
-            if i == 0 {
-                continue;
-            }
-            x_cols.push(*x0);
-        }
-        let ties_ok =
-            verify_ties_per_column::<E>(a, &x_cols, &bundle.dlrep_ties, bundle.dlrep_b.commitment);
-        if !ties_ok {
-            return false;
-        }
-
-        // 4. Subgroup/identity checks on commitments (allow zero limbs, enforce subgroup when non-zero)
+        // 2. Subgroup/identity checks on commitments (allow zero limbs, enforce subgroup when non-zero)
         {
             use ark_ec::PrimeGroup;
             use ark_ff::PrimeField;
@@ -447,7 +418,7 @@ impl OneSidedPvugc {
             }
         }
 
-        // 5. Verify PPE equals R_baked(vk,x) using direct column pairing
+        // 3. Verify PPE equals R_baked(vk,x) using direct column pairing
         // Use BAKED target computation
         let r_baked = match compute_baked_target(vk, pvugc_vk, public_inputs) {
             Ok(r) => r,
@@ -587,7 +558,7 @@ impl OneSidedPvugc {
         crate::ct::compute_key_commitment_tag(&k_bytes, ad_core, ciphertext)
     }
 
-    /// Verify key-commitment tag (PoCE-B check)
+    /// Verify DEM tag (key-commitment check)
     pub fn verify_key_commitment_dem<E: Pairing>(
         derived_m: &PairingOutput<E>,
         ad_core: &[u8],

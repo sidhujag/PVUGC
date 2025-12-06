@@ -348,8 +348,13 @@ fn run_audit(subject: &dyn AuditSubject) {
     let extractor = MatrixExtractor::new(cs.clone());
 
     // 0. Check public column structure (Lean CRS diagnostic)
+    // With public inputs in C (not B), the architecture is:
+    //   - u_pub = 0 (public not in A) ✓
+    //   - v_pub = 0 (public not in B) ✓ NEW: This is now DESIRED
+    //   - w_pub ≠ 0 (public IS in C) - provides statement binding via IC_i = w_i/γ
     let mut public_inputs_a_zero = true; // Columns 1..num_pub (actual public inputs)
-    let mut public_inputs_b_nonzero = true; // Columns 1..num_pub MUST be in B
+    let mut public_inputs_b_zero = true; // Columns 1..num_pub should be B-free (NEW!)
+    let mut public_inputs_c_nonzero = true; // Columns 1..num_pub MUST be in C
     let constant_one_has_a = !extractor.a_cols[0].is_empty(); // Column 0 (constant "1")
 
     for i in 1..num_pub {
@@ -366,23 +371,32 @@ fn run_audit(subject: &dyn AuditSubject) {
         if a_count > 0 {
             public_inputs_a_zero = false;
             println!(
-                "  [FAIL] Column {} has A entries! Public inputs must be A-free.",
+                "  [FAIL] Column {} has A entries! Public inputs must be A-free (u_pub=0).",
                 i
             );
         }
 
-        if b_count == 0 {
-            public_inputs_b_nonzero = false;
+        if b_count > 0 {
+            public_inputs_b_zero = false;
             println!(
-                "  [FAIL] Column {} has B=0! Public inputs must be in B for statement dependency.",
+                "  [WARN] Column {} has B entries. For optimal security, public inputs should be C-only (v_pub=0).",
+                i
+            );
+        }
+
+        if c_count == 0 {
+            public_inputs_c_nonzero = false;
+            println!(
+                "  [FAIL] Column {} has C=0! Public inputs must be in C for statement binding (w_pub≠0).",
                 i
             );
         }
 
         // Check if IC_i would be zero (security issue!)
-        if b_count == 0 && c_count == 0 {
+        // With public in C only: IC_i = w_i/γ, so w_i must be non-zero
+        if c_count == 0 {
             println!(
-                "  [SECURITY] Column {} has v_i=0 AND w_i=0 → IC_i=0 → PUBLIC INPUT NOT VERIFIED!",
+                "  [SECURITY] Column {} has w_i=0 → IC_i=0 → PUBLIC INPUT NOT BOUND!",
                 i
             );
         }
@@ -395,10 +409,37 @@ fn run_audit(subject: &dyn AuditSubject) {
         );
     }
 
-    if public_inputs_a_zero && public_inputs_b_nonzero {
-        println!("[PASS] Public input structure valid (A=0, B>0) → Lean CRS compatible & Statement Dependent");
+    // New architecture: public in C, not B
+    if public_inputs_a_zero && public_inputs_b_zero && public_inputs_c_nonzero {
+        println!("[PASS] Public input structure valid (A=0, B=0, C>0) → Optimal Lean CRS");
+        println!("       → No (wit,pub) cross-terms in quotient");
+        println!("       → Statement binding via W-polynomial (IC_i = w_i/γ)");
+    } else if public_inputs_a_zero && public_inputs_c_nonzero {
+        println!("[PASS] Public input structure acceptable (A=0, C>0) → Statement Dependent");
+        if !public_inputs_b_zero {
+            println!("       [NOTE] B≠0 creates (wit,pub) quotient pairs - consider moving to C-only");
+        }
     } else {
-        println!("[FAIL] Public input structure INVALID (Check A=0 and B>0 requirements)");
+        println!("[FAIL] Public input structure INVALID");
+        if !public_inputs_a_zero {
+            println!("       → A≠0 violates one-sided property!");
+        }
+        if !public_inputs_c_nonzero {
+            println!("       → C=0 means no statement binding!");
+        }
+    }
+    
+    // === DECISIVE SPAN MEMBERSHIP TEST ===
+    // Verify Q_const ∉ span(H_{ij})
+    // This is the "gold standard" check for quotient reachability
+    println!("\n=== Span Membership Test (Quotient Reachability) ===");
+    
+    let span_test_passed = verify_q_const_span_membership(&extractor, num_pub, num_wit);
+    if span_test_passed {
+        println!("[PASS] DECISIVE: Q_const ∉ span(H_{{ij}})");
+        println!("       → Adversary CANNOT synthesize T_const^ρ from e(H_ij, δ^ρ)");
+    } else {
+        println!("[FAIL] Span membership check failed - potential security issue!");
     }
 
     // Additional guard: ensure no public column appears in both A and B on the same row
@@ -582,6 +623,99 @@ fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool 
         }
     }
     true
+}
+
+/// Decisive span membership test: verify Q_const ∉ span(H_{ij})
+/// 
+/// This is the "gold standard" check GPT requested:
+/// 1. Verify u_pub = 0 for all public columns (public not in A-matrix)
+/// 2. Verify v_pub = 0 for all public columns (public not in B-matrix)  
+/// 3. Verify W-span separation: W_pub ⊥ W_wit
+///
+/// If all three hold, then by algebraic construction:
+/// - H_{ij} ∈ span(L_wit) where L_wit are witness-only Lagrange directions
+/// - Q_const ∈ span(L_pub) where L_pub are public-input Lagrange directions
+/// - These are orthogonal, so Q_const ∉ span(H_{ij})
+fn verify_q_const_span_membership(
+    extractor: &MatrixExtractor,
+    num_pub: usize,
+    num_wit: usize,
+) -> bool {
+    let num_vars = num_pub + num_wit;
+    
+    // Check 1: u_pub = 0 for all public columns 1..num_pub (index 0 is ONE)
+    let mut u_pub_nonzero = false;
+    for col in 1..num_pub {
+        let a_entries = to_sparse_row_vec(&extractor.a_cols[col]);
+        if !a_entries.is_empty() {
+            println!("  [Span] FAIL: u_pub ≠ 0 - Public column {} has {} A-matrix entries", col, a_entries.len());
+            u_pub_nonzero = true;
+        }
+    }
+    
+    if !u_pub_nonzero {
+        println!("  [Span] PASS: u_pub = 0 - No public columns (1..{}) in A-matrix", num_pub);
+    }
+    
+    // Check 2: v_pub = 0 for all public columns 1..num_pub
+    let mut v_pub_nonzero = false;
+    for col in 1..num_pub {
+        let b_entries = to_sparse_row_vec(&extractor.b_cols[col]);
+        if !b_entries.is_empty() {
+            println!("  [Span] FAIL: v_pub ≠ 0 - Public column {} has {} B-matrix entries", col, b_entries.len());
+            v_pub_nonzero = true;
+        }
+    }
+    
+    if !v_pub_nonzero {
+        println!("  [Span] PASS: v_pub = 0 - No public columns (1..{}) in B-matrix", num_pub);
+    }
+    
+    // Check 3: W-span separation (W_pub ⊥ W_wit)
+    // Build row sets for public and witness C-matrix entries
+    let mut w_pub_rows: HashSet<usize> = HashSet::new();
+    let mut w_wit_rows: HashSet<usize> = HashSet::new();
+    
+    for col in 1..num_pub {
+        let c_entries = to_sparse_row_vec(&extractor.c_cols[col]);
+        for &row in c_entries.keys() {
+            w_pub_rows.insert(row);
+        }
+    }
+    
+    for col in num_pub..num_vars {
+        let c_entries = to_sparse_row_vec(&extractor.c_cols[col]);
+        for &row in c_entries.keys() {
+            w_wit_rows.insert(row);
+        }
+    }
+    
+    let shared_rows: Vec<_> = w_pub_rows.intersection(&w_wit_rows).copied().collect();
+    let w_span_separated = shared_rows.is_empty();
+    
+    if w_span_separated {
+        println!("  [Span] PASS: W-span separation - W_pub and W_wit have disjoint row support");
+        println!("         W_pub rows: {}, W_wit rows: {}", w_pub_rows.len(), w_wit_rows.len());
+    } else {
+        println!("  [Span] WARN: W-span may overlap - {} shared rows", shared_rows.len());
+        if shared_rows.len() <= 10 {
+            println!("         Shared rows: {:?}", shared_rows);
+        } else {
+            println!("         First 10 shared rows: {:?}", &shared_rows[..10]);
+        }
+    }
+    
+    // Final verdict
+    let passed = !u_pub_nonzero && !v_pub_nonzero && w_span_separated;
+    
+    if passed {
+        println!("\n  --- Span Membership Verdict ---");
+        println!("  PROOF: u_pub=0, v_pub=0 → H_{{ij}} only encodes (U_wit * V_wit) / Z");
+        println!("         Q_const encodes W_pub / Z, and W_pub ⊥ W_wit by separation.");
+        println!("         Therefore: Q_const ∉ span(H_{{ij}})");
+    }
+    
+    passed
 }
 
 fn check_mixing(extractor: &MatrixExtractor, num_pub: usize, num_vars: usize) -> bool {

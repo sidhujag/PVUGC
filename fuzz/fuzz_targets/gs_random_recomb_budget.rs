@@ -17,7 +17,7 @@ use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::api::{enforce_public_inputs_are_outputs, OneSidedPvugc, PvugcBundle};
-use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
+use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ppe::PvugcVk;
 
 #[derive(Clone)]
@@ -66,17 +66,11 @@ fuzz_target!(|data: &[u8]| {
     };
     let statement = vec![x];
 
-    let mut rec = SimpleCoeffRecorder::<E>::new();
-    rec.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec).unwrap();
-    let mut commitments = rec.build_commitments();
-    let dlrep_b = rec.create_dlrep_b(&pvugc_vk, &vk, &statement, &mut rng);
-    let dlrep_ties = rec.create_dlrep_ties(&mut rng);
+    let (proof, mut commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
 
     let base_bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b,
-        dlrep_ties,
         gs_commitments: commitments.clone(),
     };
     assert!(OneSidedPvugc::verify(&base_bundle, &pvugc_vk, &vk, &statement));
@@ -98,16 +92,12 @@ fuzz_target!(|data: &[u8]| {
     }
     commitments.x_b_cols[0] = (acc0.into_affine(), acc1.into_affine());
 
-    // Keep DLREP proofs unchanged; verifier should reject
+    // Verifier should reject modified commitments
     let bundle_bad = PvugcBundle {
         groth16_proof: base_bundle.groth16_proof,
-        dlrep_b: base_bundle.dlrep_b,
-        dlrep_ties: base_bundle.dlrep_ties,
         gs_commitments: commitments,
     };
     if OneSidedPvugc::verify(&bundle_bad, &pvugc_vk, &vk, &statement) {
         panic!("Random recombination accepted");
     }
 });
-
-

@@ -137,10 +137,6 @@ The Groth16 prover knows the scalars used to form B and C. Without ever revealin
 - Compute $X_j^{(B)} := b_j A \in \mathbb{G}_1$ for each column
 - C-side point: $-C \in \mathbb{G}_1$
 
-**Small Schnorr/DLREP proofs** (no pairings) verify:
-- $B = \beta_2 + \sum_j b_j Y_j$
-- The published point equals $-C$
-
 ---
 
 ### 3.4 Verifier Equality (One-Sided PPE)
@@ -192,25 +188,20 @@ Any "anchor" multiplication just rephrases the comparison to 1. Thus $K = 1^\rho
 
 ## 5. Implementation Notes
 
-### Prover Hook
-Expose only group points {C_ℓ} and -C, plus Schnorr ties. **Never publish scalar coefficients.**
+### Commitment Construction
+The prover constructs GS commitments directly from the Groth16 proof elements (A, C) and witness assignment.
 
-### Row Compression
-Choose Γ (e.g., Rademacher entries via Fiat-Shamir) so |{U_ℓ}| ≈ 16–32, independent of circuit size.
-
-### Arming Bundle
-Publish {U_ℓ^ρ}, δ₂^ρ + one PoCE-Across (proving same ρ). Use PoCE-Across to ensure ρ consistency across all arms.
+### Column-Based Arming
+Publish column arms {Y_j^ρ}, δ₂^ρ plus a single **PoCE-A** proof demonstrating same ρ across all arms.
 
 ### Context Binding
-Bind VK digest, exact Y^{(B)} list and order, Γ, and transcript hashes into a single ctx_hash. Use for Fiat-Shamir challenges in DLREP and PoCE.
+Bind VK digest and GS instance digest into ctx_hash. Use for Fiat-Shamir challenges in PoCE.
 
-### Checks
+### Verification Checks
 - Subgroup and cofactor validation
 - Reject degenerate R = 1
-- Verify all Schnorr/DLREP ties before accepting commitments
-
-### Optional: Transparent GS-Lite Commitments
-Hide {C_ℓ}, -C under hash-derived commitments; open with Schnorr. No CRS or trapdoors required.
+- Verify Groth16 proof
+- Verify PPE equality
 
 ---
 
@@ -222,7 +213,7 @@ Hide {C_ℓ}, -C under hash-derived commitments; open with Schnorr. No CRS or tr
 - **Random Oracle** for Fiat-Shamir
 
 ### Soundness
-Forging a decap key without a valid proof bundle implies breaking Groth16, DLREP, or solving a discrete log in an adversarial setting.
+Forging a decap key without a valid proof bundle implies breaking Groth16 or solving a discrete log in an adversarial setting.
 
 ### Proof-Agnosticism
 $K = R^\rho$ depends only on (vk, x); any valid proof yields the same R.

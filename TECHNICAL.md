@@ -247,44 +247,46 @@ The Y_j basis excludes [γ]₂. Specifically, Y_j ∈ {[β]₂, b_g2_query}, whi
 
 ## 5. Implementation Details
 
-### 5.1 Coefficient Extraction
+### 5.1 Commitment Construction
 
-The prover exposes coefficients {b_j, c_i} through a hook in the Groth16 prover:
+GS commitments are constructed directly from Groth16 proof elements and the witness assignment:
 
 ```
-B = [β]₂ + ∑_j b_j·[b_j^query]₂
-C = [δ]₁ + ∑_i c_i·[h_i]₁
+Given: Proof (A, B, C), full_assignment, randomizer s
+
+Columns:
+  - Column 0: aggregated public = A
+  - Witness columns: b_j · A for each witness coefficient
+
+Delta-side:
+  - θ = s·A - C (combines randomizer and C-term)
 ```
 
-These coefficients are used to construct:
-- DLREP_B proof: demonstrates B = β + ∑ b_j·Y_j
-- Tie proof: demonstrates same {b_j} used in both MSMs
-- GS commitment: encodes the proof structure for PPE verification
 
 ### 5.2 Verification Flow
 
-1. **Groth16 Verification:** e(A, B) + e(C, δ) = target (standard)
-2. **DLREP_B Verification:** Schnorr proof that B decomposes correctly
-3. **Tie Verification:** Cross-group DL equality of coefficients
-4. **PPE Verification:** ∑ e(C_ℓ, U_ℓ) + e(θ, δ) = target (one-sided)
-5. **Decapsulation:** K = ∑ e(C_ℓ, U_ℓ^ρ) + e(θ, δ^ρ) = target^ρ
+1. **Groth16 Verification:** e(A, B) · e(-C, δ) = R(vk, x) (standard)
+2. **PPE Verification:** ∑ e(X_j, Y_j) · e(θ, δ) = R(vk, x) (one-sided)
+3. **Decapsulation:** K = ∑ e(X_j, Y_j^ρ) · e(θ, δ^ρ) = R^ρ
 
-### 5.3 Γ Matrix Derivation
+### 5.3 Column-Based Architecture
 
-The matrix Γ is derived deterministically via Fiat-Shamir to ensure reproducibility:
+The one-sided approach uses a column-based structure:
 
-```rust
-seed = SHA256("PVUGC/GAMMA/v1" || serialize(vk) || serialize(beta) || serialize(delta))
+```
+Bases (from VK):
+  - Y_j ∈ {aggregated_public_B, witness_only b_g2_query columns}
+  - δ (from VK)
 
-For each row ℓ, each column j:
-  hash = SHA256(seed || ℓ || j)
-  Γ_{ℓj} ∈ {-1, 0, +1} based on hash mod 3
+Arms (published at deposit):
+  - Y_j^ρ for each column
+  - δ^ρ
 ```
 
 Properties:
-- Same VK always produces same Γ
-- Entries are Rademacher-distributed (symmetric, sparse)
-- Avoids all-zero rows for robustness
+- Statement-only: all bases derived from VK
+- γ₂ excluded: ensures gating security
+- Linear structure: scales with witness count
 
 ## 6. Security Analysis
 
@@ -304,7 +306,7 @@ Properties:
 | **Extract ρ from arms** | Solve G₂ DLP on U_ℓ^ρ | DLP hardness |
 | **Invalid proof → extract K** | Skip Groth16 verification | Verification gates extraction |
 | **Different statements → same K** | Manipulate VK or public input | Statement-only bases ensure K ≠ K' |
-| **Tie proof forging** | Prove false coefficient consistency | Schnorr soundness + FS collision resistance |
+| **Span mixing attack** | Mix pub/wit columns to forge | Lean CRS + linear circuit design |
 | **Subgroup attack** | Inject small-order elements | Explicit subgroup membership checks |
 
 ## 7. Advantages and Limitations
@@ -322,8 +324,7 @@ Properties:
 
 1. **Groth16-Specific:** Construction tailored to Groth16; different SNARKs need different PPEs
 2. **Matrix Size:** Γ must be at least m × n where m ≥ rank of PPE; typically m = O(√n)
-3. **Verifier Overhead:** Four verification checks (Groth16, DLREP, Tie, PPE) vs. one for traditional GS
-4. **Fiat-Shamir Challenges:** Tie proof aggregation should use proper FS challenge vector (minor implementation detail)
+3. **Verifier Overhead:** Two verification checks (Groth16, PPE) vs. one for traditional GS
 
 ## 8. Conclusion
 

@@ -75,12 +75,6 @@ test = false
 bench = false
 
 [[bin]]
-name = "gs_linear_recomb_dlrep"
-path = "fuzz_targets/gs_linear_recomb_dlrep.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "gs_random_recomb_budget"
 path = "fuzz_targets/gs_random_recomb_budget.rs"
 test = false

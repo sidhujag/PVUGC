@@ -24,15 +24,9 @@ use arkworks_groth16::poseidon_fr381_t3::{
     absorb_bytes_native_fr, absorb_bytes_var_fr, POSEIDON381_PARAMS_T3_V1,
 };
 use arkworks_groth16::ppe::PvugcVk;
-use arkworks_groth16::{ColumnArms, OneSidedCommitments, OneSidedPvugc, SimpleCoeffRecorder};
+use arkworks_groth16::{ColumnArms, OneSidedPvugc};
 
 const DEFAULT_PACKAGE_PATH: &str = "bounty_package.bin";
-
-// === Shared helpers (mirroring tests/test_btc_kdf.rs) =======================
-
-fn commitments_from_recorder(recorder: &SimpleCoeffRecorder<E>) -> OneSidedCommitments<E> {
-    recorder.build_commitments()
-}
 
 /// Serialize bounty package (address, statement hash, proving key, column arms, ciphertexts, tags) to disk.
 fn write_bounty_package(
@@ -317,16 +311,13 @@ fn decap(passphrase: &str, ctx: &str, path: PathBuf) {
     };
 
     let mut rng = OsRng;
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
+    let (proof, commitments, _assignment, _s) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
     let ok = Groth16::<E, LibsnarkReduction>::verify(&vk, &[h_pkg], &proof).unwrap();
     if !ok {
         eprintln!("DECAP: Groth16 preimage proof verification failed");
         std::process::exit(1);
     }
-    let commitments = commitments_from_recorder(&recorder);
 
     // Decap: derive each K via OneSidedPvugc::decapsulate and recover the shares
     let mut recovered = Scalar::ZERO;

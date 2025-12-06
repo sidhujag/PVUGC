@@ -205,12 +205,16 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
                 power_of_two = power_of_two + power_of_two;
             }
             
-            // Enforce: 1 * x_pub = reconstructed
-            // This puts x_pub in B (for span separation) AND binds it to input_var
-            let mut lc_b = LinearCombination::<OuterScalar<C>>::zero();
-            lc_b += (OuterScalar::<C>::one(), *x_pub);
+            // Enforce: 1 * reconstructed = x_pub
+            // This puts x_pub in C (output) instead of B (multiplicative)
+            // Benefits:
+            //   - Eliminates (wit, pub) pairs in h_query_wit (v_pub = 0 now)
+            //   - Cleaner security argument (no public in B-side)
+            // Public input binding is now through W-polynomial (w_pub ≠ 0)
+            let mut lc_c = LinearCombination::<OuterScalar<C>>::zero();
+            lc_c += (OuterScalar::<C>::one(), *x_pub);
             
-            cs.enforce_constraint(one_lc.clone(), lc_b, reconstructed_lc)?;
+            cs.enforce_constraint(one_lc.clone(), reconstructed_lc, lc_c)?;
         }
         
         // Step 4: Use witness input_var in verifier (now bound to x_pub!)
@@ -421,7 +425,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_pvugc_on_outer_proof_e2e() {
-        use crate::coeff_recorder::SimpleCoeffRecorder;
+        use crate::decap::build_commitments;
         use crate::prover_lean::prove_lean_with_randomizers;
         use crate::stark::test_utils::{build_vdf_stark_instance, get_or_init_inner_crs_keys};
         use ark_snark::SNARK;
@@ -496,15 +500,16 @@ mod tests {
             runtime_inner_proof.clone(),
         );
 
-        let mut recorder = SimpleCoeffRecorder::<<Cycle as RecursionCycle>::OuterE>::new();
-        recorder.set_num_instance_variables(vk_outer.gamma_abc_g1.len());
         let outer_start = Instant::now();
         let r_rand = OuterScalar::<Cycle>::rand(&mut rng);
         let s_rand = OuterScalar::<Cycle>::rand(&mut rng);
         let (proof_outer, full_assignment) =
             prove_lean_with_randomizers(&lean_pk, outer_circuit, r_rand, s_rand)
                 .expect("lean prover failed");
-        recorder.record_from_assignment(&full_assignment, &proof_outer.a, &proof_outer.c, s_rand);
+        let num_instance = vk_outer.gamma_abc_g1.len();
+        let gs_commitments = build_commitments::<<Cycle as RecursionCycle>::OuterE>(
+            &proof_outer.a, &proof_outer.c, &s_rand, &full_assignment, num_instance
+        );
         eprintln!(
             "[timing:{}] outer Lean proof {:?}",
             Cycle::name(),
@@ -549,7 +554,6 @@ mod tests {
 
         if run_decap {
             let decap_start = Instant::now();
-            let gs_commitments = recorder.build_commitments();
             let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
             eprintln!(
                 "[timing:{}] decap {:?}",

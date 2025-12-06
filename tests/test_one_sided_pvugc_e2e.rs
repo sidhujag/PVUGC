@@ -12,7 +12,7 @@ use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::arming::ColumnBases;
-use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
+use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ct::serialize_gt;
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::secp256k1::{compress_secp_point, scalar_bytes_to_point};
@@ -227,19 +227,12 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // === SPEND TIME - PROOF 1 ===
 
-    // Use coefficient recorder to capture real b_j via HOOKED prover
-    let mut recorder1 = SimpleCoeffRecorder::<E>::new();
-    recorder1.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof1 =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder1)
-            .unwrap();
+    // Create proof and commitments
+    let (proof1, commitments1, _assignment1, _s1) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
 
-    // Use API to build commitments and bundle
-    let commitments1 = recorder1.build_commitments();
     let bundle1 = PvugcBundle {
         groth16_proof: proof1.clone(),
-        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
-        dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
 
@@ -261,18 +254,11 @@ fn test_one_sided_pvugc_proof_agnostic() {
 
     // === SPEND TIME - PROOF 2 ===
 
-    let mut recorder2 = SimpleCoeffRecorder::<E>::new();
-    recorder2.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof2 =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder2)
-            .unwrap();
+    let (proof2, commitments2, _assignment2, _s2) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
 
-    // Use API to build commitments and bundle
-    let commitments2 = recorder2.build_commitments();
     let bundle2 = PvugcBundle {
         groth16_proof: proof2.clone(),
-        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
-        dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
 
@@ -313,18 +299,11 @@ fn test_one_sided_pvugc_proof_agnostic() {
     );
 
     // Generate proof for vault 2
-    let mut recorder_vault2 = SimpleCoeffRecorder::<E>::new();
-    recorder_vault2.set_num_instance_variables(vk2.gamma_abc_g1.len());
-    let proof_vault2 =
-        Groth16::<E>::create_random_proof_with_hook(circuit2, &pk2, &mut rng, &mut recorder_vault2)
-            .unwrap();
+    let (proof_vault2, commitments_vault2, _assignment_v2, _s_v2) = 
+        prove_and_build_commitments(&pk2, circuit2, &mut rng).unwrap();
 
-    // Build commitments/bundle for vault 2
-    let commitments_vault2 = recorder_vault2.build_commitments();
     let bundle_vault2 = PvugcBundle {
         groth16_proof: proof_vault2.clone(),
-        dlrep_b: recorder_vault2.create_dlrep_b(&pvugc_vk2, &vk2, &vault2_utxo, &mut rng),
-        dlrep_ties: recorder_vault2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments_vault2.clone(),
     };
 
@@ -391,15 +370,10 @@ fn test_delta_sign_sanity() {
     let (_bases_cols, col_arms, _r, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &vault_utxo, &rho).expect("setup_and_arm");
 
-    // Hooked proof and commitments
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
-            .unwrap();
+    // Create proof and commitments
+    let (proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
     assert!(Groth16::<E>::verify(&vk, &vault_utxo, &proof).unwrap());
-
-    let commitments = recorder.build_commitments();
 
     // Correct sign → K_good == R^ρ
     let k_good = OneSidedPvugc::decapsulate(&commitments, &col_arms).expect("decapsulate");
@@ -511,34 +485,22 @@ fn test_witness_independence() {
     let (_, col_arms, _, k_expected) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_x, &rho).expect("setup_and_arm");
 
-    let mut recorder1 = SimpleCoeffRecorder::<E>::new();
-    recorder1.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof1 =
-        Groth16::<E>::create_random_proof_with_hook(circuit1, &pk, &mut rng, &mut recorder1)
-            .unwrap();
+    let (proof1, commitments1, _assignment1, _s1) = 
+        prove_and_build_commitments(&pk, circuit1, &mut rng).unwrap();
 
-    let commitments1 = recorder1.build_commitments();
     let bundle1 = PvugcBundle {
         groth16_proof: proof1,
-        dlrep_b: recorder1.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
-        dlrep_ties: recorder1.create_dlrep_ties(&mut rng),
         gs_commitments: commitments1.clone(),
     };
 
     assert!(OneSidedPvugc::verify(&bundle1, &pvugc_vk, &vk, &public_x));
     let k1 = OneSidedPvugc::decapsulate(&commitments1, &col_arms).expect("decapsulate");
 
-    let mut recorder2 = SimpleCoeffRecorder::<E>::new();
-    recorder2.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof2 =
-        Groth16::<E>::create_random_proof_with_hook(circuit2, &pk, &mut rng, &mut recorder2)
-            .unwrap();
+    let (proof2, commitments2, _assignment2, _s2) = 
+        prove_and_build_commitments(&pk, circuit2, &mut rng).unwrap();
 
-    let commitments2 = recorder2.build_commitments();
     let bundle2 = PvugcBundle {
         groth16_proof: proof2,
-        dlrep_b: recorder2.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
-        dlrep_ties: recorder2.create_dlrep_ties(&mut rng),
         gs_commitments: commitments2.clone(),
     };
 
@@ -716,17 +678,11 @@ fn test_phase1_integration() {
     // PART G: Proof Generation & Key Extraction (Existing PVUGC + Context Binding)
     // ==============================================================================
 
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
-            .unwrap();
+    let (proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
 
-    let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof.clone(),
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement_x, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
 

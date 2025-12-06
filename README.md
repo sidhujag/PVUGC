@@ -43,9 +43,8 @@ where C_ℓ are commitments to proof elements, U_ℓ are aggregations of VK base
 
 **Phase 2: Online Proving (Spend)**
 - PROVER generates valid Groth16 proof π
-- Creates proof elements commitments with randomness
-- Generates Schnorr proofs demonstrating coefficient consistency
-- Publishes complete attestation
+- Constructs GS commitments from proof elements
+- Publishes proof bundle (Groth16 proof + commitments)
 
 **Phase 3: Key Extraction (Runtime)**
 - DECAPPER receives attestation, validates all proofs
@@ -83,13 +82,11 @@ src/
   ├── arming.rs              # Base aggregation and arming logic
   ├── ppe.rs                 # PPE target computation from Groth16 VK
   ├── api.rs                 # High-level verification and extraction API
-  ├── decap.rs               # Decapsulation algorithm
-  ├── dlrep.rs               # Schnorr proofs for coefficient consistency
-  ├── coeff_recorder.rs      # Hook for coefficient capture in Groth16 prover
+  ├── decap.rs               # Commitment building and decapsulation
   ├── poce.rs                # Proof of consistent encryption across arms
   └── ctx.rs                 # Context binding utilities
 
-ark-groth16-pvugc/           # Modified Groth16 implementation with coefficient hooks
+ark-groth16-pvugc/           # Standard Groth16 implementation
 ```
 
 ### 5.2 Build and Test
@@ -128,8 +125,6 @@ let (_bases, arms, _r, _k) = OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &publi
 // Prover generates complete attestation
 let bundle = PvugcBundle {
     groth16_proof,
-    dlrep_b,
-    dlrep_tie,
     gs_commitments,
 };
 
@@ -159,16 +154,16 @@ For detailed security analysis including attack vectors and mitigations, see [TE
 
 ## 8. Current State
 
-This is an experimental research implementation. Aspects include:
+This is an experimental research implementation. Key features:
 
 - Complete one-sided PVUGC construction with all verification checks
 - End-to-end tests demonstrating proof-agnostic extraction
 - Security property tests validating statement-dependence
-- Hook infrastructure for capturing coefficients from Groth16 prover
+- Simple commitment building from proof elements
+- Lean CRS architecture (no Powers of Tau)
 
 Known limitations and areas for future work:
 
-- Tie proof aggregation should use explicit Fiat-Shamir challenge vector
 - Extension to other SNARK schemes requires per-scheme PPE derivation
 - Performance optimization of pairing operations
 

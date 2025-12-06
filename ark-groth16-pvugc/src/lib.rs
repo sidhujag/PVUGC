@@ -34,9 +34,6 @@ pub mod prover;
 /// Verify proofs for the Groth16 zkSNARK construction.
 pub mod verifier;
 
-/// PVUGC coefficient hook for one-sided GS
-pub mod pvugc_hook;
-
 /// Constraints for the Groth16 verifier.
 #[cfg(feature = "r1cs")]
 pub mod constraints;
@@ -56,9 +53,6 @@ use r1cs_to_qap::{LibsnarkReduction, R1CSToQAP};
 pub struct Groth16<E: Pairing, QAP: R1CSToQAP = LibsnarkReduction> {
     _p: PhantomData<(E, QAP)>,
 }
-
-// Re-export pvugc_hook for users
-pub use pvugc_hook::{NoOpHook, PvugcCoefficientHook};
 
 impl<E: Pairing, QAP: R1CSToQAP> SNARK<E::ScalarField> for Groth16<E, QAP> {
     type ProvingKey = ProvingKey<E>;

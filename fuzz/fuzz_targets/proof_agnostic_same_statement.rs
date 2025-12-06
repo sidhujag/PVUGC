@@ -17,7 +17,8 @@ use std::sync::Mutex;
 use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::api::{enforce_public_inputs_are_outputs, OneSidedPvugc};
-use arkworks_groth16::ppe::{PvugcVk};
+use arkworks_groth16::ppe::PvugcVk;
+use arkworks_groth16::decap::{OneSidedCommitments, prove_and_build_commitments};
 
 // Circuit: enforce x = y^2
 #[derive(Clone)]
@@ -83,26 +84,12 @@ fuzz_target!(|data: &[u8]| {
     let mut rng1 = ark_std::rand::rngs::StdRng::seed_from_u64(seed1);
     let mut rng2 = ark_std::rand::rngs::StdRng::seed_from_u64(seed2 ^ 0x9e3779b97f4a7c15);
 
-    // Build two independent proofs with hook to record coefficients
-    let mut rec1 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-    rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _proof1 = Groth16::<E>::create_random_proof_with_hook(
-        SqCircuit { x: Some(x), y: Some(y) },
-        &pk,
-        &mut rng1,
-        &mut rec1,
-    ).unwrap();
-    let commitments1: arkworks_groth16::decap::OneSidedCommitments<E> = rec1.build_commitments();
+    // Build two independent proofs
+    let (_proof1, commitments1, _assignment1, _s1) = 
+        prove_and_build_commitments(&pk, SqCircuit { x: Some(x), y: Some(y) }, &mut rng1).unwrap();
 
-    let mut rec2 = arkworks_groth16::coeff_recorder::SimpleCoeffRecorder::<E>::new();
-    rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _proof2 = Groth16::<E>::create_random_proof_with_hook(
-        SqCircuit { x: Some(x), y: Some(y) },
-        &pk,
-        &mut rng2,
-        &mut rec2,
-    ).unwrap();
-    let commitments2: arkworks_groth16::decap::OneSidedCommitments<E> = rec2.build_commitments();
+    let (_proof2, commitments2, _assignment2, _s2) = 
+        prove_and_build_commitments(&pk, SqCircuit { x: Some(x), y: Some(y) }, &mut rng2).unwrap();
 
     // Decap both; they must be identical and equal R^ρ
     let k1 = OneSidedPvugc::decapsulate::<E>(&commitments1, &col_arms).expect("decapsulate");
@@ -116,5 +103,3 @@ fuzz_target!(|data: &[u8]| {
         panic!("Decap mismatch: K != R^rho for same statement");
     }
 });
-
-

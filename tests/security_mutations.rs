@@ -1,9 +1,9 @@
-//! Targeted mutation checks around `OneSidedPvugc::verify`.
-//! This exercises a few structured tamperings of otherwise-valid bundles
+//! Targeted mutation checks around `OneSidedPvugc` APIs.
+//! This exercises structured tamperings of otherwise-valid bundles
 //! to ensure the verifier rejects manipulated artifacts.
 
 use ark_bls12_381::{Bls12_381 as E, Fr};
-use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
+use ark_ec::{pairing::Pairing, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_serialize::CanonicalSerialize;
@@ -17,9 +17,9 @@ use sha2::{Digest, Sha256};
 
 use arkworks_groth16::{
     api::enforce_public_inputs_are_outputs,
-    coeff_recorder::{BCoefficients, SimpleCoeffRecorder},
     ct::{serialize_gt, AdCore, DemP2},
     ctx::PvugcContextBuilder,
+    decap::prove_and_build_commitments,
     ppe::PvugcVk,
     secp256k1::{compress_secp_point, scalar_bytes_to_point},
     ColumnArmingAttestation, OneSidedPvugc, PvugcBundle,
@@ -53,7 +53,6 @@ struct Fixture {
     pvugc_vk: PvugcVk<PairingE>,
     vk: ark_groth16::VerifyingKey<PairingE>,
     public_inputs: Vec<Fr>,
-    coeffs: BCoefficients<Fr>,
     column_arms: arkworks_groth16::arming::ColumnArms<PairingE>,
     honest_key: ark_ec::pairing::PairingOutput<PairingE>,
     bases: arkworks_groth16::arming::ColumnBases<PairingE>,
@@ -69,8 +68,6 @@ struct Fixture {
 fn clone_bundle(input: &PvugcBundle<PairingE>) -> PvugcBundle<PairingE> {
     PvugcBundle {
         groth16_proof: input.groth16_proof.clone(),
-        dlrep_b: input.dlrep_b.clone(),
-        dlrep_ties: input.dlrep_ties.clone(),
         gs_commitments: arkworks_groth16::OneSidedCommitments {
             x_b_cols: input.gs_commitments.x_b_cols.clone(),
             theta: input.gs_commitments.theta.clone(),
@@ -104,24 +101,25 @@ fn build_fixture(seed: u64) -> Fixture {
     let (pk, vk) = Groth16::<PairingE>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
     let public_inputs = vec![Fr::from(25u64)];
 
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<PairingE as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     let rho = Fr::rand(&mut rng);
     let (bases, column_arms, _r, honest_key) =
         OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho).unwrap();
 
-    let mut recorder = SimpleCoeffRecorder::<PairingE>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<PairingE>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder)
-            .unwrap();
-
-    let commitments = recorder.build_commitments();
+    let (proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
     let s_i = Fr::rand(&mut rng);
     let t_i = (<PairingE as Pairing>::G1::generator() * s_i).into_affine();
     let mut secp_scalar = [0u8; 32];
@@ -198,40 +196,10 @@ fn build_fixture(seed: u64) -> Fixture {
     )
     .expect("column attestation");
 
-    let coeffs = recorder
-        .get_coefficients()
-        .expect("coefficients must be recorded");
-
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_inputs, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
-    let mut actual_public_leg = pvugc_vk.beta_g2.into_group();
-    actual_public_leg += pvugc_vk.b_g2_query[0].into_group();
-    for (idx, coeff) in coeffs.b.iter().take(public_inputs.len()).enumerate() {
-        let base = pvugc_vk.b_g2_query[1 + idx];
-        actual_public_leg += base.into_group() * coeff;
-    }
-    assert_eq!(
-        actual_public_leg.into_affine(),
-        bases.y_cols[0],
-        "column bases public leg mismatch"
-    );
-
-    // Sanity: reconstruct B directly from recorded coefficients
-    let mut reconstructed_b = pvugc_vk.beta_g2.into_group();
-    reconstructed_b += pvugc_vk.b_g2_query[0].into_group(); // implicit 1-wire
-    for (coeff, base) in coeffs.b.iter().zip(pvugc_vk.b_g2_query.iter().skip(1)) {
-        reconstructed_b += base.into_group() * coeff;
-    }
-    reconstructed_b += pvugc_vk.delta_g2.into_group() * coeffs.s;
-    assert_eq!(
-        reconstructed_b.into_affine(),
-        bundle.groth16_proof.b,
-        "hooked coefficients failed to reassemble B"
-    );
 
     Fixture {
         bundle,
@@ -248,7 +216,6 @@ fn build_fixture(seed: u64) -> Fixture {
         ciphertext,
         tau,
         column_attestation,
-        coeffs,
     }
 }
 
@@ -263,8 +230,6 @@ fn verify_rejects_mutated_bundles() {
             public_inputs,
             column_arms,
             honest_key,
-            bases,
-            coeffs,
             ..
         } = build_fixture(seed);
 
@@ -272,52 +237,7 @@ fn verify_rejects_mutated_bundles() {
             Groth16::<PairingE>::verify(&vk, &public_inputs, &bundle.groth16_proof).unwrap(),
             "baseline Groth16 proof must verify"
         );
-        let public_leg = bases
-            .y_cols
-            .first()
-            .expect("column bases must include public leg");
-        let witness_cols = &bases.y_cols[1..];
-        let b_prime = (bundle.groth16_proof.b.into_group() - public_leg.into_group()).into_affine();
-        let mut reconstructed = pvugc_vk.delta_g2.into_group() * coeffs.s;
-        let public_count = vk.gamma_abc_g1.len().saturating_sub(1);
-        for (coeff, base) in coeffs.b.iter().skip(public_count).zip(witness_cols.iter()) {
-            reconstructed += base.into_group() * coeff;
-        }
-        assert_eq!(
-            reconstructed.into_affine(),
-            b_prime,
-            "reconstructed B' mismatch"
-        );
-        assert_eq!(
-            bundle.dlrep_b.responses.len(),
-            witness_cols.len() + 1,
-            "dlrep response length mismatch"
-        );
-        assert!(
-            arkworks_groth16::dlrep::verify_b_msm::<PairingE>(
-                b_prime,
-                witness_cols,
-                pvugc_vk.delta_g2,
-                &bundle.dlrep_b
-            ),
-            "baseline DLREP_B must verify"
-        );
-        let mut x_cols = Vec::new();
-        for (i, (x0, _)) in bundle.gs_commitments.x_b_cols.iter().enumerate() {
-            if i == 0 {
-                continue;
-            }
-            x_cols.push(*x0);
-        }
-        assert!(
-            arkworks_groth16::dlrep::verify_ties_per_column::<PairingE>(
-                bundle.groth16_proof.a,
-                &x_cols,
-                &bundle.dlrep_ties,
-                bundle.dlrep_b.commitment
-            ),
-            "baseline tie proof must verify"
-        );
+        
         let baseline_ok = OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_inputs);
         assert!(
             baseline_ok,
@@ -358,22 +278,6 @@ fn verify_rejects_mutated_bundles() {
                 Box::new(|b, r| {
                     if let Some(theta) = b.gs_commitments.theta.get_mut(0) {
                         theta.1 = (<PairingE as Pairing>::G1::rand(r)).into_affine();
-                    }
-                }),
-            ),
-            (
-                "alter_dlrep_response",
-                Box::new(|b, r| {
-                    if let Some(resp) = b.dlrep_b.responses.get_mut(0) {
-                        *resp += <PairingE as Pairing>::ScalarField::rand(r);
-                    }
-                }),
-            ),
-            (
-                "alter_tie_response",
-                Box::new(|b, r| {
-                    if let Some(resp) = b.dlrep_ties.responses.get_mut(0) {
-                        *resp += <PairingE as Pairing>::ScalarField::rand(r);
                     }
                 }),
             ),

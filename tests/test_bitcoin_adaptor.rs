@@ -19,8 +19,8 @@
 //!     final signature.
 //!
 //! The test also exercises adversarial scenarios: missing shares block
-//! completion, tampering with the ciphertext is detected by the PoCE-B key
-//! commitment, and proofs for different statements yield unrelated keys and
+//! completion, tampering with the ciphertext is detected by the DEM tag
+//! verification, and proofs for different statements yield unrelated keys and
 //! therefore cannot complete the spend.
 
 use ark_bls12_381::{Bls12_381, Fr};
@@ -35,12 +35,12 @@ use ark_snark::SNARK;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
 
 use arkworks_groth16::api::enforce_public_inputs_are_outputs;
-use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
+use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ct::{serialize_gt, AdCore, DemP2};
 use arkworks_groth16::ppe::PvugcVk;
 use arkworks_groth16::{
     arming::{arm_columns, ColumnBases},
-    verify_adaptor_ve, verify_poce_column, OneSidedCommitments, OneSidedPvugc, PvugcBundle,
+    verify_adaptor_ve, verify_poce_column, OneSidedPvugc, PvugcBundle,
 };
 
 use arkworks_groth16::bitcoin::{
@@ -493,11 +493,17 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     };
 
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // === Phase A: pre-arming and registration ===
@@ -988,16 +994,10 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
     assert!(policy_rejects, "unregistered deposit must be rejected");
 
     // === Phase C: proof, decapsulation and spend ===
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
-            .unwrap();
-    let commitments = commitments_from_recorder(&recorder);
+    let (proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
     let bundle = PvugcBundle {
         groth16_proof: proof.clone(),
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement_x, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement_x));
@@ -1215,16 +1215,8 @@ fn test_pvugc_bitcoin_adaptor_end_to_end() {
         x: Some(wrong_public_input),
         y: Some(wrong_witness),
     };
-    let mut wrong_recorder = SimpleCoeffRecorder::<E>::new();
-    wrong_recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _wrong_proof = Groth16::<E>::create_random_proof_with_hook(
-        wrong_circuit,
-        &pk,
-        &mut rng,
-        &mut wrong_recorder,
-    )
-    .unwrap();
-    let wrong_commitments = commitments_from_recorder(&wrong_recorder);
+    let (_wrong_proof, wrong_commitments, _wrong_assignment, _wrong_s) = 
+        prove_and_build_commitments(&pk, wrong_circuit, &mut rng).unwrap();
     for (idx, operator) in operator_armings.iter().enumerate() {
         let wrong_key =
             OneSidedPvugc::decapsulate(&wrong_commitments, &operator.column_arms).unwrap();
@@ -1273,12 +1265,6 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-fn commitments_from_recorder<Ep: Pairing>(
-    recorder: &SimpleCoeffRecorder<Ep>,
-) -> OneSidedCommitments<Ep> {
-    recorder.build_commitments()
-}
-
 fn bip340_single_sign(participant: &Participant, msg: &[u8], rng: &mut StdRng) -> [u8; 64] {
     let nonce = Nonce::random(rng);
     let mut r_affine = AffinePoint::from(nonce.public);
@@ -1319,11 +1305,17 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
         y: Some(witness),
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // Shared column bases for PoCE-A
@@ -1470,7 +1462,7 @@ fn test_pvugc_bitcoin_adaptor_armtime_rejects_invalid_pok_or_poce() {
 #[test]
 fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
     // This test intentionally skips arm-time gating to demonstrate late cryptographic failure
-    // (PoCE-B rejection) when an operator publishes mismatched arms vs ciphertext key.
+    // (DEM tag rejection) when an operator publishes mismatched arms vs ciphertext key.
     let mut rng = StdRng::seed_from_u64(7777);
 
     // Proving system setup
@@ -1481,20 +1473,22 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
         y: Some(witness),
     };
     let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len() = public_inputs.len() + 1
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
     let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
         vk.beta_g2,
         vk.delta_g2,
         pk.b_g2_query.clone(),
-        vec![],
+        t_dummy,
     );
 
     // Build bases and a valid commitments bundle for the statement
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut recorder)
-            .unwrap();
-    let commitments = commitments_from_recorder(&recorder);
+    let (_proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
     let statement_x = vec![public_input];
     let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).expect("bases");
     assert_eq!(commitments.x_b_cols.len(), bases.y_cols.len());
@@ -1540,7 +1534,7 @@ fn test_pvugc_bitcoin_adaptor_late_fail_without_gating() {
 
     // At decap-time, the derived key from wrong arms is K_wrong = R^{rho_wrong}
     let k_wrong = OneSidedPvugc::decapsulate(&commitments, &col_arms_wrong).expect("decap");
-    // PoCE-B key-commit must reject because ciphertext/tag were made with K_right, not K_wrong
+    // DEM tag verification must reject because ciphertext/tag were made with K_right, not K_wrong
     assert!(!OneSidedPvugc::verify_key_commitment_dem(
         &k_wrong,
         &ad_bytes,

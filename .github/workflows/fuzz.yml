@@ -34,7 +34,6 @@ jobs:
             cross_circuit_k_difference
             gt_span_small_coeff
             gs_malleation_binding
-            gs_linear_recomb_dlrep
             gs_random_recomb_budget
           )
           PER_TARGET=600   # 10 minutes per target

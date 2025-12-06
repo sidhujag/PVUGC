@@ -15,7 +15,7 @@ use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 
 use arkworks_groth16::api::{enforce_public_inputs_are_outputs, OneSidedPvugc, PvugcBundle};
-use arkworks_groth16::coeff_recorder::SimpleCoeffRecorder;
+use arkworks_groth16::decap::prove_and_build_commitments;
 use arkworks_groth16::ppe::PvugcVk;
 
 #[derive(Clone)]
@@ -65,16 +65,12 @@ fuzz_target!(|data: &[u8]| {
     let statement = vec![x];
 
     // Make one valid proof and commitments
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof = Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
-    let commitments = recorder.build_commitments();
+    let (proof, commitments, _assignment, _s) = 
+        prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
 
     // Baseline must verify true
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &statement, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &statement));
@@ -114,11 +110,9 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Reuse same proofs (dlrep proofs bind to original structure). Verifier should reject.
+    // Verifier should reject modified commitments
     let bundle_bad = PvugcBundle {
         groth16_proof: bundle.groth16_proof,
-        dlrep_b: bundle.dlrep_b,
-        dlrep_ties: bundle.dlrep_ties,
         gs_commitments: mal,
     };
     if bundle_bad.gs_commitments.x_b_cols == commitments.x_b_cols
@@ -132,5 +126,3 @@ fuzz_target!(|data: &[u8]| {
         panic!("Malleation accepted by verifier");
     }
 });
-
-
