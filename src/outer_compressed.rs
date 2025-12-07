@@ -222,10 +222,10 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             Ok(self.proof_inner)
         })?;
 
-       /* let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
+        let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;*/
+        ok.enforce_equal(&Boolean::TRUE)?;
         Ok(())
     }
 }
@@ -541,10 +541,6 @@ mod tests {
             Cycle::name()
         );
 
-        let run_decap = std::env::var("PVUGC_RUN_DECAP")
-            .map(|flag| flag == "1" || flag.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
         let bases = crate::pvugc_outer::build_column_bases_outer_for::<Cycle>(
             &pvugc_vk,
             &vk_outer,
@@ -552,30 +548,23 @@ mod tests {
         );
         let col_arms = crate::pvugc_outer::arm_columns_outer_for::<Cycle>(&bases, &rho);
 
-        if run_decap {
-            let decap_start = Instant::now();
-            let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
-            eprintln!(
-                "[timing:{}] decap {:?}",
-                Cycle::name(),
-                decap_start.elapsed()
-            );
+        let decap_start = Instant::now();
+        let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
+        eprintln!(
+            "[timing:{}] decap {:?}",
+            Cycle::name(),
+            decap_start.elapsed()
+        );
 
-            let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
-                &*vk_outer, &pvugc_vk, &public_x,
-            );
-            let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
+        let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
+            &*vk_outer, &pvugc_vk, &public_x,
+        );
+        let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
 
-            assert!(
-                crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
-                "Decapsulated K doesn't match R^ρ!"
-            );
-        } else {
-            eprintln!(
-                "[timing:{}] decap skipped (set PVUGC_RUN_DECAP=1 to enable)",
-                Cycle::name(),
-            );
-        }
+        assert!(
+            crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
+            "Decapsulated K doesn't match R^ρ!"
+        );
     }
 
     struct GlobalFixtureAdapter<C: RecursionCycle> {

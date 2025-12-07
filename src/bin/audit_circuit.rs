@@ -432,7 +432,7 @@ fn run_audit(subject: &dyn AuditSubject) {
     // === DECISIVE SPAN MEMBERSHIP TEST ===
     // Verify Q_const ∉ span(H_{ij})
     // This is the "gold standard" check for quotient reachability
-    let span_test_passed = verify_public_only_in_c_and_w_span_separated(&extractor, num_pub, num_wit);
+    verify_public_only_in_c_and_w_span_separated(&extractor, num_pub, num_wit);
 
     // Additional guard: ensure no public column appears in both A and B on the same row
     let no_pub_ab_overlap = check_public_ab_overlap(&extractor, num_pub);

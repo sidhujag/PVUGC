@@ -5,8 +5,8 @@
 
 use crate::arming::{ColumnArms, ColumnBases};
 use crate::outer_compressed::{
-    fr_inner_to_outer_for, DefaultCycle, InnerFr, InnerProof, InnerScalar, InnerVk, OuterCircuit,
-    OuterE, OuterFr, OuterScalar, RecursionCycle,
+    fr_inner_to_outer_for, InnerProof, InnerScalar, InnerVk, OuterCircuit,
+    OuterScalar, RecursionCycle,
 };
 use crate::ppe::PvugcVk;
 use crate::prover_lean::LeanProvingKey;
@@ -81,8 +81,7 @@ where
     );
 
     // Sanitize cycle name for filename and derive a hash of the verifying key (circuit)
-    // so caches from different circuits never collide. The hash is based only on the
-    // circuit structure (VK), not on sample statements.
+    // so caches from different circuits never collide.
     let safe_name = C::name().replace('/', "_").replace(' ', "_");
     let cache_path = format!("outer_lean_setup_pk_vk_{}.bin", safe_name);
 
@@ -169,17 +168,6 @@ where
     build_pvugc_setup_from_pk_for::<C, F>(pk_outer, vk_inner, inner_proof_generator).0
 }
 
-pub fn build_pvugc_vk_outer_from_pk<F>(
-    pk_outer: &Groth16PK<OuterE>,
-    vk_inner: &InnerVk<DefaultCycle>,
-    inner_proof_generator: F,
-) -> PvugcVk<OuterE>
-where
-    F: Fn(&[InnerScalar<DefaultCycle>]) -> InnerProof<DefaultCycle>,
-{
-    build_pvugc_vk_outer_from_pk_for::<DefaultCycle, F>(pk_outer, vk_inner, inner_proof_generator)
-}
-
 pub fn build_column_bases_outer_for<C: RecursionCycle>(
     pvugc_vk: &PvugcVk<C::OuterE>,
     vk_outer: &Groth16VK<C::OuterE>,
@@ -187,14 +175,6 @@ pub fn build_column_bases_outer_for<C: RecursionCycle>(
 ) -> ColumnBases<C::OuterE> {
     crate::api::OneSidedPvugc::build_column_bases(pvugc_vk, vk_outer, public_inputs_outer)
         .expect("outer statement should satisfy PVUGC invariants")
-}
-
-pub fn build_column_bases_outer(
-    pvugc_vk: &PvugcVk<OuterE>,
-    vk_outer: &Groth16VK<OuterE>,
-    public_inputs_outer: &[OuterFr],
-) -> ColumnBases<OuterE> {
-    build_column_bases_outer_for::<DefaultCycle>(pvugc_vk, vk_outer, public_inputs_outer)
 }
 
 /// Result of computing witness bases
@@ -1019,25 +999,12 @@ pub fn invert_matrix<C: RecursionCycle>(
     inv
 }
 
-
-pub fn compute_target_outer(
-    vk_outer: &Groth16VK<OuterE>,
-    pvugc_vk: &PvugcVk<OuterE>,
-    public_inputs_inner: &[InnerFr],
-) -> PairingOutput<OuterE> {
-    compute_target_outer_for::<DefaultCycle>(vk_outer, pvugc_vk, public_inputs_inner)
-}
-
 pub fn compute_r_to_rho_outer_for<C: RecursionCycle>(
     r: &PairingOutput<C::OuterE>,
     rho: &OuterScalar<C>,
 ) -> PairingOutput<C::OuterE> {
     let r_to_rho = r.0.pow(&rho.into_bigint());
     PairingOutput(r_to_rho)
-}
-
-pub fn compute_r_to_rho_outer(r: &PairingOutput<OuterE>, rho: &OuterFr) -> PairingOutput<OuterE> {
-    compute_r_to_rho_outer_for::<DefaultCycle>(r, rho)
 }
 
 pub fn compute_target_outer_for<C: RecursionCycle>(
@@ -1059,8 +1026,4 @@ pub fn arm_columns_outer_for<C: RecursionCycle>(
     rho: &OuterScalar<C>,
 ) -> ColumnArms<C::OuterE> {
     crate::arming::arm_columns(bases, rho).expect("arm_columns failed")
-}
-
-pub fn arm_columns_outer(bases: &ColumnBases<OuterE>, rho: &OuterFr) -> ColumnArms<OuterE> {
-    arm_columns_outer_for::<DefaultCycle>(bases, rho)
 }
