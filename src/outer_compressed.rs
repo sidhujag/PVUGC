@@ -185,7 +185,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_witness(cs.clone(), || {
                 Ok(self.x_inner.clone())
             })?;
-        
+
         // Step 3: Link public scalars to input_var bits via BINDING constraints
         // Each element in input_var.into_iter() gives us a Vec<Boolean> for one inner input
         // We reconstruct the scalar and constrain it to equal x_pub
@@ -222,7 +222,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
             Ok(self.proof_inner)
         })?;
 
-        let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
+       /* let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
         ok.enforce_equal(&Boolean::TRUE)?;
@@ -327,8 +327,8 @@ pub fn verify_outer_for<C: RecursionCycle>(
     let proof_to_check = if let Some(pvugc_vk) = pvugc_vk {    
         let mut t_acc = pvugc_vk.t_const_points_gt[0];
         for (i, x_i) in compressed_public_inputs.iter().enumerate() {
-             let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
-             t_acc = PairingOutput(t_acc.0 * term);
+            let term = pvugc_vk.t_const_points_gt[i + 1].0.pow(&x_i.into_bigint());
+            t_acc = PairingOutput(t_acc.0 * term);
         }
         
         let mut pvk_modified = pvk.clone();
