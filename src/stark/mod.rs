@@ -39,6 +39,7 @@ mod tests {
     mod stark_verifier_comprehensive;
 
     pub(crate) mod helpers {
+        pub(crate) mod cubic_fib;
         pub(crate) mod rpo_compatibility;
         pub(crate) mod simple_vdf;
     }

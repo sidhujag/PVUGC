@@ -21,6 +21,7 @@ use winterfell::{Air, Proof, Trace};
 use super::stark_proof_parser::{
     derive_query_positions, parse_proof_for_circuit_with_query_positions,
 };
+use super::tests::helpers::cubic_fib::{generate_test_cubic_fib_proof_rpo, CubicFibAir};
 use super::tests::helpers::simple_vdf::{generate_test_vdf_proof_rpo, VdfAir};
 use super::{AirParams, FullStarkVerifierCircuit, StarkInnerFr};
 use crate::stark::gadgets::fri::FriTerminalKind;
@@ -88,13 +89,23 @@ impl VdfStarkInstance {
 pub fn build_vdf_stark_instance(start_value: u64, steps: usize) -> VdfStarkInstance {
     let start = BaseElement::new(start_value);
     let (proof, trace) = generate_test_vdf_proof_rpo(start, steps);
-    build_instance_from_proof(proof, trace)
+    build_instance_from_proof::<VdfAir>(proof, trace)
 }
 
-fn build_instance_from_proof(
+pub fn build_cubic_fib_stark_instance(start_a: u64, start_b: u64, steps: usize) -> VdfStarkInstance {
+    let a = BaseElement::new(start_a);
+    let b = BaseElement::new(start_b);
+    let (proof, trace) = generate_test_cubic_fib_proof_rpo(a, b, steps);
+    build_instance_from_proof::<CubicFibAir>(proof, trace)
+}
+
+fn build_instance_from_proof<A>(
     proof: Proof,
     trace: winterfell::TraceTable<BaseElement>,
-) -> VdfStarkInstance {
+) -> VdfStarkInstance
+where
+    A: Air<BaseField = BaseElement, PublicInputs = BaseElement>,
+{
     let trace_len = proof.context.trace_info().length();
     let lde_domain_size = proof.context.lde_domain_size();
     let num_queries = proof.options().num_queries();
@@ -102,7 +113,7 @@ fn build_instance_from_proof(
 
     let pub_inputs_u64 = vec![trace.get(1, trace.length() - 1).as_int()];
     let pub_inputs_fe = BaseElement::new(pub_inputs_u64[0]);
-    let air = VdfAir::new(
+    let air = A::new(
         proof.context.trace_info().clone(),
         pub_inputs_fe,
         proof.options().clone(),
@@ -149,7 +160,7 @@ fn build_instance_from_proof(
 
     let acceptable_options =
         winterfell::AcceptableOptions::OptionSet(vec![proof.options().clone()]);
-    winterfell::verify::<VdfAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+    winterfell::verify::<A, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
         proof.clone(),
         pub_inputs_fe,
         &acceptable_options,

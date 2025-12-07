@@ -427,7 +427,9 @@ mod tests {
     fn test_pvugc_on_outer_proof_e2e() {
         use crate::decap::build_commitments;
         use crate::prover_lean::prove_lean_with_randomizers;
-        use crate::stark::test_utils::{build_vdf_stark_instance, get_or_init_inner_crs_keys};
+        use crate::stark::test_utils::{
+            build_cubic_fib_stark_instance, build_vdf_stark_instance, get_or_init_inner_crs_keys,
+        };
         use ark_snark::SNARK;
         use ark_std::rand::rngs::StdRng;
         use ark_std::rand::SeedableRng;
@@ -438,11 +440,16 @@ mod tests {
         type Cycle = Bls12Bw6Cycle;
 
         let mut rng = StdRng::seed_from_u64(99999);
+        // Setup with VDF STARK proofs (iterative x^3 + 1)
         let sample_instances = vec![
             build_vdf_stark_instance(3, 8),
             build_vdf_stark_instance(5, 8),
         ];
-        let runtime_instance = build_vdf_stark_instance(7, 8);
+        // Runtime with COMPLETELY DIFFERENT circuit: Cubic Fibonacci
+        // Computes: next[0] = (current[0] + current[1])³, next[1] = current[0]
+        // This is semantically unrelated to VDF but has identical AirParams!
+        // This proves that ANY STARK proof with matching structural parameters works.
+        let runtime_instance = build_cubic_fib_stark_instance(14, 30, 8);
 
         let (pk_inner, vk_inner) = get_or_init_inner_crs_keys();
 
