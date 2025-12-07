@@ -310,18 +310,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     }
 
     let mut active_pairs = HashSet::new();
-    
-    // Count pair types being added to active_pairs
-    let mut ap_const_wit = 0usize;
-    let mut ap_wit_const = 0usize;
-    let mut ap_wit_wit = 0usize;
-    let mut ap_pub_pub = 0usize;
-    let mut ap_pub_wit = 0usize;
-    let mut ap_wit_pub = 0usize;
-    let mut ap_const_pub = 0usize;
-    let mut ap_pub_const = 0usize;
-    let mut ap_const_const = 0usize;
-    
+     
     for &i in &vars_a {
         for &j in &vars_b {
             if i < num_pub && j < num_pub {
@@ -330,27 +319,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             active_pairs.insert((i, j));
         }
     }
-    
-    println!("[Quotient] Active pairs breakdown:");
-    println!("    (const, const): {}", ap_const_const);
-    println!("    (const, wit):   {}", ap_const_wit);
-    println!("    (const, pub):   {}", ap_const_pub);
-    println!("    (wit, const):   {}", ap_wit_const);
-    println!("    (wit, wit):     {}", ap_wit_wit);
-    println!("    (wit, pub):     {}", ap_wit_pub);
-    println!("    (pub, const):   {}", ap_pub_const);
-    println!("    (pub, wit):     {}", ap_pub_wit);
-    println!("    (pub, pub):     {}", ap_pub_pub);
-    
-    if ap_pub_pub > 0 || ap_pub_wit > 0 || ap_wit_pub > 0 || ap_pub_const > 0 || ap_const_pub > 0 {
-        println!("    ⚠️  Public-involving pairs detected in active_pairs!");
-        println!("       These should have zero h_ij bases (verified by audit).");
-    }
-
-    println!(
-        "[Quotient] Found {} total pairs. Computing bases (Parallel)...",
-        active_pairs.len()
-    );
 
     // Estimate max capacity needed for buffers to avoid reallocation in hot loop
     // Most pairs are sparse-sparse, but dense-sparse pairs (involving one_var) need large buffers.
