@@ -20,7 +20,6 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -81,25 +80,11 @@ where
         "sample statements must provide n+1 entries"
     );
 
-    // Sanitize cycle name for filename and derive a hash of the proving key so caches
-    // from different PKs never collide.
+    // Sanitize cycle name for filename and derive a hash of the verifying key (circuit)
+    // so caches from different circuits never collide. The hash is based only on the
+    // circuit structure (VK), not on sample statements.
     let safe_name = C::name().replace('/', "_").replace(' ', "_");
-    let mut hasher = Sha256::new();
-    pk_outer
-        .vk
-        .serialize_uncompressed(&mut hasher)
-        .expect("failed to serialize vk for hashing");
-    for statement in &sample_statements {
-        for coord in statement {
-            coord
-                .serialize_uncompressed(&mut hasher)
-                .expect("failed to serialize statement coord");
-        }
-        hasher.update(&[0u8]);
-    }
-    let hash = hasher.finalize();
-    let hash_prefix: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
-    let cache_path = format!("outer_lean_setup_pk_vk_{}_{}.bin", safe_name, hash_prefix);
+    let cache_path = format!("outer_lean_setup_pk_vk_{}.bin", safe_name);
 
     let cache_file = std::path::Path::new(&cache_path);
     let (lean_pk, t_const_gt) = if cache_file.exists() {
