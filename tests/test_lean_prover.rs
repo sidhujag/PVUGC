@@ -4,7 +4,7 @@
 //! Verifies that the "Lean Prover" (using sparse H-bases) produces valid Groth16 proofs
 //! that are accepted by the standard Verifier.
 
-use ark_ec::pairing::Pairing;
+use ark_ec::{pairing::Pairing, AffineRepr};
 use ark_groth16::{r1cs_to_qap::PvugcReduction, Groth16};
 use ark_snark::SNARK;
 use ark_std::{rand::SeedableRng, UniformRand, Zero};
