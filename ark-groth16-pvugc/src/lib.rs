@@ -34,9 +34,6 @@ pub mod prover;
 /// Verify proofs for the Groth16 zkSNARK construction.
 pub mod verifier;
 
-/// PVUGC coefficient hook for one-sided GS
-pub mod pvugc_hook;
-
 /// Constraints for the Groth16 verifier.
 #[cfg(feature = "r1cs")]
 pub mod constraints;
@@ -56,9 +53,6 @@ use r1cs_to_qap::{LibsnarkReduction, R1CSToQAP};
 pub struct Groth16<E: Pairing, QAP: R1CSToQAP = LibsnarkReduction> {
     _p: PhantomData<(E, QAP)>,
 }
-
-// Re-export pvugc_hook for users
-pub use pvugc_hook::{NoOpHook, PvugcCoefficientHook};
 
 impl<E: Pairing, QAP: R1CSToQAP> SNARK<E::ScalarField> for Groth16<E, QAP> {
     type ProvingKey = ProvingKey<E>;
@@ -97,18 +91,6 @@ impl<E: Pairing, QAP: R1CSToQAP> SNARK<E::ScalarField> for Groth16<E, QAP> {
         proof: &Self::Proof,
     ) -> Result<bool, Self::Error> {
         Ok(Self::verify_proof(&circuit_pvk, proof, &x)?)
-    }
-}
-
-impl<E: Pairing, QAP: R1CSToQAP> Groth16<E, QAP> {
-    /// Circuit-specific setup that enables the PVUGC modifications.
-    pub fn circuit_specific_setup_pvugc<C: ConstraintSynthesizer<E::ScalarField>, R: RngCore>(
-        circuit: C,
-        rng: &mut R,
-    ) -> Result<(ProvingKey<E>, VerifyingKey<E>), SynthesisError> {
-        let pk = Self::generate_random_parameters_with_reduction_pvugc(circuit, rng)?;
-        let vk = pk.vk.clone();
-        Ok((pk, vk))
     }
 }
 

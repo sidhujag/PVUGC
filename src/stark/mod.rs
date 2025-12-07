@@ -18,10 +18,17 @@ pub mod crypto {
     pub mod poseidon_merkle_helpers;
 }
 
+/// STARK circuits currently target the original BLS12-377 field regardless of the
+/// recursion cycle used by the outer circuit.
+pub type StarkInnerFr = ark_bls12_377::Fr;
+
 // Re-export main types
 pub use inner_stark_full::{
     AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness,
 };
+
+#[cfg(test)]
+pub mod test_utils;
 
 // Tests module (internal tests for STARK components)
 #[cfg(test)]
@@ -32,6 +39,7 @@ mod tests {
     mod stark_verifier_comprehensive;
 
     pub(crate) mod helpers {
+        pub(crate) mod cubic_fib;
         pub(crate) mod rpo_compatibility;
         pub(crate) mod simple_vdf;
     }

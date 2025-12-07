@@ -4,7 +4,6 @@ use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 use ark_std::UniformRand;
 
-use arkworks_groth16::api::enforce_public_inputs_are_outputs;
 use arkworks_groth16::arming::{arm_columns, ColumnBases};
 use arkworks_groth16::ppe::validate_groth16_vk_subgroups;
 
@@ -14,8 +13,7 @@ fn reject_zero_points_in_vk() {
     #[derive(Clone)]
     struct C {}
     impl ConstraintSynthesizer<Fr> for C {
-        fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
-            enforce_public_inputs_are_outputs(cs)?;
+        fn generate_constraints(self, _cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
             Ok(())
         }
     }

@@ -27,7 +27,7 @@
 //! ```
 
 use super::gadgets::rpo_gl_light::canonicalize_to_bytes;
-use crate::{api::enforce_public_inputs_are_outputs, outer_compressed::InnerFr};
+use crate::stark::StarkInnerFr as InnerFr;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::cmp::CmpGadget;
 use ark_r1cs_std::fields::fp::FpVar;
@@ -546,7 +546,6 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             remainder_coeffs_opt,
         )?;
 
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

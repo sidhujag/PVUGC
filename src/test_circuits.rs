@@ -2,7 +2,6 @@
 //!
 //! Generic circuits that work on both InnerFr and OuterFr for flexible testing.
 
-use crate::api::enforce_public_inputs_are_outputs;
 use ark_ff::PrimeField;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::eq::EqGadget;
@@ -71,7 +70,6 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for AddCircuit<F> {
         let sum = &y_var + &z_var;
         x_var.enforce_equal(&sum)?;
 
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

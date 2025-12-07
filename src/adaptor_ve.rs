@@ -15,7 +15,6 @@
 
 use crate::error::Error;
 use crate::{
-    api::enforce_public_inputs_are_outputs,
     ct::{ad_core_digest, compute_key_commitment_tag, DemP2, DEM_PROFILE_ID},
     poseidon_fr381_t3::{absorb_bytes_native_fr, absorb_bytes_var_fr, POSEIDON381_PARAMS_T3_V1},
     secp256k1::{decompress_secp_point, enforce_secp_fixed_base_mul, point_to_field_elements},
@@ -233,9 +232,8 @@ impl ConstraintSynthesizer<Fr> for AdaptorVeCircuit {
             .clone()
             .try_into()
             .map_err(|_| SynthesisError::Unsatisfiable)?;
-        enforce_secp_fixed_base_mul(cs.clone(), &adaptor_scalar, &self.t_point, None)?;
+        enforce_secp_fixed_base_mul(cs, &adaptor_scalar, &self.t_point, None)?;
 
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }

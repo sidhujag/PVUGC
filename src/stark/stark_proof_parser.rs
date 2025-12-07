@@ -14,13 +14,11 @@ use super::inner_stark_full::{
     AirParams, CompQuery, FriLayerQueries, FriQuery, FullStarkVerifierCircuit, TraceQuery,
     TraceSegmentWitness,
 };
-use crate::outer_compressed::InnerFr;
-use winter_crypto::{Digest, ElementHasher};
+use crate::stark::StarkInnerFr as InnerFr;
+use winter_crypto::{Digest, ElementHasher, RandomCoin};
 use winter_math::fields::f64::BaseElement as GL; // Goldilocks field
 use winter_math::FieldElement;
 use winterfell::Proof;
-
-extern crate alloc; // For BTreeMap and Vec
 
 fn enforce_expected_queries(actual: usize, expected: usize) {
     assert_eq!(
@@ -40,6 +38,82 @@ where
     V: winter_crypto::VectorCommitment<H, MultiProof = winter_crypto::BatchMerkleProof<H>>,
 {
     parse_proof_impl::<H, V>(proof, pub_inputs_u64, air_params, query_positions)
+}
+
+/// Derive Winterfell query positions exactly as the verifier does.
+pub fn derive_query_positions<H, A>(
+    proof: &winterfell::Proof,
+    air: &A,
+    pub_inputs: &A::PublicInputs,
+) -> Vec<usize>
+where
+    H: winter_crypto::ElementHasher<BaseField = A::BaseField>,
+    A: winterfell::Air,
+    A::PublicInputs: winter_math::ToElements<A::BaseField>,
+{
+    use winter_crypto::DefaultRandomCoin;
+    use winter_math::ToElements;
+
+    // Seed public coin with verifier context + public inputs.
+    let mut public_coin_seed = proof.context.to_elements();
+    public_coin_seed.append(&mut pub_inputs.to_elements());
+    let mut public_coin = DefaultRandomCoin::<H>::new(&public_coin_seed);
+
+    // Replay verifier transcript to the point where query positions are drawn.
+    let num_fri_layers = air
+        .options()
+        .to_fri_options()
+        .num_fri_layers(air.lde_domain_size());
+    let (trace_commitments, constraint_commitment, fri_commitments) = proof
+        .commitments
+        .clone()
+        .parse::<H>(air.trace_info().num_segments(), num_fri_layers)
+        .expect("parse commitments");
+
+    for trace_root in &trace_commitments {
+        public_coin.reseed(*trace_root);
+    }
+    let _ = air
+        .get_constraint_composition_coefficients::<A::BaseField, _>(&mut public_coin)
+        .expect("draw constraint coeffs");
+
+    public_coin.reseed(constraint_commitment);
+    let _z = public_coin.draw::<A::BaseField>().expect("draw z");
+
+    let (trace_ood_frame, constraint_ood_frame) = proof
+        .ood_frame
+        .clone()
+        .parse::<A::BaseField>(
+            air.trace_info().main_trace_width(),
+            air.trace_info().aux_segment_width(),
+            air.context().num_constraint_composition_columns(),
+        )
+        .expect("parse OOD");
+    use winter_air::proof::merge_ood_evaluations;
+    let ood_evals = merge_ood_evaluations(&trace_ood_frame, &constraint_ood_frame);
+    public_coin.reseed(H::hash_elements(&ood_evals));
+
+    let _deep_coeffs = air
+        .get_deep_composition_coefficients::<A::BaseField, _>(&mut public_coin)
+        .expect("draw DEEP coeffs");
+
+    for (i, fri_root) in fri_commitments.iter().enumerate() {
+        public_coin.reseed(*fri_root);
+        if i < num_fri_layers {
+            let _ = public_coin.draw::<A::BaseField>().expect("draw FRI beta");
+        }
+    }
+
+    let mut query_positions = public_coin
+        .draw_integers(
+            air.options().num_queries(),
+            air.lde_domain_size(),
+            proof.pow_nonce,
+        )
+        .expect("draw query positions");
+    query_positions.sort_unstable();
+    query_positions.dedup();
+    query_positions
 }
 
 /// Internal implementation

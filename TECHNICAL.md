@@ -52,14 +52,20 @@ For PVUGC, all bases must be statement-only (derivable from public verification 
 
 **Key Observation:** When the statement is a Groth16 verification target, the two sides play fundamentally different roles:
 
-- **G₂ side (Y_j)**: Can be extracted directly from the Groth16 verifying key (VK)
+- **G₂ side (Y_j)**: Extracted directly from the Groth16 verifying key (VK)
   - Groth16 VK contains: α, β, γ, δ (all public)
-  - We can construct Y_j = {β, [δb_i]₂ for i in b_g2_query}
-  - These are statement-only by definition
+  - We construct Y_j = {β + b_0, [v_j]₂ for witness columns j}
+  - These are **statement-independent** (constant) — no public inputs in B-matrix
+  - Armed with ρ to form Y_j^ρ
 
 - **G₁ side (X_i)**: The prover contributes A, C through the proof
   - A and C are witness-dependent but serve as the "X" variables
-  - We can commit to these with randomness on the prover side
+  - We commit to these with randomness on the prover side
+
+- **Statement dependence**: Isolated to the target R(vk, x)
+  - R(vk, x) = e(α, β) + e(L(x), γ) + T_const(x)
+  - L(x) = Σ x_i · IC_i where IC_i = w_i/γ (public inputs in C-matrix)
+  - [γ]_2 is **never armed** — adversary cannot compute R(vk,x)^ρ directly
 
 **One-Sided Architecture:**
 
@@ -133,13 +139,17 @@ The critical property: **randomness in C_ℓ^(rand) and C_ℓ^(var) is absorbed 
 At deposit time, the armer publishes:
 
 ```
-Arms = {U_ℓ^ρ for ℓ ∈ [1, m], δ^ρ}
+Arms = {[β + b_0]_2^ρ, [v_j]_2^ρ for witness columns j, [δ]_2^ρ}
 
 where:
-  U_ℓ = ∑_j Γ_{ℓj} · Y_j (aggregation of statement-only bases)
-  Y_j ∈ {β, b_1, b_2, ..., b_n} extracted from Groth16 VK
-  Γ is a thin matrix (typically m << n) with deterministic entries
+  β + b_0 = aggregated constant leg (statement-independent)
+  v_j = B-query for witness column j (statement-independent)
+  δ = delta from VK
 ```
+
+**Key property:** All armed bases are **statement-independent**. Statement dependence is isolated to R(vk, x), which is never armed. This means:
+- Adversary gains no information about x from the armed transcript
+- Security relies on [γ]_2 being excluded from armed bases
 
 The matrix Γ is derived deterministically from the VK digest via Fiat-Shamir:
 
@@ -203,8 +213,9 @@ Therefore K₁ = K₂ = target^ρ, and the extraction is proof-agnostic. ∎
 **Key Advantages of One-Sided:**
 1. **No CRS**: Eliminates trusted setup per statement
 2. **Simpler structure**: One aggregation instead of rank decomposition
-3. **Direct VK usage**: Statement-only bases derived mechanically
+3. **Direct VK usage**: Armed bases derived directly from VK (statement-independent)
 4. **Lower overhead**: Armed bases scale with VK size (typically 50-200), not matrix rank
+5. **Clean separation**: Statement dependence isolated to target R(vk, x); armed handles constant
 
 ## 4. Cryptographic Properties
 
@@ -231,60 +242,71 @@ Therefore K₁ = K₂ = target^ρ, and the extraction is proof-agnostic. ∎
 
 **Proof:** Follows from proof-agnosticism (Section 2.4). Every valid proof π satisfies the verification equation, and decapsulation always computes target^ρ. ∎
 
-### 4.3 Statement-Only Property
+### 4.3 Statement-Independent Armed Bases
 
-**Theorem (Statement-Only Bases):** The armed bases {U_ℓ^ρ, δ^ρ} depend only on (vk, x, ρ), not on the proof π or witness w.
+**Theorem (Statement-Independent Bases):** The armed bases {[β + b_0]_2^ρ, [v_j]_2^ρ, [δ]_2^ρ} depend only on (vk, ρ), not on the statement x, proof π, or witness w.
 
 **Proof:**
-- U_ℓ = ∑_j Γ_{ℓj} · Y_j where Y_j ∈ VK (public)
-- Γ derived from VK digest (deterministic, public)
+- With v_pub = 0 (public inputs in C-matrix only), no public input x_i appears in B-bases
+- β + b_0 is constant (from VK)
+- v_j are witness-column B-bases (from VK, statement-independent)
 - δ ∈ VK (public)
 - ρ is the armer's secret
-- No reference to π or w in arms construction. ∎
+- No reference to x, π, or w in arms construction. ∎
+
+**Statement dependence is isolated to R(vk, x):**
+- R(vk, x) = e(α, β) · e(L(x), γ) + T_const(x)
+- L(x) = Σ x_i · IC_i where IC_i = w_i/γ
+- This is the natural place for statement dependence — the "target" is what you're proving
 
 **Critical security property (γ₂ exclusion):**
-The Y_j basis excludes [γ]₂. Specifically, Y_j ∈ {[β]₂, b_g2_query}, which are the components used to form B in Groth16. The target R(vk,x) = e(α, β) · e(L(x), γ) contains a factor involving [γ]₂, but since [γ]₂^ρ is never published in the armed bases, computing R(vk,x)^ρ without a valid proof reduces to standard discrete logarithm hardness in 𝔾₂ or 𝔾_T.
+The armed bases exclude [γ]₂. Since [γ]₂^ρ is never published, computing R(vk,x)^ρ without a valid proof reduces to DDH in 𝔾₂. The adversary cannot:
+1. Extract ρ from armed bases (DLP hard)
+2. Apply ρ to R(vk,x) directly (no [γ]₂^ρ available)
+3. Synthesize the γ-dependent component from other handles
 
 ## 5. Implementation Details
 
-### 5.1 Coefficient Extraction
+### 5.1 Commitment Construction
 
-The prover exposes coefficients {b_j, c_i} through a hook in the Groth16 prover:
+GS commitments are constructed directly from Groth16 proof elements and the witness assignment:
 
 ```
-B = [β]₂ + ∑_j b_j·[b_j^query]₂
-C = [δ]₁ + ∑_i c_i·[h_i]₁
+Given: Proof (A, B, C), full_assignment, randomizer s
+
+Columns:
+  - Column 0: aggregated public = A
+  - Witness columns: b_j · A for each witness coefficient
+
+Delta-side:
+  - θ = s·A - C (combines randomizer and C-term)
 ```
 
-These coefficients are used to construct:
-- DLREP_B proof: demonstrates B = β + ∑ b_j·Y_j
-- Tie proof: demonstrates same {b_j} used in both MSMs
-- GS commitment: encodes the proof structure for PPE verification
 
 ### 5.2 Verification Flow
 
-1. **Groth16 Verification:** e(A, B) + e(C, δ) = target (standard)
-2. **DLREP_B Verification:** Schnorr proof that B decomposes correctly
-3. **Tie Verification:** Cross-group DL equality of coefficients
-4. **PPE Verification:** ∑ e(C_ℓ, U_ℓ) + e(θ, δ) = target (one-sided)
-5. **Decapsulation:** K = ∑ e(C_ℓ, U_ℓ^ρ) + e(θ, δ^ρ) = target^ρ
+1. **Groth16 Verification:** e(A, B) · e(-C, δ) = R(vk, x) (standard)
+2. **PPE Verification:** ∑ e(X_j, Y_j) · e(θ, δ) = R(vk, x) (one-sided)
+3. **Decapsulation:** K = ∑ e(X_j, Y_j^ρ) · e(θ, δ^ρ) = R^ρ
 
-### 5.3 Γ Matrix Derivation
+### 5.3 Column-Based Architecture
 
-The matrix Γ is derived deterministically via Fiat-Shamir to ensure reproducibility:
+The one-sided approach uses a column-based structure:
 
-```rust
-seed = SHA256("PVUGC/GAMMA/v1" || serialize(vk) || serialize(beta) || serialize(delta))
+```
+Bases (from VK):
+  - Y_j ∈ {aggregated_public_B, witness_only b_g2_query columns}
+  - δ (from VK)
 
-For each row ℓ, each column j:
-  hash = SHA256(seed || ℓ || j)
-  Γ_{ℓj} ∈ {-1, 0, +1} based on hash mod 3
+Arms (published at deposit):
+  - Y_j^ρ for each column
+  - δ^ρ
 ```
 
 Properties:
-- Same VK always produces same Γ
-- Entries are Rademacher-distributed (symmetric, sparse)
-- Avoids all-zero rows for robustness
+- Statement-only: all bases derived from VK
+- γ₂ excluded: ensures gating security
+- Linear structure: scales with witness count
 
 ## 6. Security Analysis
 
@@ -304,7 +326,7 @@ Properties:
 | **Extract ρ from arms** | Solve G₂ DLP on U_ℓ^ρ | DLP hardness |
 | **Invalid proof → extract K** | Skip Groth16 verification | Verification gates extraction |
 | **Different statements → same K** | Manipulate VK or public input | Statement-only bases ensure K ≠ K' |
-| **Tie proof forging** | Prove false coefficient consistency | Schnorr soundness + FS collision resistance |
+| **Span mixing attack** | Mix pub/wit columns to forge | Lean CRS + linear circuit design |
 | **Subgroup attack** | Inject small-order elements | Explicit subgroup membership checks |
 
 ## 7. Advantages and Limitations
@@ -322,8 +344,7 @@ Properties:
 
 1. **Groth16-Specific:** Construction tailored to Groth16; different SNARKs need different PPEs
 2. **Matrix Size:** Γ must be at least m × n where m ≥ rank of PPE; typically m = O(√n)
-3. **Verifier Overhead:** Four verification checks (Groth16, DLREP, Tie, PPE) vs. one for traditional GS
-4. **Fiat-Shamir Challenges:** Tie proof aggregation should use proper FS challenge vector (minor implementation detail)
+3. **Verifier Overhead:** Two verification checks (Groth16, PPE) vs. one for traditional GS
 
 ## 8. Conclusion
 

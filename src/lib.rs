@@ -18,17 +18,16 @@ pub mod adaptor_ve;
 pub mod api;
 pub mod arming;
 pub mod bitcoin;
-pub mod coeff_recorder;
 pub mod ct;
 pub mod ctx;
 pub mod decap;
-pub mod dlrep;
 pub mod error;
 pub mod io;
 pub mod poce;
-mod poseidon_fr381_t3;
+pub mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
-pub mod secp256k1;
+pub mod prover_lean;
+pub mod secp256k1; // Lean Prover module
 
 // Recursive demonstration modules (not for production use)
 // These modules demonstrate how PVUGC could work with proof-of-proof recursion
@@ -50,14 +49,13 @@ pub use stark::{AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, Trac
 pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
 pub use api::{ColumnArmingAttestation, OneSidedPvugc, PvugcBundle};
 pub use arming::{arm_columns, ColumnArms, ColumnBases};
-pub use coeff_recorder::{BCoefficients, CoefficientRecorder, SimpleCoeffRecorder};
-pub use decap::OneSidedCommitments;
-pub use dlrep::{
-    prove_b_msm, prove_ties_per_column, verify_b_msm, verify_ties_per_column, DlrepBProof,
-    DlrepPerColumnTies,
-};
+pub use decap::{build_commitments, OneSidedCommitments};
+pub use decap::prove_and_build_commitments;
 pub use poce::{prove_poce_column, verify_poce_column, PoceColumnProof};
-pub use ppe::{build_one_sided_ppe, compute_groth16_target, extract_y_bases, PvugcVk};
+pub use ppe::{
+    build_one_sided_ppe, compute_baked_target, compute_groth16_target, extract_y_bases, PvugcVk,
+};
+pub use prover_lean::{prove_lean, LeanProvingKey};
 
 // Recursive demonstration types (not for production use)
 // These are exposed for testing and educational purposes only.
@@ -71,4 +69,7 @@ pub use outer_compressed::{
 
 // Test utilities re-exports
 pub use test_circuits::AddCircuit;
-pub use test_fixtures::{get_fixture, get_fixture_mnt, DefaultFixture, GlobalFixture, MntFixture};
+pub use test_fixtures::{
+    get_fixture, get_fixture_bls, get_fixture_mnt, BlsFixture, DefaultFixture, GlobalFixture,
+    MntFixture,
+};

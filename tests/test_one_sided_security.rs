@@ -1,6 +1,7 @@
 //! Security Tests for One-Sided GS PVUGC
 
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G2Affine};
+use ark_groth16::r1cs_to_qap::PvugcReduction;
 use ark_ec::{pairing::Pairing, pairing::PairingOutput, AffineRepr, CurveGroup, PrimeGroup};
 use ark_groth16::Groth16;
 use ark_r1cs_std::alloc::AllocVar;
@@ -10,7 +11,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisE
 use ark_snark::SNARK;
 use ark_std::Zero;
 use ark_std::{rand::rngs::StdRng, rand::SeedableRng, UniformRand};
-use arkworks_groth16::api::{enforce_public_inputs_are_outputs, VerifyLimits};
+use arkworks_groth16::api::VerifyLimits;
 use arkworks_groth16::api::{
     DEFAULT_MAX_B_COLUMNS, DEFAULT_MAX_THETA_ROWS, DEFAULT_MAX_TOTAL_PAIRINGS,
 };
@@ -36,7 +37,6 @@ impl ConstraintSynthesizer<Fr> for TestCircuit {
         })?;
         let y_squared = &y_var * &y_var;
         x_var.enforce_equal(&y_squared)?;
-        enforce_public_inputs_are_outputs(cs)?;
         Ok(())
     }
 }
@@ -49,7 +49,7 @@ fn test_cannot_compute_k_from_arms_alone() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -58,11 +58,13 @@ fn test_cannot_compute_k_from_arms_alone() {
 
     // Build column bases and arm them
     let rho = Fr::rand(&mut rng);
-    let pvugc_vk: PvugcVk<E> = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // Empty GT points for tests that don't need baked quotient
+    let pvugc_vk: PvugcVk<E> = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
     let cols = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &vault_utxo).unwrap();
     let col_arms = arm_columns(&cols, &rho).expect("arm_columns failed");
 
@@ -109,7 +111,7 @@ fn test_invalid_groth16_rejected() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -122,34 +124,6 @@ fn test_invalid_groth16_rejected() {
 
     // Verify should fail
     let valid = Groth16::<E>::verify(&vk, &vault_utxo, &invalid_proof).unwrap_or(false);
-
-    assert!(!valid);
-}
-
-#[test]
-fn test_dlrep_detects_wrong_coefficients() {
-    let mut rng = StdRng::seed_from_u64(12);
-
-    let y_bases = vec![G2Affine::rand(&mut rng); 2];
-    let delta = G2Affine::rand(&mut rng);
-
-    // Honest coefficients
-    let b_honest = vec![Fr::from(2u64), Fr::from(3u64)];
-    let s = Fr::from(7u64);
-
-    // Compute B with honest coefficients
-    let mut b_honest_g2 = delta.into_group() * s;
-    for (b_j, y_j) in b_honest.iter().zip(&y_bases) {
-        b_honest_g2 += y_j.into_group() * b_j;
-    }
-    let b_honest_g2 = b_honest_g2.into_affine();
-
-    // Create proof with honest coefficients
-    let proof: DlrepBProof<E> = prove_b_msm(b_honest_g2, &y_bases, delta, &b_honest, s, &mut rng);
-
-    // Try to verify against WRONG B
-    let b_wrong = G2Affine::rand(&mut rng);
-    let valid = verify_b_msm(b_wrong, &y_bases, delta, &proof);
 
     assert!(!valid);
 }
@@ -168,8 +142,10 @@ fn test_different_witnesses_same_statement() {
     };
 
     let mut rng_crypto = StdRng::seed_from_u64(5);
-    let (_pk1, vk1) = Groth16::<E>::circuit_specific_setup(circuit1, &mut rng_crypto).unwrap();
-    let (_pk2, vk2) = Groth16::<E>::circuit_specific_setup(circuit2, &mut rng_crypto).unwrap();
+    let (_pk1, vk1) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit1, &mut rng_crypto).unwrap();
+    let (_pk2, vk2) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit2, &mut rng_crypto).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
 
@@ -185,29 +161,32 @@ fn test_verify_rejects_mismatched_statement() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     let vault_utxo = vec![Fr::from(25u64)];
     let wrong_vault_utxo = vec![Fr::from(49u64)];
 
-    let pvugc_vk = PvugcVk {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
     // Canonical Γ required by verifier
 
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
+    let (proof, commitments, _assignment, _s) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
 
-    let commitments = recorder.build_commitments();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
 
@@ -231,12 +210,14 @@ fn test_poce_rejects_mixed_rho_and_swapped_columns() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        vec![],
+    );
     let statement_x = vec![Fr::from(25u64)];
     // Arming bases
     let bases = OneSidedPvugc::build_column_bases(&pvugc_vk, &vk, &statement_x).unwrap();
@@ -377,27 +358,30 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
     let vault_utxo = vec![Fr::from(25u64)];
 
     // Make a valid proof and commitments
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
-    let mut commitments = recorder.build_commitments();
+    let (proof, mut commitments, _assignment, _s) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
 
-    // Build bundle with per-column ties
+    // Build bundle
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &vault_utxo, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments.clone(),
     };
 
@@ -405,14 +389,14 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &vault_utxo));
 
     // Duplicate one G2 column logically by perturbing two X columns equally/oppositely,
-    // which keeps the aggregate but should break per-column ties
+    // which keeps the aggregate but should break PPE verification
     use ark_ec::CurveGroup;
-    let a = bundle.groth16_proof.a;
     if commitments.x_b_cols.len() >= 4 {
         // choose two variable columns (>= 2)
         let i = 2usize;
         let j = 3usize;
         let delta = Fr::from(3u64);
+        let a = bundle.groth16_proof.a;
         let (xi0, xi1) = commitments.x_b_cols[i];
         let (xj0, xj1) = commitments.x_b_cols[j];
         let xi0p = (xi0.into_group() + a.into_group() * delta).into_affine();
@@ -422,8 +406,6 @@ fn test_duplicate_g2_columns_detected_by_per_column_ties() {
 
         let bundle_bad = PvugcBundle {
             groth16_proof: bundle.groth16_proof,
-            dlrep_b: bundle.dlrep_b,
-            dlrep_ties: bundle.dlrep_ties,
             gs_commitments: commitments,
         };
         assert!(!OneSidedPvugc::verify(
@@ -449,14 +431,22 @@ fn test_r_independence_from_rho() {
         x: Some(x),
         y: Some(y),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
     // PVUGC VK wrapper (statement-only bases)
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
     // Two fresh exponents ρ1 != 0 and ρ2 != 0
     let mut rho1 = Fr::rand(&mut rng);
@@ -483,18 +473,11 @@ fn test_r_independence_from_rho() {
     assert_eq!(r1, r_setup2, "setup_and_arm must not mix ρ into R");
 
     // Build two valid proofs and commitments (proof randomness differs)
-    let mut rec1 = SimpleCoeffRecorder::<E>::new();
-    rec1.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _proof1 =
-        Groth16::<E>::create_random_proof_with_hook(circuit.clone(), &pk, &mut rng, &mut rec1)
-            .unwrap();
-    let comm1: OneSidedCommitments<E> = rec1.build_commitments();
+    let (_proof1, comm1, _assignment1, _s1) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit.clone(), &mut rng).unwrap();
 
-    let mut rec2 = SimpleCoeffRecorder::<E>::new();
-    rec2.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let _proof2 =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut rec2).unwrap();
-    let comm2: OneSidedCommitments<E> = rec2.build_commitments();
+    let (_proof2, comm2, _assignment2, _s2) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
 
     // Decap with (comm1, arms1) and (comm2, arms2)
     let k1 = OneSidedPvugc::decapsulate::<E>(&comm1, &arms1).expect("decap");
@@ -520,25 +503,28 @@ fn test_rejects_gamma2_in_statement_bases() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) =
+        Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
 
     let public_x = vec![Fr::from(25u64)];
     // Produce a valid bundle for the honest pvugc_vk
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
-    let commitments = recorder.build_commitments();
+    let (proof, commitments, _assignment, _s) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
     assert!(OneSidedPvugc::verify(&bundle, &pvugc_vk, &vk, &public_x));
@@ -562,7 +548,7 @@ fn test_r_is_not_identity_for_typical_statement() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (_pk, vk) = Groth16::<E>::circuit_specific_setup(circuit, &mut rng).unwrap();
+    let (_pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, &mut rng).unwrap();
     let r = compute_groth16_target(&vk, &[Fr::from(25u64)]).expect("compute_groth16_target");
     use ark_std::One;
     assert!(
@@ -579,25 +565,27 @@ fn test_size_caps_enforced_in_verify() {
         x: Some(Fr::from(25u64)),
         y: Some(Fr::from(5u64)),
     };
-    let (pk, vk) = Groth16::<E>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit.clone(), &mut rng).unwrap();
 
-    let pvugc_vk = PvugcVk::<E> {
-        beta_g2: vk.beta_g2,
-        delta_g2: vk.delta_g2,
-        b_g2_query: std::sync::Arc::new(pk.b_g2_query.clone()),
-    };
+    // t_const_points_gt must have length = gamma_abc_g1.len()
+    use ark_ff::Field;
+    let t_dummy = vec![
+        ark_ec::pairing::PairingOutput(<<E as Pairing>::TargetField as Field>::ONE);
+        vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        vk.beta_g2,
+        vk.delta_g2,
+        pk.b_g2_query.clone(),
+        t_dummy,
+    );
     let public_x = vec![Fr::from(25u64)];
 
-    // Build a valid bundle via recorder
-    let mut recorder = SimpleCoeffRecorder::<E>::new();
-    recorder.set_num_instance_variables(vk.gamma_abc_g1.len());
-    let proof =
-        Groth16::<E>::create_random_proof_with_hook(circuit, &pk, &mut rng, &mut recorder).unwrap();
-    let commitments = recorder.build_commitments();
+    // Build a valid bundle
+    let (proof, commitments, _assignment, _s) = 
+        arkworks_groth16::decap::prove_and_build_commitments(&pk, circuit, &mut rng).unwrap();
     let bundle = PvugcBundle {
         groth16_proof: proof,
-        dlrep_b: recorder.create_dlrep_b(&pvugc_vk, &vk, &public_x, &mut rng),
-        dlrep_ties: recorder.create_dlrep_ties(&mut rng),
         gs_commitments: commitments,
     };
 

@@ -1,7 +1,6 @@
 //! Proof of Correct Exponentiation (PoCE) for Column Arming
 //!
-//! PoCE-A: Prove that all column arms share the same ρ and ciphertext is key-committed
-//! PoCE-B: Decapper-local key-commitment verification
+//! Proves that all column arms share the same ρ (same-exponent proof).
 //!
 //! Essential for preventing mixed-ρ attacks and ensuring cryptographic integrity
 //! in column-based PVUGC arming.

@@ -227,3 +227,124 @@ impl R1CSToQAP for LibsnarkReduction {
         Ok(scalars)
     }
 }
+
+/// Computes the R1CS-to-QAP reduction with PVUGC-specific modifications
+/// (specifically, removing implicit copy constraints for public inputs).
+pub struct PvugcReduction;
+
+impl R1CSToQAP for PvugcReduction {
+    #[inline]
+    #[allow(clippy::type_complexity)]
+    fn instance_map_with_evaluation<F: PrimeField, D: EvaluationDomain<F>>(
+        cs: ConstraintSystemRef<F>,
+        t: &F,
+    ) -> R1CSResult<(Vec<F>, Vec<F>, Vec<F>, F, usize, usize)> {
+        let matrices = cs.to_matrices().unwrap();
+        let domain_size = cs.num_constraints() + cs.num_instance_variables();
+        let domain = D::new(domain_size).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain_size = domain.size();
+
+        let zt = domain.evaluate_vanishing_polynomial(*t);
+
+        // Evaluate all Lagrange polynomials
+        let coefficients_time = start_timer!(|| "Evaluate Lagrange coefficients");
+        let u = domain.evaluate_all_lagrange_coefficients(*t);
+        end_timer!(coefficients_time);
+
+        let qap_num_variables = (cs.num_instance_variables() - 1) + cs.num_witness_variables();
+
+        let mut a = vec![F::zero(); qap_num_variables + 1];
+        let mut b = vec![F::zero(); qap_num_variables + 1];
+        let mut c = vec![F::zero(); qap_num_variables + 1];
+
+        // NOTE: Implicit input mapping block removed for PVUGC
+
+        for (i, u_i) in u.iter().enumerate().take(cs.num_constraints()) {
+            for &(ref coeff, index) in &matrices.a[i] {
+                a[index] += &(*u_i * coeff);
+            }
+            for &(ref coeff, index) in &matrices.b[i] {
+                b[index] += &(*u_i * coeff);
+            }
+            for &(ref coeff, index) in &matrices.c[i] {
+                c[index] += &(*u_i * coeff);
+            }
+        }
+
+        Ok((a, b, c, zt, qap_num_variables, domain_size))
+    }
+
+    fn witness_map_from_matrices<F: PrimeField, D: EvaluationDomain<F>>(
+        matrices: &ConstraintMatrices<F>,
+        num_inputs: usize,
+        num_constraints: usize,
+        full_assignment: &[F],
+    ) -> R1CSResult<Vec<F>> {
+        let domain =
+            D::new(num_constraints + num_inputs).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain_size = domain.size();
+        let zero = F::zero();
+
+        let mut a = vec![zero; domain_size];
+        let mut b = vec![zero; domain_size];
+
+        cfg_iter_mut!(a[..num_constraints])
+            .zip(cfg_iter_mut!(b[..num_constraints]))
+            .zip(cfg_iter!(&matrices.a))
+            .zip(cfg_iter!(&matrices.b))
+            .for_each(|(((a, b), at_i), bt_i)| {
+                *a = evaluate_constraint(&at_i, &full_assignment);
+                *b = evaluate_constraint(&bt_i, &full_assignment);
+            });
+
+        // NOTE: Implicit input mapping block removed for PVUGC
+
+        domain.ifft_in_place(&mut a);
+        domain.ifft_in_place(&mut b);
+
+        let coset_domain = domain.get_coset(F::GENERATOR).unwrap();
+
+        coset_domain.fft_in_place(&mut a);
+        coset_domain.fft_in_place(&mut b);
+
+        let mut ab = domain.mul_polynomials_in_evaluation_domain(&a, &b);
+        drop(a);
+        drop(b);
+
+        let mut c = vec![zero; domain_size];
+        cfg_iter_mut!(c[..num_constraints])
+            .enumerate()
+            .for_each(|(i, c)| {
+                *c = evaluate_constraint(&matrices.c[i], &full_assignment);
+            });
+
+        domain.ifft_in_place(&mut c);
+        coset_domain.fft_in_place(&mut c);
+
+        let vanishing_polynomial_over_coset = domain
+            .evaluate_vanishing_polynomial(F::GENERATOR)
+            .inverse()
+            .unwrap();
+        cfg_iter_mut!(ab).zip(c).for_each(|(ab_i, c_i)| {
+            *ab_i -= &c_i;
+            *ab_i *= &vanishing_polynomial_over_coset;
+        });
+
+        coset_domain.ifft_in_place(&mut ab);
+
+        Ok(ab)
+    }
+
+    fn h_query_scalars<F: PrimeField, D: EvaluationDomain<F>>(
+        max_power: usize,
+        t: F,
+        zt: F,
+        delta_inverse: F,
+    ) -> Result<Vec<F>, SynthesisError> {
+        let scalars = cfg_into_iter!(0..max_power)
+            .map(|i| zt * &delta_inverse * &t.pow([i as u64]))
+            .collect::<Vec<_>>();
+        Ok(scalars)
+    }
+}
+

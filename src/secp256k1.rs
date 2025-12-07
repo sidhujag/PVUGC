@@ -573,8 +573,7 @@ mod tests {
                     public.enforce_equal(witness)?;
                 }
                 let arr: [UInt8<Fr>; 32] = witness_bytes.try_into().unwrap();
-                enforce_secp_fixed_base_mul(cs.clone(), &arr, &self.t_point, Some(&self.scalar))?;
-                crate::api::enforce_public_inputs_are_outputs(cs)?;
+                enforce_secp_fixed_base_mul(cs, &arr, &self.t_point, Some(&self.scalar))?;
                 Ok(())
             }
         }

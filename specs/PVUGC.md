@@ -21,6 +21,7 @@ PVUGC turns **proof existence** for a fixed verification key $\mathsf{vk}$ and p
 
 * **Language $\mathcal{L}$.** Fix an NP relation $R_{\mathcal{L}}(x,w)=1$. Examples: VM execution traces, hash‑preimage statements, "state transition" checks, zk‑rollup validity, etc.
 * **Gating predicate.** "There exists a Groth16 proof $\pi$ that verifies for $(\mathsf{vk},x)$."
+* **Fixed outer verifier (MUST).** PVUGC only arms a single, audited Groth16 verifier circuit (the “inner-proof checker”). Its verifying key $\mathsf{vk}$ and CRS hash are pinned inside `ctx_hash`/`GS_instance_digest`, and every instance uses that same circuit. Deployments MUST reject any attempt to arm a different VK.
 * **Spend semantics.** The Taproot spend **succeeds iff** the gating predicate is true (i.e., the $\alpha$ needed for the adaptor is recoverable).
 * **Optimistic flavor.** You can add an **optional Timeout/Abort** path (timelock) or an **optional Opposite‑Predicate path** (gate a *different* computation) depending on your application. None of this is *required* by the core innovation.
 
@@ -61,13 +62,14 @@ epoch_nonce     = CSPRNG(32 bytes)  // unique per instance
 ctx_core        = H_bytes("PVUGC/CTX_CORE" || vk_hash || H_bytes(x) || tapleaf_hash || tapleaf_version || txid_template || path_tag || y_cols_digest || epoch_nonce)
 arming_pkg_hash = H_bytes("PVUGC/ARM"      || {D_j} || D_δ || header_meta)
 presig_pkg_hash = H_bytes("PVUGC/PRESIG"   || m || T || R || signer_set || musig_coeffs)
-ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || presig_pkg_hash || dlrep_transcripts)
+ctx_hash        = H_bytes("PVUGC/CTX"      || ctx_core || arming_pkg_hash || presig_pkg_hash)
 ```
 
 - `path_tag ∈ {compute, abort}` (or others if you add more paths).
-- `B_pub(vk,x) = [\beta]_2 + [b_0]_2 + \sum_{i=0}^{\ell} x_i \cdot [b_{i+1}]_2` is the aggregated public B-leg (constant wire + all public inputs).
 - Include exact output ordering, CPFP hook position, and any deployment/epoch identifiers you need.
 - Bind PoK/PoCE and `AdaptorVerify(m,T,R,s′)` to `ctx_hash`. Do not include those transcripts inside the package hashes above.
+
+**Note:** Public inputs are bound via the C-matrix constraint `1 * reconstructed = x_pub`, setting $v_{pub} = 0$. Statement binding is through the W-polynomial: $IC_i = w_i/\gamma$.
 
 **Message (m).** $m$ is the 32‑byte BIP‑341 script‑path `sighash` for the pre‑templated transaction, computed with `SIGHASH_ALL`, `annex_present=0`, and binding the exact tapleaf hash and leaf version for this path.
 
@@ -129,7 +131,7 @@ $$
 
 **Arm‑time rule:** verify **all** PoK and PoCE before any pre‑signing; abort on any failure. Never reuse any $s_i$ (or $\alpha$) across contexts.
 
-It publicly proves that the published masks $\{D_j\}$ and $D_\delta$ were made with the same $\rho_i$, and that $T_i$ matches $s_i$. The ciphertext $\texttt{ct}_i$ is key‑committed at decapsulation time via PoCE‑B. Without PoCE an armer could publish structurally valid but semantically wrong artifacts, undermining decrypt‑on‑proof soundness.
+It publicly proves that the published masks $\{D_j\}$ and $D_\delta$ were made with the same $\rho_i$, and that $T_i$ matches $s_i$. The ciphertext $\texttt{ct}_i$ is key‑committed at decapsulation time via DEM tag verification. Without PoCE an armer could publish structurally valid but semantically wrong artifacts, undermining decrypt‑on‑proof soundness.
 
 ---
 
@@ -146,13 +148,12 @@ $$
 R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e\left(\sum_i x_i [l_i]_1,[\gamma]_2\right) \in \mathbb{G}_T
 $$
 
-The prover forms G₁ variables from its internal coefficients:
+The prover forms G₁ commitment variables directly from proof elements and the witness assignment:
 - **B-side variables**: 
-  - $X^{(B)}_0 = 1 \cdot A$ (constant for $\beta$ column)
-  - $X^{(B)}_{j+1} = b_j \cdot A$ for $j \in [0, m-1]$ where $b_j$ are coefficients from b_g2_query
+  - $X^{(B)}_0 = A$ (aggregated public column)
+  - $X^{(B)}_{j+1} = w_j \cdot A$ for each witness value $w_j$
 - **$\delta$-side variables**:
-  - $X^{(B)}_\delta = s \cdot A$ (the randomness $s$ from B)
-  - $C$ (the Groth16 proof element, paired with $[\delta]_2$)
+  - $\theta = s \cdot A - C$ (combines randomizer and C-term)
 
 **Statement-dependent public column.** Let $\ell$ denote the number of public inputs. Define the aggregated public B-leg
 $$
@@ -160,17 +161,31 @@ B_{\mathrm{pub}}(\mathsf{vk},x) := [\beta]_2 + [b_0]_2 + \sum_{i=0}^{\ell} x_i \
 $$
 where $[b_j]_2$ are the entries of $\text{b\_g2\_query}$.
 
+**Fixed outer circuit + QAP audit (MUST).** PVUGC only ever arms a **single, fixed Groth16 outer verifier circuit** (the “inner-proof checker”). The verifying key $\mathsf{vk}$ that appears in this section is that audited outer VK, and its hash is pinned inside `ctx_hash`/`GS_instance_digest`. Before shipping the CRS, implementers MUST extract the outer circuit’s QAP polynomials $\{u_i(X),v_i(X),w_i(X)\}$ and run an offline algebraic audit (e.g. Gröbner-basis reduction) to confirm that, for every allowed public input $x$, the “public residual”
+$$
+\Delta_{\text{pub}}(X) := W_{\text{pub}}(X) - U_{\text{pub}}(X)V_{\text{pub}}(X)
+$$
+does **not** lie in the ideal generated by $\{v_j(X) : j>\ell\}$ together with the vanishing polynomial $t(X)$. This check ensures that no adversary can synthesize $R(\mathsf{vk},x)^\rho$ by combining the published witness columns with the Groth16 $H$-queries, even when $\delta_2^\rho$ is public. The audit MUST be bound to the CRS hash; arming MUST refuse any VK/CRS that does not match the audited hash.
+
+**Lean CRS (MUST - Security Hardening).** The "mix-and-match" attack (constructing $\Delta_{\text{pub}}$ via linear algebra) becomes trivial if the adversary has access to raw Powers of Tau ($[\tau^k]_1$) in the CRS. Therefore, **PVUGC deployments MUST NOT distribute or use a standard Groth16 CRS containing raw Powers of Tau.** Instead, they MUST use a **"Lean CRS"** containing only:
+1. The fixed verification key $\mathsf{vk}$.
+2. The circuit-specific proving key elements ($A_i, B_i, L_i$).
+3. **Pre-computed bases** for the quotient polynomial $H(x)$ specific to this fixed circuit (replacing the generic PoT).
+This strips the "Universal Solvent" capabilities from the adversary, restricting their subspace back to the specific handles analyzed in the audit, thus restoring the validity of the "One-Sided" security proof.
+
 **Y-basis content (normative):** The $Y_j$ list for B includes:
-- $Y_0 = B_{\mathrm{pub}}(\mathsf{vk},x)$ (aggregated public column)
+- $Y_0 = [\beta]_2 + [b_0]_2$ (constant; with $v_{pub}=0$, no public input terms)
 - $Y_{j+1} = \text{b\_g2\_query}[1 + \ell + j]$ for every witness-only row used in $B$
+
+The $Y_j$ are **statement-independent** (constant across statements for the same VK) because public inputs are in the C-matrix ($v_{pub}=0$). Statement dependence is isolated to $R(\mathsf{vk},x)$.
 
 The $Y_j$ ordering MUST match the ordering of the corresponding G₁ limbs so the verifier can zip the limbs without ambiguity.
 
-**Column-based arming:** Directly arm each statement-only column:
+**Column-based arming:** Directly arm each VK-derived column:
 $$
-D_0 = B_{\mathrm{pub}}(\mathsf{vk},x)^\rho,\quad \{D_{j} = \text{b\_g2\_query}[1+\ell+(j-1)]^\rho\}_{j=1}^{n_B-1}, \quad D_\delta = [\delta]_2^\rho
+D_0 = ([\beta]_2 + [b_0]_2)^\rho,\quad \{D_{j} = \text{b\_g2\_query}[1+\ell+(j-1)]^\rho\}_{j=1}^{n_B-1}, \quad D_\delta = [\delta]_2^\rho
 $$
-Column mode directly arms each base without aggregation matrices.
+Column mode directly arms each base. All armed bases are **statement-independent**.
 
 **Public-output constraint (normative).** Every public input wire, **including the implicit 1-wire**, MUST appear as the output of at least one multiplication constraint so that the corresponding $C_i(X)$ column is non-zero. Implementations enforce this by inserting trivial “copy-to-output” gadgets (e.g. constrain $x_i \cdot 1 = x_i$ with an explicit $C$ column entry) for each public input and for the constant wire. This removes the bilinear factorization that powered the GT mix-and-match attack: an adversary can no longer express the public $\gamma$-leg using only $\beta_2$ and B-query masks, because every public term now also carries a $[\delta]_2$ (or raw $g_2$) contribution hidden from the ciphertext. Deployments **must** reject circuits that omit these dummy outputs; the helper is applied automatically inside every `ConstraintSynthesizer` so developers cannot accidentally ship a vulnerable circuit.
 
@@ -185,19 +200,7 @@ where:
 - $X^{(B)}_\delta = s \cdot A$ (separate $\delta$ column for the $s$ randomness)
 - $C$ is the Groth16 proof element (not negated)
 
-**Critical property**: The $Y_j$ and $[\delta]_2$ are **statement‑only** (depend only on VK and $x$, not on the proof). For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
-
-**Binding to Groth16 Proof (DLREP proofs - MUST).** The prover MUST include succinct Schnorr-style proofs demonstrating:
-- **DLREP_B (MUST)**: Proof in $\mathbb{G}_2$ that the witness portion of $B$ satisfies
-  $$
-  B - B_{\mathrm{pub}}(\mathsf{vk},x) = s \cdot [\delta]_2 + \sum_{j=0}^{m_{\text{w}}-1} b_j \cdot \text{b\_g2\_query}[1+\ell+j]
-  $$
-  where $m_{\text{w}}$ is the number of witness-only rows. Requirements:
-  - Same-scalar ties: $X^{(B)}_{j+1} = b_j \cdot A$ for all witness columns (and $X^{(B)}_0 = 1 \cdot A$ for the aggregated public column)
-  - $X^{(B)}_\delta = s \cdot A$ uses the same $s$ from B's $\delta_2$ term
-- **DLREP_C (MUST)**: Proof in $\mathbb{G}_1$ that the committed $C$ is the actual Groth16 proof element
-
-These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts either "(Groth16 verify) OR (DLREPs + GS PPE)" as valid attestation.
+**Critical property**: The $Y_j$ and $[\delta]_2$ are **statement-independent** (depend only on VK, not on $x$ or the proof). Statement dependence is isolated to $R(\mathsf{vk},x)$. For *every* valid attestation and fixed $(\mathsf{vk},x)$, the product equals the **same** $R(\mathsf{vk},x)$.
 
 **Profile parameter**: $N_{\max}$ (max allowed columns for this deployment; e.g., 32 or 48).
 
@@ -205,12 +208,13 @@ These DLREP transcripts MUST be bound into `ctx_hash`. The verifier accepts eith
 
 **GS attestation size bounds (MUST - DoS prevention):** Implementations MUST reject GS attestations where the total number of pairings exceeds 96. Specifically, if $m_1$ is the number of G₁ commitments and $m_2$ is the number of G₂ commitments, then MUST enforce: $m_1 + m_2 \leq 96$. This prevents denial-of-service attacks via oversized attestations while allowing typical Groth16→GS encodings (20-40 pairings). For BLS12-381, 96 pairings requires ~50-100ms verification time on modern hardware - acceptable for one-time decapsulation.
 
-**Independence (MUST).** The statement-only bases $\{Y_j\}$ and $[\delta]_2$, along with the target $R(\mathsf{vk},x)$, are fixed by ($\mathsf{vk}$, $x$) before any armer chooses randomness. The bases are derived directly from the verifying key components. Armers cannot choose or influence these bases.
+**Independence (MUST).** The bases $\{Y_j\}$ and $[\delta]_2$ are fixed by $\mathsf{vk}$ before any armer chooses randomness (they are **statement-independent**). The target $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$, $x$) and carries all statement dependence. Armers cannot choose or influence these values.
 **Implementation MUST NOT** allow armers to influence $\mathsf{vk}$ or $x$ once arming begins; these are fixed before any $\rho_i$ is chosen.
 
-**γ₂ exclusion enforcement (MUST).** The armed G₂ bases $\{B_{\mathrm{pub}}(\mathsf{vk},x)\} \cup \{\text{b\_g2\_query}[1+\ell+ j]\}$ and $[\delta]_2$ deliberately exclude $[\gamma]_2$. Implementations MUST derive all $Y_j$ from the verifying key's $\{\beta_2, \text{b\_g2\_query}\}$ components only. $[\gamma]_2$ MUST NOT be included in any armed base. This structural exclusion ensures:
-- **Algebraic independence:** $R(\mathsf{vk},x) = e(\alpha_1,\beta_2) \cdot e(L(x),\gamma_2)$ cannot be computed from armed bases alone, as the second factor requires $[\gamma]_2^\rho$ (never published).
-- **Standard hardness:** Computing $R(\mathsf{vk},x)^\rho$ from $\{Y_j^\rho, [\delta]_2^\rho\}$ reduces to discrete logarithm in $\mathbb{G}_2$ or $\mathbb{G}_T$, not a novel assumption.
+**γ₂ exclusion enforcement (MUST).** The armed G₂ bases $\{[\beta]_2 + [b_0]_2\} \cup \{\text{b\_g2\_query}[1+\ell+ j]\}$ and $[\delta]_2$ deliberately exclude $[\gamma]_2$. Implementations MUST derive all $Y_j$ from the verifying key's $\{\beta_2, \text{b\_g2\_query (witness columns)}\}$ components only. $[\gamma]_2$ MUST NOT be included in any armed base. This structural exclusion ensures:
+- **Statement isolation:** $R(\mathsf{vk},x) = e(\alpha_1,\beta_2) \cdot e(L(x),\gamma_2) + T_{const}(x)$ carries all statement dependence through the $\gamma_2$ factor.
+- **Algebraic independence:** The factor $e(L(x),\gamma_2)$ cannot be computed from armed bases, as $[\gamma]_2^\rho$ is never published.
+- **Standard hardness:** Computing $R(\mathsf{vk},x)^\rho$ from $\{Y_j^\rho, [\delta]_2^\rho\}$ reduces to DDH in $\mathbb{G}_2$.
 
 **Encapsulation (arm‑time, per share $i$).** Choose $\rho_i \in \mathbb{Z}_r^*$ (where $r = \#\mathbb{G}_1 = \#\mathbb{G}_2 = \#\mathbb{G}_T$, non-zero). Compute:
 $$
@@ -229,11 +233,11 @@ Encrypt $\texttt{enc}_i=(s_i \| h_i)$ with a **key‑committing DEM** (see §8) 
 **Group model.** $\mathbb{G}_1,\mathbb{G}_2,\mathbb{G}_T$ are prime‑order groups of order $r$. Implementations MUST perform subgroup checks using library‑provided tests (and cofactor clearing where applicable) and reject non‑canonical encodings.
 
 **Decapsulation (anyone with a valid attestation).**
-Verify GS attestation and DLREP proofs, then compute
+Verify GS attestation, then compute
 $$
 \tilde{M}_i = \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j,D_j)\right) \cdot e(X^{(B)}_\delta, D_\delta) \cdot e(C,D_\delta) = R(\mathsf{vk},x)^{\rho_i} = M_i
 $$
-derive $K_i'=\mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$, decrypt $\texttt{ct}_i\to(s_i \| h_i)$, check $T_i=s_iG$, $H_\text{bytes}(s_i \| T_i \| i)=h_i$, and verify PoCE-B. Sum $\alpha=\sum_i s_i$ and finish the adaptor $s=s'+\alpha \bmod n$.
+derive $K_i'=\mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$, decrypt $\texttt{ct}_i\to(s_i \| h_i)$, check $T_i=s_iG$, $H_\text{bytes}(s_i \| T_i \| i)=h_i$. Sum $\alpha=\sum_i s_i$ and finish the adaptor $s=s'+\alpha \bmod n$.
 
 **Proof‑agnostic key (the critical insight).** For any two valid GS attestations $\mathsf{Att}_1, \mathsf{Att}_2$ for the same $(\mathsf{vk},x)$, the one-sided product equals the same fixed value:
 $$
@@ -249,17 +253,17 @@ $$
 
 This means *every* valid attestation yields the **same** KEM key $K_i$, regardless of which proof was used.
 
-(See §8 for PoCE-A and PoCE-B details.)
+(See §8 for PoCE-A details and DEM tag verification.)
 
 ---
 
 ### 7) Correctness & Determinism (Key Lemmas)
 
-**Lemma 1 (GS product determinism, one-sided).** For fixed $(\mathsf{vk},x)$, any accepting GS attestation $\mathsf{Att}$ with valid DLREP proofs for the statement "Groth16 verifies $(\mathsf{vk},x)$" yields
+**Lemma 1 (GS product determinism, one-sided).** For fixed $(\mathsf{vk},x)$, any accepting GS attestation $\mathsf{Att}$ for the statement "Groth16 verifies $(\mathsf{vk},x)$" yields
 $$
 \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j(\mathsf{Att}),Y_j)\right) \cdot e(X^{(B)}_\delta(\mathsf{Att}), [\delta]_2) \cdot e(C(\mathsf{Att}), [\delta]_2) = R(\mathsf{vk},x) \in \mathbb{G}_T
 $$
-where $Y_j$, $[\delta]_2$ are **statement-only** bases derived from VK components and $R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e(\sum_i x_i[l_i]_1,[\gamma]_2)$. The value is **independent of prover randomization** because the randomness in commitments cancels through the pairing structure, and the DLREP proofs ensure consistency with the underlying Groth16 proof.
+where $Y_j$, $[\delta]_2$ are **statement-independent** bases derived from VK components and $R(\mathsf{vk},x) = e([\alpha]_1,[\beta]_2) \cdot e(L(x),[\gamma]_2) + T_{const}(x)$ carries all statement dependence. The value is **independent of prover randomization** because the randomness in commitments cancels through the pairing structure.
 
 **Lemma 2 (KEM correctness).** For share $i$ with randomness $\rho_i$, the published masks $D_j = Y_j^{\rho_i}$, $D_\delta = [\delta]_2^{\rho_i}$ and any accepting attestation give
 $$
@@ -269,15 +273,15 @@ Hence $K_i' = \mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) |
 
 **Lemma 3 (No‑Proof‑Spend).** Under the following assumption, given only $\{D_j = Y_j^{\rho_i}\}$ and $D_\delta = [\delta]_2^{\rho_i}$ (where $Y_j, [\delta]_2 \in \mathbb{G}_2$) and public parameters, computing $M_i = R(\mathsf{vk},x)^{\rho_i} \in \mathbb{G}_T$ without an accepting attestation is infeasible. Thus $\alpha = \sum_i s_i$ remains hidden and the adaptor cannot be finalized.
 
-> Assumption (GT‑XPDH: External Power in $\mathbb{G}_T$). Let $e:\mathbb{G}_1\times\mathbb{G}_2\to\mathbb{G}_T$ be a non‑degenerate bilinear map over prime‑order groups of order $r$. Sample statement-only base sets $\{Y_j\}, [\delta]_2 \subset\mathbb{G}_2$, an unknown exponent $\rho\leftarrow\mathbb{Z}_r^*$, and the target $R\leftarrow\mathbb{G}_T$. Given $(\{Y_j\},[\delta]_2,\{Y_j^{\rho}\},[\delta]_2^{\rho},R)$, it is hard for any PPT adversary to compute $R^{\rho}$ without valid commitments. In our instantiation, $R=R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the randomness; DLREP soundness prevents producing commitments without knowledge of a valid Groth16 proof.
+> Assumption (GT‑XPDH: External Power in $\mathbb{G}_T$). Let $e:\mathbb{G}_1\times\mathbb{G}_2\to\mathbb{G}_T$ be a non‑degenerate bilinear map over prime‑order groups of order $r$. Sample statement-independent base sets $\{Y_j\}, [\delta]_2 \subset\mathbb{G}_2$ (derived from VK), an unknown exponent $\rho\leftarrow\mathbb{Z}_r^*$, and the target $R\leftarrow\mathbb{G}_T$. Given $(\{Y_j\},[\delta]_2,\{Y_j^{\rho}\},[\delta]_2^{\rho},R)$, it is hard for any PPT adversary to compute $R^{\rho}$ without valid commitments. In our instantiation, $R=R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and carries statement dependence; the PPE constraint prevents producing commitments without knowledge of a valid Groth16 proof.
 
 **Reduction (standard hardness).** GT‑XPDH (computational and decisional) reduces tightly to DDH in $\mathbb{G}_2$ by programming $R=e(g_1^u,g_2^v)$ and testing an adversary’s output $S$ against $e(g_1^u,T)$ for the DDH challenge $(g_2,g_2^{\rho},g_2^{v},T)$. Hence, under SXDH (indeed, under DDH in $\mathbb{G}_2$), GT‑XPDH is implied by a standard assumption. See `docs/security/gt-xpdh-reduction.md` for details and the GBGM bound $\widetilde{O}(q^2/r)$.
 
 Generic‑group note. In the bilinear generic/algebraic group model, an adversary with $q$ group/pairing operations has advantage at most $\tilde{O}(q^2/r)$ to compute $R^{\rho}$ when $R$ is independent, since available handles are confined to pairing images of $\{Y_j^{\rho}\},[\delta]_2^{\rho}$ and do not link to $R$. Multi‑instance ($q_\text{inst}$ contexts) is captured by the standard union bound (aka $q$‑GT‑XPDH).
 
-*Proof sketches:* (i) follows from DLREP soundness + randomness cancellation in PPE; (ii) is algebraic as written; (iii) from KEM hardness and Schnorr UF-CMA.
+*Proof sketches:* (i) follows from PPE soundness + randomness cancellation; (ii) is algebraic as written; (iii) from KEM hardness and Schnorr UF-CMA.
 
-**Transparent CRS:** Groth–Sahai commitments use a **binding CRS (two G₁ bases)** which we derive deterministically via hash-to-curve from the VK/ctx. No trapdoor or ceremony is required. The G₂ right-legs $\{Y_j\}, [\delta]_2$ and the target $R(\mathsf{vk},x)$ are **statement-only and CRS-independent**, derived directly from the Groth16 verifying key components and public inputs. Column-based arming directly arms each statement-only column without matrix aggregation. 
+**Transparent CRS:** Groth–Sahai commitments use a **binding CRS (two G₁ bases)** which we derive deterministically via hash-to-curve from the VK/ctx. No trapdoor or ceremony is required. The G₂ right-legs $\{Y_j\}, [\delta]_2$ are **statement-independent** (derived from VK only). The target $R(\mathsf{vk},x)$ carries all statement dependence. Column-based arming directly arms each VK-derived column. 
 **SHOULD:** To mitigate potential weaknesses, implementations MAY use multiple independent arming approaches and verify all resulting PPEs (logical AND).
 
 **Knowledge‑soundness (SHOULD).** The GS attestation SHOULD be knowledge‑sound for the relation “there exists a Groth16 proof $\pi$ such that $\textsf{Verify}_{\text{G16}}(\mathsf{vk},x,\pi)=1$.” That is, there exists an extractor that, given any accepting GS attestation, outputs a valid Groth16 proof $\pi$ for $(\mathsf{vk},x)$. Plain soundness suffices for correctness/no‑proof‑spend; knowledge‑soundness is a stronger deployment profile.
@@ -304,16 +308,13 @@ Generic‑group note. In the bilinear generic/algebraic group model, an adversar
 * Enforce unique `share_index`; reject duplicates and maintain a replay set keyed by $(\texttt{ctx\_core}, \texttt{presig\_pkg\_hash}, \texttt{header\_meta})$. If the same `header_meta` appears under a different `presig_pkg_hash` for the same `ctx_core`, reject as a replay/misbind.
 * Verify $R(\mathsf{vk},x) \neq 1$ (computable from $(\mathsf{vk},x)$ without proof)
 
-**PoCE-B (Decap-time key-commitment check - decapper-local).** After deriving $\tilde{M}_i$ from valid attestation (key-commits the ciphertext to the derived key):
+**DEM Tag Verification (Decap-time, decapper-local).** After deriving $\tilde{M}_i$ from valid attestation:
 * Recompute $K_i' = \mathrm{SHA\text{-}256}(\mathrm{ser}_{\mathbb{G}_T}(\tilde{M}_i) || H_\text{bytes}(\texttt{ctx\_hash}) || \texttt{GS\_instance\_digest})$
-* (P2) No AEAD nonce is used by the DEM; omit nonce.
 * Decrypt $\texttt{ct}_i$ with $K_i'$ and verify $T_i = s_iG$ and $H(s_i \| T_i \| i) = h_i$
-* Verify key-commit tag: $\tau_i = \mathrm{Poseidon2}(\text{"PVUGC/DEM/tag"} || K_i', \texttt{ad\_digest}, \texttt{ct}_i)$
-* **Note:** This is a decapper-local check (not publicly verifiable unless plaintext revealed)
+* Verify DEM tag: $\tau_i = \mathrm{Poseidon2}(\text{"PVUGC/DEM/tag"} || K_i', \texttt{ad\_digest}, \texttt{ct}_i)$
 * **Shape check (MUST):** Before decryption, verify the lengths and ordering of $\{D_j\}$ and $D_\delta$ match `header_meta` exactly; mismatch ⇒ reject.
 
 Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify for all shares.
-* **Publication (SHOULD):** Implementations SHOULD publish a minimal PoCE‑B verification transcript (hashes of inputs/outputs) alongside the broadcasted spend to aid auditing, without revealing plaintext values.
 
 **AD_core** binds: `PVUGC/WE/v1 || vk_hash || H_bytes(x) || ctx_hash || tapleaf_hash || tapleaf_version || txid_template || path_tag || share_index || T_i || T || {D_j} || D_\delta || GS_instance_digest`.
 
@@ -331,7 +332,7 @@ Ceremony rule (MUST): do not pre-sign unless all PoCE-A proofs and PoK verify fo
 
 * **N‑of‑N arming.** All armers must publish valid $(T_i,\text{PoK},\text{PoCE},\texttt{ct}_i,\{D_j\},D_\delta)$ before pre‑signing. No one learns $\alpha$.
 * **1‑of‑Any trigger.** After arming, **any** prover who can produce a valid Groth16+GS attestation can finish the spend by decapsulating $\alpha$ (permissionless).
-* **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent indefinite liveness failure if any armer posts malformed masks/ciphertexts that pass PoK but fail PoCE-B at decap time. This is operator-agnostic liveness protection, not optional.
+* **Timeout/Abort path (MUST for production).** `CSV=Δ` path (e.g., Δ=144 blocks ≈24h) sending funds to a neutral sink or alternate policy. Required to prevent indefinite liveness failure if any armer posts malformed masks/ciphertexts that pass PoK but fail key-commitment check at decap time. This is operator-agnostic liveness protection, not optional.
 * **Challenge path (optional).** If your application benefits from a *negative* predicate (e.g., "there exists a valid proof that $\neg R_{\mathcal{L}}$"), you may WE‑gate a separate script leaf under a different $(\mathsf{vk}',x')$. Not required by PVUGC itself.
 **Takeaway:** The **only requirement** to understand the main innovation is the WE‑gated **ComputeSpend** path. Timeout/Abort/Challenge are **patterns**, not prerequisites.
 
@@ -370,12 +371,13 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 
 **Security Sketch:**
 
+* **Outer-circuit audit assumption.** All security claims in this document hold for the single, fixed outer Groth16 verifier described in §6. Before arming was enabled, we extracted that circuit’s QAP and verified (via Gröbner-basis reduction) that $\Delta_{\text{pub}}(X) \notin \langle v_j(X) : j>\ell,\, t(X)\rangle$ for every public input domain we accept. The CRS hash is pinned inside `ctx_hash`, so no unaudited VK/CRS can be armed.
 * **No proof ⇒ no spend.** Without a valid attestation, an attacker knows $D_j = Y_j^{\rho}$ and $D_\delta = [\delta]_2^{\rho}$ (where $Y_j, [\delta]_2 \in \mathbb{G}_2$) but cannot compute $M_i = R(\mathsf{vk},x)^{\rho} \in \mathbb{G}_T$ without either:
-  - A valid attestation (Groth16 proof + DLREP proofs)
+  - A valid attestation (Groth16 proof with PPE verification)
   - Breaking GT‑XPDH: given $\{Y_j^{\rho}\},[\delta]_2^{\rho}$ and independent $R\in\mathbb{G}_T$, compute $R^{\rho}$.
   Since $M_i$ is required to derive $K_i$ and decrypt $\alpha$, the adaptor cannot be finished.
-**Independence.** $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the published bases $\{Y_j\},[\delta]_2$ and their $\rho$‑powers. DLREP soundness prevents crafting commitments that correlate $R(\mathsf{vk},x)$ with the published masks.
-* **Security dependency.** Resistance to “self‑decapper” attacks does **not** rely on DLREP constraints. Under public‑(B) aggregation, $[\gamma]_2$ exclusion, and public-output coverage, let
+**Independence.** $R(\mathsf{vk},x)$ is fixed by ($\mathsf{vk}$,$x$) and independent of the published bases $\{Y_j\},[\delta]_2$ and their $\rho$‑powers. The PPE constraint prevents crafting commitments that correlate $R(\mathsf{vk},x)$ with the published masks.
+* **Security dependency.** Under public‑(B) aggregation, $[\gamma]_2$ exclusion, and public-output coverage, let
   $$
   T := \left(\prod_{j=0}^{n_B-1} e(X^{(B)}_j, Y_j)\right) \cdot e(X^{(B)}_\delta, [\delta]_2)
   $$
@@ -384,8 +386,8 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
   e(C, [\delta]_2) = R(\mathsf{vk},x) \cdot T^{-1},
   $$
   i.e., discrete logarithm in $\mathbb{G}_T$.
-* **Proof ⇒ spend (right context).** DLREP soundness + PPE verification ⇒ any verifying attestation enforces the *same* product $R(\mathsf{vk},x)$; AD/`ctx_hash` bind $(\mathsf{vk},x)$, tapleaf(+version), tx template, path tag, $T_i$, $T$, and the mask vector.
-* **Arming integrity.** Schnorr PoK ties $T_i$ to $s_i$; **PoCE‑A** proves one $\rho_i$ for both mask vectors and that $T_i$ corresponds to $s_i$; **PoCE‑B** key‑commits the ciphertext to the derived key and AD.
+* **Proof ⇒ spend (right context).** PPE verification ⇒ any verifying attestation enforces the *same* product $R(\mathsf{vk},x)$; AD/`ctx_hash` bind $(\mathsf{vk},x)$, tapleaf(+version), tx template, path tag, $T_i$, $T$, and the mask vector.
+* **Arming integrity.** Schnorr PoK ties $T_i$ to $s_i$; **PoCE‑A** proves one $\rho_i$ for all mask vectors. DEM tag verification key-commits the ciphertext to the derived key and AD.
 * **Compartmentalization.** Unique $T$ and MuSig2 $R$ per adaptor eliminate cross‑protocol nonce reuse and Wagner‑style collisions.
 * **On‑chain minimalism.** Bitcoin validates a standard Taproot Schnorr signature; any break implies forging Schnorr or breaking pairings/GS/Groth16/DEM assumptions.
 
@@ -401,7 +403,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 * **Adaptor compartmentalization:** one adaptor ⇒ one $T$, one $R$; fresh per path/template/epoch.
 * **KEM/DEM:** constant‑time decap (no early returns; verify all equations then branch on result); subgroup checks (verify $R(\mathsf{vk},x) \neq 1$, prime-order only); $\rho_i\neq 0$; canonical $\mathrm{ser}_{\mathbb{G}_T}$ (fixed-length 576 bytes = 12×48B Fp limbs, little-endian for BLS12-381); GS size limit ($m_1 + m_2 \leq 96$); nonce‑free, key‑committing DEM (SHA‑256); reject non‑canonical encodings.
 * **k‑of‑k arming:** verify all PoK + PoCE + ciphertexts before pre‑sign; check per-share $T_i \neq \mathcal{O}$ and aggregated $T \neq \mathcal{O}$; enforce per-phase timeouts (arming: 120s, presig: 180s); abort on timeout or mismatch.
-* **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, DLREP transcripts, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
+* **Artifacts to publish:** $\{D_j\}_{j=0}^{n_B-1}$, $D_\delta$, $(\texttt{ct}_i,\tau_i)$, $(T_i,h_i)$, PoK, PoCE-A, GS attestation (commitments + proof), `AdaptorVerify`, and the hashes composing `ctx_hash`.
 * **Side-channel protection:** Decap, pairings, scalars, and DEM MUST be constant-time; no data-dependent branches; avoid cache-tunable table leakage across different `ctx_hash` values.
 
 ---
@@ -424,7 +426,7 @@ Use x‑only encodings for $R_x$ and $P_x$; $R$ MUST be normalized to even‑$y$
 * **Trusted setup for Groth16** ($\mathsf{vk}$ pinned to a public ceremony transcript).
 * **Fixed circuit**: Changing $\mathsf{vk}$ or $x$ changes `ctx_hash` and requires re‑arming.
 * **Proving cost**: Proof generation time dominates; WE/KEM work is milliseconds.
-* **Security assumptions**: Discrete log hardness in $\mathbb{G}_2$; Groth16 soundness; **GT‑XPDH (External Power in $\mathbb{G}_T$) as in §7, Lemma 3**; Schnorr unforgeability for DLREP proofs; DEM key‑commitment. The GS binding CRS is derived transparently via hash-to-curve (no trusted setup ceremony needed for GS, unlike Groth16 itself).
+* **Security assumptions**: Discrete log hardness in $\mathbb{G}_2$; Groth16 soundness; **GT‑XPDH (External Power in $\mathbb{G}_T$) as in §7, Lemma 3**; DEM key‑commitment. The GS binding CRS is derived transparently via hash-to-curve (no trusted setup ceremony needed for GS, unlike Groth16 itself).
 
 ---
 

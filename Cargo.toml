@@ -11,7 +11,7 @@ name = "arkworks_groth16"
 crate-type = ["rlib"]  # Add rlib for testing
 
 [features]
-default = ["r1cs", "parallel", "pvugc-hooks"]
+default = ["r1cs", "parallel", "pvugc-hooks", "asm"]
 r1cs = ["ark-groth16/r1cs"]
 parallel = [
     "ark-ff/parallel",
@@ -19,6 +19,9 @@ parallel = [
     "ark-std/parallel",
 ]
 pvugc-hooks = []
+asm = [
+    "ark-ff/asm",
+]
 
 [dependencies]
 # Arkworks ecosystem (0.5 for PVUGC compatibility)
@@ -28,7 +31,7 @@ ark-bw6-761   = "0.5"  # BW6-761 for production recursion
 ark-mnt4-298  = { version = "0.5", features = ["curve", "r1cs"] }  # Lightweight recursion cycle (inner)
 ark-mnt6-298  = { version = "0.5", features = ["std", "r1cs"] }   # Lightweight recursion cycle (outer)
 ark-ec = "0.5"
-ark-ff = "0.5"
+ark-ff = { version = "0.5", features = ["asm", "parallel"] }
 ark-groth16 = { path = "ark-groth16-pvugc" }
 ark-r1cs-std = "0.5"
 ark-relations = "0.5"
@@ -58,6 +61,8 @@ rand_core = "0.6"
 subtle = "2.6"
 k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
 bitcoin = { version = "0.31", default-features = false, features = ["std"] }
+ark-poly = "0.5.0"
+ndarray = "0.17.1"
 
 
 [profile.release]
