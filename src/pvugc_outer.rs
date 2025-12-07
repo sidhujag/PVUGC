@@ -310,27 +310,60 @@ fn compute_witness_bases<C: RecursionCycle>(
     }
 
     let mut active_pairs = HashSet::new();
+    
+    // Count pair types being added to active_pairs
+    let mut ap_const_wit = 0usize;
+    let mut ap_wit_const = 0usize;
+    let mut ap_wit_wit = 0usize;
+    let mut ap_pub_pub = 0usize;
+    let mut ap_pub_wit = 0usize;
+    let mut ap_wit_pub = 0usize;
+    let mut ap_const_pub = 0usize;
+    let mut ap_pub_const = 0usize;
+    let mut ap_const_const = 0usize;
+    
     for &i in &vars_a {
         for &j in &vars_b {
-            // Include only: (const, wit) and (wit, wit) pairs
-            // Exclude: (wit, pub), (pub, wit), (pub, pub)
-            // Rationale:
-            //   - (pub, pub): Both public → no witness contribution
-            //   - (pub, wit): Public in A-side → but u_pub = 0, so H = 0
-            //   - (wit, pub): Witness in A, public in B → produces 0 bases
-            //                 because "no shared A/B rows" (audit verified)
-            //   - (const, wit): Constant '1' × witness → needed for baked α
-            //   - (wit, wit): Witness × witness → core quotient computation
-            let i_is_const_or_wit = i == 0 || i >= num_pub;
+            active_pairs.insert((i, j));
+            
+            // Categorize this pair
+            let i_is_const = i == 0;
+            let i_is_pub = i > 0 && i < num_pub;
+            let i_is_wit = i >= num_pub;
+            let j_is_const = j == 0;
+            let j_is_pub = j > 0 && j < num_pub;
             let j_is_wit = j >= num_pub;
-            if i_is_const_or_wit && j_is_wit {
-                active_pairs.insert((i, j));
-            }
+            
+            if i_is_const && j_is_const { ap_const_const += 1; }
+            else if i_is_const && j_is_wit { ap_const_wit += 1; }
+            else if i_is_const && j_is_pub { ap_const_pub += 1; }
+            else if i_is_wit && j_is_const { ap_wit_const += 1; }
+            else if i_is_wit && j_is_wit { ap_wit_wit += 1; }
+            else if i_is_wit && j_is_pub { ap_wit_pub += 1; }
+            else if i_is_pub && j_is_const { ap_pub_const += 1; }
+            else if i_is_pub && j_is_wit { ap_pub_wit += 1; }
+            else if i_is_pub && j_is_pub { ap_pub_pub += 1; }
         }
+    }
+    
+    println!("[Quotient] Active pairs breakdown:");
+    println!("    (const, const): {}", ap_const_const);
+    println!("    (const, wit):   {}", ap_const_wit);
+    println!("    (const, pub):   {}", ap_const_pub);
+    println!("    (wit, const):   {}", ap_wit_const);
+    println!("    (wit, wit):     {}", ap_wit_wit);
+    println!("    (wit, pub):     {}", ap_wit_pub);
+    println!("    (pub, const):   {}", ap_pub_const);
+    println!("    (pub, wit):     {}", ap_pub_wit);
+    println!("    (pub, pub):     {}", ap_pub_pub);
+    
+    if ap_pub_pub > 0 || ap_pub_wit > 0 || ap_wit_pub > 0 || ap_pub_const > 0 || ap_const_pub > 0 {
+        println!("    ⚠️  Public-involving pairs detected in active_pairs!");
+        println!("       These should have zero h_ij bases (verified by audit).");
     }
 
     println!(
-        "[Quotient] Found {} relevant pairs. Computing bases (Parallel)...",
+        "[Quotient] Found {} total pairs. Computing bases (Parallel)...",
         active_pairs.len()
     );
 
@@ -671,6 +704,7 @@ fn audit_witness_bases<C: RecursionCycle>(
     
     let mut wit_wit_count = 0usize;
     let mut const_wit_count = 0usize;
+    let mut wit_const_count = 0usize;  // NEW: (wit, const) pairs
     let mut wit_pub_count = 0usize;
     let mut pub_wit_count = 0usize;
     
@@ -682,6 +716,7 @@ fn audit_witness_bases<C: RecursionCycle>(
         let i_is_pub = i_idx > 0 && i_idx < num_public;
         let i_is_wit = i_idx >= num_public;
         
+        let j_is_const = j_idx == 0;
         let j_is_pub = j_idx > 0 && j_idx < num_public;
         let j_is_wit = j_idx >= num_public;
         
@@ -689,6 +724,8 @@ fn audit_witness_bases<C: RecursionCycle>(
             wit_wit_count += 1;
         } else if i_is_const && j_is_wit {
             const_wit_count += 1;
+        } else if i_is_wit && j_is_const {
+            wit_const_count += 1;  // NEW: tracks (wit, const) pairs
         } else if i_is_wit && j_is_pub {
             wit_pub_count += 1;
         } else if i_is_pub && j_is_wit {
@@ -698,6 +735,7 @@ fn audit_witness_bases<C: RecursionCycle>(
     
     println!("  h_query_wit composition:");
     println!("    (const, wit): {} pairs", const_wit_count);
+    println!("    (wit, const): {} pairs", wit_const_count);  // NEW
     println!("    (wit, wit):   {} pairs", wit_wit_count);
     println!("    (wit, pub):   {} pairs (should be 0 for optimal security)", wit_pub_count);
     println!("    (pub, wit):   {} pairs (should be 0 - blocked by A=0 for pub)", pub_wit_count);
@@ -805,8 +843,6 @@ where
         .map(|q| C::OuterE::pairing(q, delta_g2))
         .collect()
 }
-
-
 
 /// Compute Q_i in G1 from the standard–lean *C* gap:
 ///   c_gap(x) := C_std(x) - C_lean(x) = Q(x)
