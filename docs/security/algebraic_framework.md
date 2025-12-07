@@ -157,6 +157,19 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 
 *   **Conclusion:** Given the missing $\mathbb{G}_1$ bases for $Q_{const}$ and the fact that $Q_{const} \notin \text{span}(H_{ij})$ is enforced by audit, the adversary cannot synthesize $[Q_{const}(x,\tau)]_1$ in $\mathbb{G}_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
 
+### 2.5 WE Decryptor Model and RHS Identity Coverage
+We now make explicit the points regarding a decryptor with full pairing capability and the QAP identity $(\sum a_i u_i)(\sum a_i v_i) = \sum a_i w_i \pmod{t(x)}$.
+
+**Decryptor power:** The adversary/decryptor is allowed to evaluate any pairing-evaluable circuit over all published $\mathbb{G}_1,\mathbb{G}_2$ handles (not just Groth16-style $(A,B,C)$ tuples). This is already modeled by the pairing oracle in §1.2.
+
+**RHS identity:** Any $\mathbb{G}_T$ value equal to $\sum a_i w_i(\tau) \bmod t(\tau)$ must be computed via pairings on some $\mathbb{G}_1$ representation of $w_i(\tau)$. The Lean CRS never publishes those bases for public columns, and witness-only $w_i$ bases remain orthogonal to $W_{pub}$. Therefore, every pairing-evaluable construction of the RHS lies outside the adversary span unless it is the honest construction. Under SXDH/GT-XPDH, any alternative construction is indistinguishable from random in $\mathbb{G}_T$.
+
+**Indices $i > \ell$ (witness terms):** We do provide individual witness-column elements (e.g., $A_k, B_k, L_k, H_{wit}$) for $k > \ell$, but these carry no public-column support and no $\rho$ in $\mathbb{G}_1$. Pairing them with armed $\mathbb{G}_2$ handles yields terms confined to the witness span; by W-span separation ($W_{pub} \perp W_{wit}$), they cannot synthesize $\sum a_i w_i$ with the public residue or attach $\rho$ to $T_{const}$.
+
+**Alternative RHS syntheses:** Even if the decryptor rearranges pairings or mixes witness handles arbitrarily, any GT element matching the RHS would require (1) a missing $[Q_{const}]_1$ basis or (2) a $\rho$-scaled GT element. Both are blocked: $Q_{const}$ bases are excluded from $\mathbb{G}_1$, and $\rho$ only appears in $\mathbb{G}_2$, with no operation that multiplies $\mathbb{G}_T$ by $\rho$.
+
+**WE game framing:** For IND-style WE security, give the adversary (a) all published handles, (b) full pairing access over them, and (c) challenge keys derived from $R(vk,x)^\rho$. The simulator already used in §4 (GT-XPDH/GBGM) answers every pairing query consistently while keeping $T_{const}^\rho$ unreachable, so the span-separation argument extends unchanged to the decryptor setting.
+
 ## 3. Completeness for Honest Prover
 
 The "Honest Prover Dilemma" (Prover needs handles that Adversary abuses) is resolved by the **Linearity Assumption**.
