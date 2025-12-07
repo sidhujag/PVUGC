@@ -324,25 +324,10 @@ fn compute_witness_bases<C: RecursionCycle>(
     
     for &i in &vars_a {
         for &j in &vars_b {
+            if i < num_pub && j < num_pub {
+                continue;
+            }
             active_pairs.insert((i, j));
-            
-            // Categorize this pair
-            let i_is_const = i == 0;
-            let i_is_pub = i > 0 && i < num_pub;
-            let i_is_wit = i >= num_pub;
-            let j_is_const = j == 0;
-            let j_is_pub = j > 0 && j < num_pub;
-            let j_is_wit = j >= num_pub;
-            
-            if i_is_const && j_is_const { ap_const_const += 1; }
-            else if i_is_const && j_is_wit { ap_const_wit += 1; }
-            else if i_is_const && j_is_pub { ap_const_pub += 1; }
-            else if i_is_wit && j_is_const { ap_wit_const += 1; }
-            else if i_is_wit && j_is_wit { ap_wit_wit += 1; }
-            else if i_is_wit && j_is_pub { ap_wit_pub += 1; }
-            else if i_is_pub && j_is_const { ap_pub_const += 1; }
-            else if i_is_pub && j_is_wit { ap_pub_wit += 1; }
-            else if i_is_pub && j_is_pub { ap_pub_pub += 1; }
         }
     }
     
@@ -479,9 +464,6 @@ fn compute_witness_bases<C: RecursionCycle>(
             )> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
-                if (i as usize) < num_pub && (j as usize) < num_pub {
-                    continue;
-                }
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if prog == 0 || prog % 100000 == 0 {
                     let elapsed = wit_start.elapsed().as_secs_f64();
@@ -702,9 +684,10 @@ fn audit_witness_bases<C: RecursionCycle>(
     // This confirms the "baked quotient in GT can't be ρ-exponentiated" security property.
     println!("\n--- Quotient Reachability Check ---");
     
+    let mut const_const_count = 0usize;
     let mut wit_wit_count = 0usize;
     let mut const_wit_count = 0usize;
-    let mut wit_const_count = 0usize;  // NEW: (wit, const) pairs
+    let mut wit_const_count = 0usize;
     let mut wit_pub_count = 0usize;
     let mut pub_wit_count = 0usize;
     
@@ -720,12 +703,14 @@ fn audit_witness_bases<C: RecursionCycle>(
         let j_is_pub = j_idx > 0 && j_idx < num_public;
         let j_is_wit = j_idx >= num_public;
         
-        if i_is_wit && j_is_wit {
+        if i_is_const && j_is_const {
+            const_const_count += 1;  // Should never happen - (0,0) is skipped
+        } else if i_is_wit && j_is_wit {
             wit_wit_count += 1;
         } else if i_is_const && j_is_wit {
             const_wit_count += 1;
         } else if i_is_wit && j_is_const {
-            wit_const_count += 1;  // NEW: tracks (wit, const) pairs
+            wit_const_count += 1;
         } else if i_is_wit && j_is_pub {
             wit_pub_count += 1;
         } else if i_is_pub && j_is_wit {
@@ -734,8 +719,9 @@ fn audit_witness_bases<C: RecursionCycle>(
     }
     
     println!("  h_query_wit composition:");
+    println!("    (const, const): {} pairs (should be 0 - skipped for T_const^ρ security)", const_const_count);
     println!("    (const, wit): {} pairs", const_wit_count);
-    println!("    (wit, const): {} pairs", wit_const_count);  // NEW
+    println!("    (wit, const): {} pairs", wit_const_count);
     println!("    (wit, wit):   {} pairs", wit_wit_count);
     println!("    (wit, pub):   {} pairs (should be 0 for optimal security)", wit_pub_count);
     println!("    (pub, wit):   {} pairs (should be 0 - blocked by A=0 for pub)", pub_wit_count);
@@ -757,12 +743,18 @@ fn audit_witness_bases<C: RecursionCycle>(
         );
     }
     
+    // Security check: (const, const)
+    if const_const_count > 0 {
+        panic!(
+            "[SECURITY AUDIT FAIL] {} (const,const) pairs in h_query_wit!",
+            const_const_count
+        );
+    }
+    
     // Final verdict on quotient reachability
-    let only_safe_pairs = pub_wit_count == 0;
+    let only_safe_pairs = pub_wit_count == 0 && const_const_count == 0;
     if only_safe_pairs {
-        println!("[PASS] Quotient Reachability: h_query_wit contains no (pub,wit) pairs.");
-        println!("       → Q_pub is unreachable from h_query_wit span (by U-span separation).");
-        println!("       → Adversary cannot synthesize T_const^ρ via e(H_ij, δ^ρ).");
+        println!("[PASS] Quotient Reachability: h_query_wit contains clean span.");
     }
 }
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
