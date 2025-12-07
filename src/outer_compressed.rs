@@ -225,7 +225,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
        /* let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;
+        ok.enforce_equal(&Boolean::TRUE)?;*/
         Ok(())
     }
 }
