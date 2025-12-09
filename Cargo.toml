@@ -65,6 +65,15 @@ ark-poly = "0.5.0"
 ndarray = "0.17.1"
 
 
+# Dev profile: optimize for faster incremental builds
+[profile.dev]
+opt-level = 1
+
+# Optimize all dependencies at O3 even in dev mode
+# One-time cost on clean build, but speeds up incremental builds
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "fat"

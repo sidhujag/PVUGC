@@ -9,6 +9,16 @@ pub enum CombinerKind {
     RandomRho,                         // weights = rho^i
     DegreeChunks { chunk_deg: usize }, // weights = x^(chunk_deg * i)
 }
+
+impl CombinerKind {
+    /// Convert to u64 for hashing (discriminant + optional data)
+    pub fn to_u64(&self) -> u64 {
+        match self {
+            CombinerKind::RandomRho => 0,
+            CombinerKind::DegreeChunks { chunk_deg } => 1 + (*chunk_deg as u64),
+        }
+    }
+}
 /// Convert 32 bytes to 4 GL field elements (8 bytes each, LE)
 pub fn digest32_to_gl4(bytes32: &[UInt8<InnerFr>]) -> Result<[FpGLVar; 4], SynthesisError> {
     assert!(bytes32.len() == 32);

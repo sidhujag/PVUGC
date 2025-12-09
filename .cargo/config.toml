@@ -1,0 +1,32 @@
+# Rust compile time optimizations
+# Reference: https://benw.is/posts/how-i-improved-my-rust-compile-times-by-seventy-five-percent
+
+[build]
+# Use more parallel jobs
+jobs = 16
+
+[target.x86_64-apple-darwin]
+# Use faster linker on macOS (zld or lld if available)
+# Uncomment if you have zld installed: brew install michaeleisel/zld/zld
+# zld failed to build on newer Xcode - use default linker
+# rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/bin/zld"]
+
+# For M1/M2 Macs, use this target instead:
+# [target.aarch64-apple-darwin]
+
+[profile.dev]
+# Higher opt-level can make incremental builds faster (paradoxically)
+# and improves runtime performance during development
+opt-level = 1
+
+[profile.dev.package."*"]
+# Optimize all dependencies at level 3
+# This is a one-time cost on clean build but speeds up incremental
+opt-level = 3
+
+# Uncomment to try Cranelift (experimental, may have issues with crypto intrinsics)
+# [unstable]
+# codegen-backend = true
+# 
+# [profile.dev]
+# codegen-backend = "cranelift"

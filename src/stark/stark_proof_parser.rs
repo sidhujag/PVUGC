@@ -296,7 +296,8 @@ where
         FriTerminalKind::Constant => Vec::new(),
     };
 
-    // Compute statement hash (including position commitment!)
+    // Compute statement hash (including position commitment and ALL air_params!)
+    // This binds all structural parameters, preventing any param manipulation.
     let statement_hash = compute_statement_hash(
         &trace_commitment_le32,
         &comp_commitment_le32,
@@ -304,6 +305,7 @@ where
         &ood_commitment_le32,
         &pub_inputs_u64,
         &query_positions, // Bind positions to prevent adversarial selection!
+        &air_params,      // Bind ALL air_params to prevent parameter attacks!
     );
 
     FullStarkVerifierCircuit {
@@ -700,7 +702,7 @@ fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
     sponge.squeeze_field_elements::<InnerFr>(1)[0]
 }
 
-/// Compute statement hash binding all public data (including positions)
+/// Compute statement hash binding all public data (including positions and ALL air params)
 fn compute_statement_hash(
     trace_roots: &[[u8; 32]],
     comp_root: &[u8; 32],
@@ -708,6 +710,7 @@ fn compute_statement_hash(
     ood_commit: &[u8; 32],
     pub_inputs: &[u64],
     query_positions: &[usize],
+    air_params: &super::inner_stark_full::AirParams, // Full air_params for complete binding
 ) -> InnerFr {
     use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
@@ -751,6 +754,43 @@ fn compute_statement_hash(
     let pos_commit = poseidon_commit_positions_offchain(query_positions);
     hasher.absorb(&pos_commit);
 
+    // Compute and absorb air_params hash (MUST match in-circuit computation!)
+    // This binds ALL structural params, not just an identity hash.
+    let params_hash = compute_air_params_hash(air_params);
+    hasher.absorb(&params_hash);
+
     let hash = hasher.squeeze_field_elements::<InnerFr>(1);
     hash[0]
+}
+
+/// Compute Poseidon hash of all air_params (must match in-circuit computation exactly!)
+fn compute_air_params_hash(air_params: &super::inner_stark_full::AirParams) -> InnerFr {
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
+    use ark_crypto_primitives::sponge::CryptographicSponge;
+
+    let mut params_hasher = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
+
+    // Domain separator for AIR params binding (must match circuit!)
+    params_hasher.absorb(&InnerFr::from(0xA1A1u64));
+
+    // Absorb all structural params in exact same order as circuit
+    params_hasher.absorb(&InnerFr::from(air_params.trace_width as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.comp_width as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.trace_len as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.lde_blowup as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.num_queries as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.fri_folding_factor as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.fri_num_layers as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.lde_generator));
+    params_hasher.absorb(&InnerFr::from(air_params.domain_offset));
+    params_hasher.absorb(&InnerFr::from(air_params.g_lde));
+    params_hasher.absorb(&InnerFr::from(air_params.g_trace));
+    params_hasher.absorb(&InnerFr::from(air_params.num_constraint_coeffs as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.grinding_factor as u64));
+    params_hasher.absorb(&InnerFr::from(air_params.combiner_kind.to_u64()));
+    params_hasher.absorb(&InnerFr::from(air_params.fri_terminal.to_u64()));
+    params_hasher.absorb(&InnerFr::from(air_params.aggregator_version));
+
+    params_hasher.squeeze_field_elements::<InnerFr>(1)[0]
 }

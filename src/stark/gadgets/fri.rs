@@ -19,6 +19,16 @@ pub enum FriTerminalKind {
     Poly { degree: usize }, // final values equal P(x) for given coeffs
 }
 
+impl FriTerminalKind {
+    /// Convert to u64 for hashing (discriminant + optional data)
+    pub fn to_u64(&self) -> u64 {
+        match self {
+            FriTerminalKind::Constant => 0,
+            FriTerminalKind::Poly { degree } => 1 + (*degree as u64),
+        }
+    }
+}
+
 pub struct FriConfigGL {
     pub folding_factor: usize,        // typically 2
     pub params_rpo: RpoParamsGLLight, // Light RPO parameters

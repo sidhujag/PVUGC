@@ -40,12 +40,21 @@ use super::gadgets::gl_fast::{
 };
 use super::gadgets::gl_range::{gl_alloc_u64, gl_alloc_u64_vec};
 use super::gadgets::utils::CombinerKind;
+// OOD verification is now in ood_eval_r1cs.rs
+use super::ood_eval_r1cs::verify_ood_equation_in_circuit;
 
 // Use GL type alias for non-native Goldilocks operations in Fr377
 pub type FpGLVar = FpVar<InnerFr>;
 type UInt64GLVar = UInt64Var<InnerFr>;
 
+/// Current aggregator STARK version
+pub const AGGREGATOR_VERSION: u64 = 1;
+
 /// AIR parameters needed for verification (constants, not witnesses)
+///
+/// In the recursive STARK architecture, these parameters describe the
+/// FINAL proof that Groth16 verifies (i.e., the Verifier STARK output).
+/// For now, they also describe application STARKs directly.
 #[derive(Clone, Debug)]
 pub struct AirParams {
     pub trace_width: usize,
@@ -63,6 +72,9 @@ pub struct AirParams {
     pub fri_terminal: super::gadgets::fri::FriTerminalKind,
     pub num_constraint_coeffs: usize,
     pub grinding_factor: u32,
+    /// Aggregator STARK version (allows protocol upgrades).
+    /// In recursive mode: this is the version of the Verifier STARK.
+    pub aggregator_version: u64,
 }
 
 /// Full STARK verifier circuit
@@ -155,15 +167,7 @@ pub struct FriQuery {
 
 impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<InnerFr>) -> Result<(), SynthesisError> {
-        use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
-        use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
-        use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
-
-        // STEP 1: Bind commitments to public statement hash
-        let statement_hash_var =
-            FpVar::<InnerFr>::new_input(cs.clone(), || Ok(self.statement_hash))?;
-
-        // Allocate commitment bytes as witnesses
+        // Allocate commitment bytes as witnesses (used for both statement hash and later verification)
         let trace_root_bytes: Vec<Vec<UInt8<InnerFr>>> = self
             .trace_commitment_le32
             .iter()
@@ -187,51 +191,24 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                     .collect()
             })
             .collect::<Result<_, _>>()?;
-
-        // Hash commitments and verify against public input
-        let mut hasher = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
-
-        // Absorb trace commitment (as field elements)
-        for root in &trace_root_bytes {
-            for chunk in root.chunks(8) {
-                let fe = bytes_to_field_le(chunk)?;
-                hasher.absorb(&fe)?;
-            }
-        }
-        // Absorb comp commitment
-        for chunk in comp_root_bytes.chunks(8) {
-            let fe = bytes_to_field_le(chunk)?;
-            hasher.absorb(&fe)?;
-        }
-        // Absorb FRI commitments
-        for fri_root in &fri_roots_bytes {
-            for chunk in fri_root.chunks(8) {
-                let fe = bytes_to_field_le(chunk)?;
-                hasher.absorb(&fe)?;
-            }
-        }
-        // Absorb OOD commitment (binds OOD frame, prevents free witnesses)
         let ood_commit_bytes: Vec<UInt8<InnerFr>> = self
             .ood_commitment_le32
             .iter()
             .map(|b| UInt8::new_witness(cs.clone(), || Ok(*b)))
             .collect::<Result<_, _>>()?;
-        for chunk in ood_commit_bytes.chunks(8) {
-            let fe = bytes_to_field_le(chunk)?;
-            hasher.absorb(&fe)?;
-        }
 
-        // Absorb STARK public inputs
-        for pub_in in &self.stark_pub_inputs {
-            hasher.absorb(&FpVar::constant(InnerFr::from(*pub_in)))?;
-        }
-
-        // Commit to query positions and absorb (prevents adversarial positions!)
-        let pos_commit = commit_positions_poseidon(cs.clone(), &self.query_positions)?;
-        hasher.absorb(&pos_commit)?;
-
-        let computed_hash = hasher.squeeze_field_elements(1)?;
-        computed_hash[0].enforce_equal(&statement_hash_var)?;
+        // STEP 1: Bind commitments to public statement hash
+        bind_statement_hash(
+            cs.clone(),
+            self.statement_hash,
+            &trace_root_bytes,
+            &comp_root_bytes,
+            &fri_roots_bytes,
+            &ood_commit_bytes,
+            &self.stark_pub_inputs,
+            &self.query_positions,
+            &self.air_params,
+        )?;
 
         // STEP 1.5: Verify OOD frame commitment using light RPO
         use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
@@ -440,21 +417,22 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         }
 
         // STEP 4: Derive FS challenges in-circuit
-        let (z, deep_coeffs, fri_betas, raw_query_positions) = derive_fs_challenges_in_circuit(
-            cs.clone(),
-            &trace_root_bytes,
-            &comp_root_bytes,
-            &fri_roots_bytes,
-            &self.fs_context_seed_gl,
-            &ood_trace_current_fp,
-            &ood_trace_next_fp,
-            &ood_comp_current_fp,
-            &ood_comp_next_fp,
-            self.air_params.num_constraint_coeffs,
-            &self.air_params,
-            comp_width,
-            self.pow_nonce,
-        )?;
+        let (z, constraint_coeffs, deep_coeffs, fri_betas, raw_query_positions) =
+            derive_fs_challenges_in_circuit(
+                cs.clone(),
+                &trace_root_bytes,
+                &comp_root_bytes,
+                &fri_roots_bytes,
+                &self.fs_context_seed_gl,
+                &ood_trace_current_fp,
+                &ood_trace_next_fp,
+                &ood_comp_current_fp,
+                &ood_comp_next_fp,
+                self.air_params.num_constraint_coeffs,
+                &self.air_params,
+                comp_width,
+                self.pow_nonce,
+            )?;
 
         enforce_query_positions_alignment(
             &query_pos_uint_vars,
@@ -462,6 +440,17 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             expected_queries,
             self.air_params.num_queries,
         )?;
+ 
+        verify_ood_equation_in_circuit(
+            cs.clone(),
+            &ood_trace_current_gl,
+            &ood_trace_next_gl,
+            &ood_comp_current_gl,
+            &z,
+            &constraint_coeffs,
+            &self.air_params,
+        )?;
+        
 
         // STEP 5: Compute DEEP composition polynomial (returns DEEP evaluations for FRI)
         let deep_evaluations = verify_deep_composition(
@@ -694,6 +683,8 @@ pub fn enforce_gl_eq_with_bound(
 /// 3. Reseed with OOD frames → draw DEEP coeffs + rho
 /// 4. Reseed with FRI commitments → draw beta for each layer
 /// 5. Query positions derived off-circuit (bound via Poseidon commitment)
+///
+/// Returns: (z, constraint_coeffs, deep_coeffs, fri_betas, raw_query_positions)
 fn derive_fs_challenges_in_circuit(
     cs: ConstraintSystemRef<InnerFr>,
     trace_roots: &[Vec<UInt8<InnerFr>>], // Support multiple trace segments
@@ -708,7 +699,7 @@ fn derive_fs_challenges_in_circuit(
     air_params: &AirParams,
     comp_width: usize,
     pow_nonce: u64,
-) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>, Vec<UInt64GLVar>), SynthesisError> {
+) -> Result<(FpGLVar, Vec<FpGLVar>, Vec<FpGLVar>, Vec<FpGLVar>, Vec<UInt64GLVar>), SynthesisError> {
     use super::gadgets::gl_range::gl_alloc_u64_vec;
     use super::gadgets::rpo_gl_light::{RandomCoinGL, RpoParamsGLLight};
     use super::gadgets::utils::digest32_to_gl4;
@@ -724,9 +715,11 @@ fn derive_fs_challenges_in_circuit(
         let tr_gl: Vec<GlVar> = tr_elems.iter().map(|fp| GlVar(fp.clone())).collect();
         coin.reseed(&tr_gl)?;
     }
-    // Draw constraint composition coefficients (ignored, but needed for transcript alignment)
+    // Draw constraint composition coefficients (now returned for constraint evaluation verification)
+    let mut constraint_coeffs = Vec::with_capacity(num_constraint_coeffs);
     for _ in 0..num_constraint_coeffs {
-        let _ = coin.draw()?; // burn
+        let cc_gl = coin.draw()?;
+        constraint_coeffs.push(cc_gl.0); // Extract FpVar from GlVar
     }
 
     // 2) Reseed with composition commitment → draw z
@@ -793,7 +786,7 @@ fn derive_fs_challenges_in_circuit(
         raw_positions.push(pos);
     }
 
-    Ok((z, deep_coeffs, fri_betas, raw_positions))
+    Ok((z, constraint_coeffs, deep_coeffs, fri_betas, raw_positions))
 }
 
 /// Compute DEEP composition polynomial
@@ -1018,4 +1011,176 @@ fn enforce_query_positions_alignment(
     }
 
     Ok(())
+}
+
+// ============================================================================
+// STATEMENT HASH BINDING
+// ============================================================================
+
+/// Bind all commitments and parameters to the public statement hash.
+///
+/// This function verifies that the prover's witness matches the public statement
+/// by hashing all commitments, public inputs, query positions, and AIR parameters.
+/// The computed hash must equal the public statement_hash.
+///
+/// Security properties:
+/// - All structural parameters are witness-allocated and hashed in-circuit
+/// - This binds the proof to specific AIR parameters via statement_hash
+/// - A prover cannot use different params without invalidating the proof
+/// Bind all commitments and parameters to the public statement hash.
+///
+/// Takes pre-allocated UInt8 witness variables for commitment bytes.
+fn bind_statement_hash(
+    cs: ConstraintSystemRef<InnerFr>,
+    statement_hash: InnerFr,
+    trace_root_bytes: &[Vec<UInt8<InnerFr>>],
+    comp_root_bytes: &[UInt8<InnerFr>],
+    fri_roots_bytes: &[Vec<UInt8<InnerFr>>],
+    ood_commit_bytes: &[UInt8<InnerFr>],
+    stark_pub_inputs: &[u64],
+    query_positions: &[usize],
+    air_params: &AirParams,
+) -> Result<(), SynthesisError> {
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
+    use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
+
+    let statement_hash_var = FpVar::<InnerFr>::new_input(cs.clone(), || Ok(statement_hash))?;
+
+    // Hash commitments and verify against public input
+    let mut hasher = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
+
+    // Absorb trace commitment (as field elements)
+    for root in trace_root_bytes {
+        for chunk in root.chunks(8) {
+            let fe = bytes_to_field_le(chunk)?;
+            hasher.absorb(&fe)?;
+        }
+    }
+    // Absorb comp commitment
+    for chunk in comp_root_bytes.chunks(8) {
+        let fe = bytes_to_field_le(chunk)?;
+        hasher.absorb(&fe)?;
+    }
+    // Absorb FRI commitments
+    for fri_root in fri_roots_bytes {
+        for chunk in fri_root.chunks(8) {
+            let fe = bytes_to_field_le(chunk)?;
+            hasher.absorb(&fe)?;
+        }
+    }
+    // Absorb OOD commitment (binds OOD frame, prevents free witnesses)
+    for chunk in ood_commit_bytes.chunks(8) {
+        let fe = bytes_to_field_le(chunk)?;
+        hasher.absorb(&fe)?;
+    }
+
+    // Absorb STARK public inputs
+    for pub_in in stark_pub_inputs {
+        hasher.absorb(&FpVar::constant(InnerFr::from(*pub_in)))?;
+    }
+
+    // Commit to query positions and absorb (prevents adversarial positions!)
+    let pos_commit = commit_positions_poseidon(cs.clone(), query_positions)?;
+    hasher.absorb(&pos_commit)?;
+
+    // Absorb AIR params hash
+    let params_hash = hash_air_params(cs.clone(), air_params)?;
+    hasher.absorb(&params_hash)?;
+
+    let computed_hash = hasher.squeeze_field_elements(1)?;
+    computed_hash[0].enforce_equal(&statement_hash_var)?;
+
+    Ok(())
+}
+
+/// Hash all AIR parameters into a single field element.
+fn hash_air_params(
+    cs: ConstraintSystemRef<InnerFr>,
+    air_params: &AirParams,
+) -> Result<FpVar<InnerFr>, SynthesisError> {
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
+    use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
+
+    let mut params_hasher = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
+
+    // Domain separator for AIR params binding
+    params_hasher.absorb(&FpVar::constant(InnerFr::from(0xA1A1u64)))?;
+
+    // Structural params - allocate as witnesses
+    let trace_width_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.trace_width as u64))
+    })?;
+    let comp_width_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.comp_width as u64))
+    })?;
+    let trace_len_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.trace_len as u64))
+    })?;
+    let lde_blowup_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.lde_blowup as u64))
+    })?;
+    let num_queries_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.num_queries as u64))
+    })?;
+    let fri_folding_factor_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.fri_folding_factor as u64))
+    })?;
+    let fri_num_layers_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.fri_num_layers as u64))
+    })?;
+    let lde_generator_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.lde_generator))
+    })?;
+    let domain_offset_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.domain_offset))
+    })?;
+    let g_lde_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.g_lde))
+    })?;
+    let g_trace_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.g_trace))
+    })?;
+    let num_constraint_coeffs_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.num_constraint_coeffs as u64))
+    })?;
+    let grinding_factor_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.grinding_factor as u64))
+    })?;
+
+    // Enum params as u64 discriminants
+    let combiner_kind_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.combiner_kind.to_u64()))
+    })?;
+    let fri_terminal_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.fri_terminal.to_u64()))
+    })?;
+
+    // Aggregator identity version
+    let version_var = FpVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(air_params.aggregator_version))
+    })?;
+
+    // Absorb all params
+    params_hasher.absorb(&trace_width_var)?;
+    params_hasher.absorb(&comp_width_var)?;
+    params_hasher.absorb(&trace_len_var)?;
+    params_hasher.absorb(&lde_blowup_var)?;
+    params_hasher.absorb(&num_queries_var)?;
+    params_hasher.absorb(&fri_folding_factor_var)?;
+    params_hasher.absorb(&fri_num_layers_var)?;
+    params_hasher.absorb(&lde_generator_var)?;
+    params_hasher.absorb(&domain_offset_var)?;
+    params_hasher.absorb(&g_lde_var)?;
+    params_hasher.absorb(&g_trace_var)?;
+    params_hasher.absorb(&num_constraint_coeffs_var)?;
+    params_hasher.absorb(&grinding_factor_var)?;
+    params_hasher.absorb(&combiner_kind_var)?;
+    params_hasher.absorb(&fri_terminal_var)?;
+    params_hasher.absorb(&version_var)?;
+
+    // Squeeze params hash
+    let params_hash = params_hasher.squeeze_field_elements(1)?;
+    Ok(params_hash[0].clone())
 }

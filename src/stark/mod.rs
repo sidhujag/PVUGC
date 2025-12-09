@@ -7,10 +7,14 @@
 //! - Full AIR constraint checking
 //! - Poseidon hash function implementation
 
+pub mod aggregator_air;
 pub mod gadgets;
 pub mod gl_u64;
 pub mod inner_stark_full;
+pub mod ood_eval_r1cs;
 pub mod stark_proof_parser;
+pub mod verifier_air;
+pub mod verifier_stark_groth16;
 
 // Crypto helpers (Poseidon params + host Merkle helpers)
 pub mod crypto {
@@ -24,7 +28,21 @@ pub type StarkInnerFr = ark_bls12_377::Fr;
 
 // Re-export main types
 pub use inner_stark_full::{
-    AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness,
+    AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery,
+    TraceSegmentWitness, AGGREGATOR_VERSION,
+};
+
+// Re-export Aggregator STARK types
+pub use aggregator_air::{
+    AggregatorAir, AggregatorConfig, AggregatorProver, AggregatorPublicInputs,
+    ChildStatementHash, generate_aggregator_proof, generate_aggregator_proof_with_config,
+    AGGREGATOR_TRACE_WIDTH,
+};
+
+// Re-export Verifier STARK integration types
+pub use verifier_stark_groth16::{
+    prove_verifier_stark, build_verifier_circuit_from_app_hash,
+    VerifierStarkResult,
 };
 
 #[cfg(test)]
@@ -36,6 +54,7 @@ mod tests {
     mod full_stark_verifier_smoke;
     mod gl_fast_unit_tests;
     mod poseidon_merkle_selfcheck;
+    mod recursive_stark_e2e;
     mod stark_verifier_comprehensive;
 
     pub(crate) mod helpers {

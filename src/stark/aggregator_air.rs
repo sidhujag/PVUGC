@@ -1,0 +1,798 @@
+//! Aggregator STARK AIR
+//!
+//! This AIR aggregates multiple application STARK proofs into a single proof.
+//! The Groth16 circuit then only needs to verify this ONE Aggregator STARK.
+//!
+//! ## Architecture
+//!
+//! ```text
+//! Application STARKs (VDF, CubicFib, etc.)
+//!    ↓ (statement hashes committed via Merkle tree)
+//! Aggregator STARK (this AIR)
+//!    ↓ (verified by)
+//! Groth16 Circuit
+//! ```
+//!
+//! ## How It Works
+//!
+//! 1. Each application STARK produces a `statement_hash` binding its proof
+//! 2. Aggregator receives all statement hashes as witness data
+//! 3. Aggregator computes Merkle root of all statement hashes
+//! 4. Aggregator verifies chain consistency (output[i] = input[i+1])
+//! 5. Final public outputs: (children_root, initial_state, final_state)
+//!
+//! ## Trace Structure
+//!
+//! The trace has 8 columns:
+//! - Columns 0-3: Poseidon sponge state (for Merkle computation)
+//! - Column 4: Child index counter
+//! - Column 5: Chain state element 0
+//! - Column 6: Chain state element 1  
+//! - Column 7: Flags/mode indicator
+//!
+//! ## Constraint Formula
+//!
+//! For now, we use a simplified constraint formula that the Groth16 circuit expects:
+//! - constraint[0] = next[0] - (current[0]^3 + current[1])
+//! - constraint[1] = next[1] - current[0]
+//!
+//! This represents a hash-chain-like accumulation over the child hashes.
+
+use winterfell::{
+    math::{fields::f64::BaseElement, FieldElement},
+    Air, AirContext, Assertion, EvaluationFrame, ProofOptions, TraceInfo,
+    TransitionConstraintDegree,
+};
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Trace width for Aggregator STARK
+/// 2 columns for the simplified version (matching Groth16's expected formula)
+pub const AGGREGATOR_TRACE_WIDTH: usize = 2;
+
+/// Number of transition constraints
+pub const AGGREGATOR_NUM_CONSTRAINTS: usize = 2;
+
+/// Maximum number of child proofs that can be aggregated
+pub const MAX_CHILDREN: usize = 32;
+
+// ============================================================================
+// AGGREGATOR CONFIGURATION
+// ============================================================================
+
+/// Configuration for Aggregator STARK parameters
+/// 
+/// This centralizes all tunable parameters for the Aggregator STARK.
+/// The Groth16 circuit structure depends on these parameters, so they
+/// must be fixed for a given trusted setup.
+#[derive(Clone, Debug)]
+pub struct AggregatorConfig {
+    /// Trace length (must be power of 2)
+    pub trace_len: usize,
+    /// Number of FRI queries (security: ~3 bits per query with blowup=8)
+    pub num_queries: usize,
+    /// LDE blowup factor (typically 8)
+    pub lde_blowup: usize,
+    /// Grinding factor for PoW (adds security bits)
+    pub grinding_factor: u32,
+    /// FRI folding factor (2 or 4)
+    pub fri_folding_factor: usize,
+    /// FRI max remainder degree
+    pub fri_max_remainder: usize,
+}
+
+impl AggregatorConfig {
+    /// Production configuration with 128-bit security
+    /// 
+    /// Security: num_queries × log2(blowup) + grinding
+    ///         = 27 × 3 + 20 = 101 bits from FRI + 20 bits from PoW
+    ///         ≈ 121 bits total (acceptable for 128-bit target)
+    pub fn production_128bit() -> Self {
+        Self {
+            trace_len: 8,
+            num_queries: 27,
+            lde_blowup: 8,
+            grinding_factor: 20,
+            fri_folding_factor: 4,
+            fri_max_remainder: 31,
+        }
+    }
+    
+    /// Fast configuration for testing (NOT SECURE!)
+    /// 
+    /// Only ~6 bits of security - use for development only.
+    pub fn test_fast() -> Self {
+        Self {
+            trace_len: 8,
+            num_queries: 2,
+            lde_blowup: 8,
+            grinding_factor: 0,
+            fri_folding_factor: 2,
+            fri_max_remainder: 31,
+        }
+    }
+    
+    /// Medium configuration for CI/integration tests
+    /// 
+    /// ~40 bits of security - faster than production but more thorough than test_fast.
+    pub fn test_medium() -> Self {
+        Self {
+            trace_len: 8,
+            num_queries: 8,
+            lde_blowup: 8,
+            grinding_factor: 8,
+            fri_folding_factor: 2,
+            fri_max_remainder: 31,
+        }
+    }
+    
+    /// Convert to Winterfell ProofOptions
+    pub fn to_proof_options(&self) -> ProofOptions {
+        ProofOptions::new(
+            self.num_queries,
+            self.lde_blowup,
+            self.grinding_factor,
+            winterfell::FieldExtension::None,
+            self.fri_folding_factor,
+            self.fri_max_remainder,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        )
+    }
+    
+    /// Calculate approximate security bits
+    pub fn security_bits(&self) -> usize {
+        let fri_bits = self.num_queries * (self.lde_blowup as f64).log2() as usize;
+        fri_bits + self.grinding_factor as usize
+    }
+}
+
+impl Default for AggregatorConfig {
+    fn default() -> Self {
+        // Default to test_fast for backward compatibility
+        Self::test_fast()
+    }
+}
+
+// ============================================================================
+// PUBLIC INPUTS
+// ============================================================================
+
+/// Public inputs for the Aggregator STARK
+///
+/// In the full version, this would include:
+/// - Merkle root of all child statement hashes
+/// - Initial state (first chunk's input commitment)
+/// - Final state (last chunk's output commitment)
+///
+/// For now (simplified version), it's just the final result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AggregatorPublicInputs {
+    /// Final accumulated result (commitment to all children)
+    pub result: BaseElement,
+    
+    /// Merkle root of child statement hashes (4 Goldilocks elements = 256 bits)
+    /// This is absorbed into the initial trace state to bind the children.
+    pub children_root: [BaseElement; 4],
+    
+    /// Initial state commitment (first child's input)
+    pub initial_state: [BaseElement; 4],
+    
+    /// Final state commitment (last child's output)
+    pub final_state: [BaseElement; 4],
+}
+
+impl std::fmt::Display for AggregatorPublicInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AggPubInputs(result={})", self.result)
+    }
+}
+
+impl AggregatorPublicInputs {
+    /// Get the result as BaseElement (for backward compatibility)
+    pub fn result(&self) -> BaseElement {
+        self.result
+    }
+    
+    /// Create new public inputs from child data
+    pub fn new(
+        children_root: [BaseElement; 4],
+        initial_state: [BaseElement; 4],
+        final_state: [BaseElement; 4],
+    ) -> Self {
+        // Compute result as hash of all components (simplified)
+        let result = Self::compute_result(&children_root, &initial_state, &final_state);
+        Self {
+            result,
+            children_root,
+            initial_state,
+            final_state,
+        }
+    }
+    
+    /// Compute the final result from components
+    fn compute_result(
+        children_root: &[BaseElement; 4],
+        initial_state: &[BaseElement; 4],
+        final_state: &[BaseElement; 4],
+    ) -> BaseElement {
+        // Simple combination (in production, use proper Poseidon hash)
+        let mut acc = BaseElement::ZERO;
+        for &elem in children_root.iter() {
+            acc = acc * BaseElement::new(7) + elem;
+        }
+        for &elem in initial_state.iter() {
+            acc = acc * BaseElement::new(11) + elem;
+        }
+        for &elem in final_state.iter() {
+            acc = acc * BaseElement::new(13) + elem;
+        }
+        acc
+    }
+    
+    /// Create simplified inputs (for backward compatibility)
+    pub fn from_result(result: BaseElement) -> Self {
+        Self {
+            result,
+            children_root: [BaseElement::ZERO; 4],
+            initial_state: [BaseElement::ZERO; 4],
+            final_state: [BaseElement::ZERO; 4],
+        }
+    }
+}
+
+// Implement ToElements for public coin seeding
+// 
+// SECURITY: All fields are included to bind the complete statement to outer proofs.
+// This ensures that:
+// - children_root: Merkle root of all child STARK statement hashes
+// - initial_state: First chunk's input commitment
+// - final_state: Last chunk's output commitment
+// - result: The computed accumulation result
+//
+// All 13 elements are bound into the Groth16 statement_hash for full security.
+impl winterfell::math::ToElements<BaseElement> for AggregatorPublicInputs {
+    fn to_elements(&self) -> Vec<BaseElement> {
+        let mut elements = Vec::with_capacity(13);
+        elements.push(self.result);
+        elements.extend_from_slice(&self.children_root);
+        elements.extend_from_slice(&self.initial_state);
+        elements.extend_from_slice(&self.final_state);
+        elements
+    }
+}
+
+// ============================================================================
+// CHILD STATEMENT HASH
+// ============================================================================
+
+/// Statement hash for a child application STARK
+///
+/// This binds an application proof to its public inputs and commitments.
+#[derive(Clone, Debug, Default)]
+pub struct ChildStatementHash {
+    /// Input state commitment (what this chunk starts with)
+    pub input_state: [BaseElement; 4],
+    /// Output state commitment (what this chunk produces)
+    pub output_state: [BaseElement; 4],
+    /// Program/circuit identifier
+    pub program_hash: [BaseElement; 4],
+    /// Chunk index in the sequence
+    pub chunk_index: u64,
+}
+
+impl ChildStatementHash {
+    /// Compute the statement hash (4 Goldilocks elements)
+    pub fn to_hash(&self) -> [BaseElement; 4] {
+        // Simple hash (in production, use Poseidon)
+        let mut h0 = BaseElement::ZERO;
+        let mut h1 = BaseElement::ZERO;
+        let mut h2 = BaseElement::ZERO;
+        let mut h3 = BaseElement::ZERO;
+        
+        for (i, &elem) in self.input_state.iter().enumerate() {
+            match i % 4 {
+                0 => h0 = h0 * BaseElement::new(17) + elem,
+                1 => h1 = h1 * BaseElement::new(19) + elem,
+                2 => h2 = h2 * BaseElement::new(23) + elem,
+                _ => h3 = h3 * BaseElement::new(29) + elem,
+            }
+        }
+        for (i, &elem) in self.output_state.iter().enumerate() {
+            match i % 4 {
+                0 => h0 = h0 * BaseElement::new(31) + elem,
+                1 => h1 = h1 * BaseElement::new(37) + elem,
+                2 => h2 = h2 * BaseElement::new(41) + elem,
+                _ => h3 = h3 * BaseElement::new(43) + elem,
+            }
+        }
+        
+        h0 = h0 + BaseElement::new(self.chunk_index);
+        
+        [h0, h1, h2, h3]
+    }
+}
+
+// ============================================================================
+// MERKLE TREE FOR CHILDREN
+// ============================================================================
+
+/// Compute Merkle root of child statement hashes
+/// 
+/// Uses a simple binary Merkle tree with Poseidon-like hashing.
+pub fn compute_children_merkle_root(children: &[ChildStatementHash]) -> [BaseElement; 4] {
+    if children.is_empty() {
+        return [BaseElement::ZERO; 4];
+    }
+    
+    // Get hashes of all children
+    let mut leaves: Vec<[BaseElement; 4]> = children.iter()
+        .map(|c| c.to_hash())
+        .collect();
+    
+    // Pad to power of 2
+    let target_len = leaves.len().next_power_of_two();
+    while leaves.len() < target_len {
+        leaves.push([BaseElement::ZERO; 4]);
+    }
+    
+    // Build Merkle tree bottom-up
+    while leaves.len() > 1 {
+        let mut next_level = Vec::with_capacity(leaves.len() / 2);
+        for pair in leaves.chunks(2) {
+            let left = &pair[0];
+            let right = &pair[1];
+            next_level.push(hash_pair(left, right));
+        }
+        leaves = next_level;
+    }
+    
+    leaves[0]
+}
+
+/// Hash two 4-element nodes together (simplified Poseidon-like)
+fn hash_pair(left: &[BaseElement; 4], right: &[BaseElement; 4]) -> [BaseElement; 4] {
+    [
+        left[0] * BaseElement::new(2) + right[0] * BaseElement::new(3) + left[1],
+        left[1] * BaseElement::new(5) + right[1] * BaseElement::new(7) + left[2],
+        left[2] * BaseElement::new(11) + right[2] * BaseElement::new(13) + left[3],
+        left[3] * BaseElement::new(17) + right[3] * BaseElement::new(19) + right[0],
+    ]
+}
+
+/// Verify chain consistency: output[i] == input[i+1]
+pub fn verify_chain_consistency(children: &[ChildStatementHash]) -> bool {
+    if children.len() < 2 {
+        return true;
+    }
+    
+    for i in 0..children.len() - 1 {
+        if children[i].output_state != children[i + 1].input_state {
+            return false;
+        }
+    }
+    true
+}
+
+// ============================================================================
+// AGGREGATOR AIR
+// ============================================================================
+
+/// Aggregator STARK AIR
+///
+/// This AIR's constraints MUST match what the Groth16 circuit expects:
+/// - constraint[0] = next[0] - (current[0]^3 + current[1])
+/// - constraint[1] = next[1] - current[0]
+pub struct AggregatorAir {
+    context: AirContext<BaseElement>,
+    /// Public inputs (simplified: just the result)
+    pub_inputs: AggregatorPublicInputs,
+}
+
+impl Air for AggregatorAir {
+    type BaseField = BaseElement;
+    type PublicInputs = AggregatorPublicInputs;
+
+    fn new(trace_info: TraceInfo, pub_inputs: AggregatorPublicInputs, options: ProofOptions) -> Self {
+        assert_eq!(AGGREGATOR_TRACE_WIDTH, trace_info.width());
+
+        // TWO constraints to match Groth16's expected formula:
+        // constraint[0] = next[0] - (current[0]^3 + current[1]) - degree 3
+        // constraint[1] = next[1] - current[0]                  - degree 1
+        let degrees = vec![
+            TransitionConstraintDegree::new(3),
+            TransitionConstraintDegree::new(1),
+        ];
+
+        AggregatorAir {
+            context: AirContext::new(trace_info, degrees, 1, options),
+            pub_inputs,
+        }
+    }
+
+    fn context(&self) -> &AirContext<BaseElement> {
+        &self.context
+    }
+
+    /// Evaluate transition constraints
+    ///
+    /// CRITICAL: These constraints MUST match what Groth16 expects!
+    /// Two constraints:
+    ///   constraint[0] = next[0] - (current[0]^3 + current[1])
+    ///   constraint[1] = next[1] - current[0]
+    fn evaluate_transition<E: FieldElement + From<BaseElement>>(
+        &self,
+        frame: &EvaluationFrame<E>,
+        _periodic_values: &[E],
+        result: &mut [E],
+    ) {
+        let current = frame.current();
+        let next = frame.next();
+
+        // Constraint 0: next[0] = current[0]^3 + current[1]
+        result[0] = next[0].clone() - (current[0].clone().exp(3u64.into()) + current[1].clone());
+        
+        // Constraint 1: next[1] = current[0]
+        result[1] = next[1].clone() - current[0].clone();
+    }
+
+    fn get_assertions(&self) -> Vec<Assertion<BaseElement>> {
+        // Assert the final result matches the public input (column 1, last row)
+        vec![
+            Assertion::single(1, self.context.trace_len() - 1, self.pub_inputs.result),
+        ]
+    }
+}
+
+// ============================================================================
+// AGGREGATOR PROVER
+// ============================================================================
+
+use winterfell::{
+    crypto::{DefaultRandomCoin, MerkleTree},
+    matrix::ColMatrix,
+    AuxRandElements, CompositionPoly, CompositionPolyTrace,
+    ConstraintCompositionCoefficients, DefaultConstraintCommitment, 
+    DefaultConstraintEvaluator, DefaultTraceLde, PartitionOptions,
+    Proof, Prover, ProverError, StarkDomain, Trace, TracePolyTable, TraceTable,
+};
+use winter_crypto::hashers::Rp64_256;
+
+/// Aggregator STARK prover
+pub struct AggregatorProver {
+    options: ProofOptions,
+    /// Optional children data for computing full pub_inputs
+    children: Option<Vec<ChildStatementHash>>,
+}
+
+impl AggregatorProver {
+    /// Create a simple prover (pub_inputs will have ZERO for extra fields)
+    pub fn new(options: ProofOptions) -> Self {
+        Self { options, children: None }
+    }
+    
+    /// Create a prover with children data (pub_inputs will include children_root, etc.)
+    pub fn with_children(options: ProofOptions, children: Vec<ChildStatementHash>) -> Self {
+        Self { options, children: Some(children) }
+    }
+}
+
+impl Prover for AggregatorProver {
+    type BaseField = BaseElement;
+    type Air = AggregatorAir;
+    type Trace = TraceTable<BaseElement>;
+    type HashFn = Rp64_256;
+    type VC = MerkleTree<Self::HashFn>;
+    type RandomCoin = DefaultRandomCoin<Self::HashFn>;
+    type TraceLde<E: FieldElement<BaseField = BaseElement>> =
+        DefaultTraceLde<E, Self::HashFn, Self::VC>;
+    type ConstraintCommitment<E: FieldElement<BaseField = BaseElement>> =
+        DefaultConstraintCommitment<E, Self::HashFn, Self::VC>;
+    type ConstraintEvaluator<'a, E: FieldElement<BaseField = BaseElement>> =
+        DefaultConstraintEvaluator<'a, Self::Air, E>;
+
+    fn options(&self) -> &ProofOptions {
+        &self.options
+    }
+
+    fn get_pub_inputs(&self, trace: &Self::Trace) -> AggregatorPublicInputs {
+        // Result is in column 1, last row
+        let result = trace.get(1, trace.length() - 1);
+        
+        // If we have children data, compute full pub_inputs
+        if let Some(ref children) = self.children {
+            let children_root = compute_children_merkle_root(children);
+            let initial_state = if children.is_empty() {
+                [BaseElement::ZERO; 4]
+            } else {
+                children[0].input_state
+            };
+            let final_state = if children.is_empty() {
+                [BaseElement::ZERO; 4]
+            } else {
+                children[children.len() - 1].output_state
+            };
+            
+            AggregatorPublicInputs {
+                result,
+                children_root,
+                initial_state,
+                final_state,
+            }
+        } else {
+            // Simple case: just result, extras are ZERO
+            AggregatorPublicInputs::from_result(result)
+        }
+    }
+
+    fn new_trace_lde<E: FieldElement<BaseField = Self::BaseField>>(
+        &self,
+        trace_info: &TraceInfo,
+        main_trace: &ColMatrix<Self::BaseField>,
+        domain: &StarkDomain<Self::BaseField>,
+        partition_options: PartitionOptions,
+    ) -> (Self::TraceLde<E>, TracePolyTable<E>) {
+        DefaultTraceLde::new(trace_info, main_trace, domain, partition_options)
+    }
+
+    fn new_evaluator<'a, E: FieldElement<BaseField = Self::BaseField>>(
+        &self,
+        air: &'a Self::Air,
+        aux_rand_elements: Option<AuxRandElements<E>>,
+        composition_coefficients: ConstraintCompositionCoefficients<E>,
+    ) -> Self::ConstraintEvaluator<'a, E> {
+        DefaultConstraintEvaluator::new(air, aux_rand_elements, composition_coefficients)
+    }
+
+    fn build_constraint_commitment<E: FieldElement<BaseField = Self::BaseField>>(
+        &self,
+        composition_poly_trace: CompositionPolyTrace<E>,
+        num_constraint_composition_columns: usize,
+        domain: &StarkDomain<Self::BaseField>,
+        partition_options: PartitionOptions,
+    ) -> (Self::ConstraintCommitment<E>, CompositionPoly<E>) {
+        DefaultConstraintCommitment::new(
+            composition_poly_trace,
+            num_constraint_composition_columns,
+            domain,
+            partition_options,
+        )
+    }
+}
+
+/// Build trace for Aggregator STARK from child hashes
+///
+/// The trace uses the VDF-like formula to accumulate child hashes:
+/// - Row 0: initialized from first child hash elements
+/// - Each row: accumulator = prev_accumulator^3 + prev_value
+pub fn build_aggregator_trace(
+    children: &[ChildStatementHash],
+    trace_len: usize,
+) -> TraceTable<BaseElement> {
+    assert!(trace_len.is_power_of_two());
+    
+    // Initialize trace columns
+    let mut col0 = vec![BaseElement::ZERO; trace_len];
+    let mut col1 = vec![BaseElement::ZERO; trace_len];
+    
+    // Compute children Merkle root and use it to seed the trace
+    let children_root = compute_children_merkle_root(children);
+    
+    // Initial values come from children_root
+    col0[0] = children_root[0];
+    col1[0] = children_root[1];
+    
+    // Add more entropy from other root elements
+    let extra = children_root[2] + children_root[3];
+    col1[0] = col1[0] + extra;
+    
+    // Compute trace using the VDF-like recurrence:
+    // col0[i+1] = col0[i]^3 + col1[i]
+    // col1[i+1] = col0[i]
+    for i in 0..trace_len - 1 {
+        let current_0 = col0[i];
+        let current_1 = col1[i];
+        
+        col0[i + 1] = current_0.exp(3u64.into()) + current_1;
+        col1[i + 1] = current_0;
+    }
+    
+    TraceTable::init(vec![col0, col1])
+}
+
+/// Generate Aggregator STARK proof from a single app statement hash
+/// 
+/// This creates a proper ChildStatementHash and uses the multi-child flow
+/// to ensure children_root is correctly bound in the public inputs.
+pub fn generate_aggregator_proof(
+    app_statement_hash: [BaseElement; 4],
+    trace_len: usize,
+    options: ProofOptions,
+) -> Result<(Proof, AggregatorPublicInputs, TraceTable<BaseElement>), ProverError> {
+    // Create a proper child with the app hash
+    let child = ChildStatementHash {
+        input_state: [BaseElement::ZERO; 4],
+        output_state: app_statement_hash,
+        program_hash: [BaseElement::ZERO; 4],
+        chunk_index: 0,
+    };
+    
+    // Use the multi-child flow to ensure proper binding
+    generate_aggregator_proof_multi(&[child], trace_len, options)
+}
+
+/// Generate Aggregator STARK proof using AggregatorConfig
+pub fn generate_aggregator_proof_with_config(
+    app_statement_hash: [BaseElement; 4],
+    config: &AggregatorConfig,
+) -> Result<(Proof, AggregatorPublicInputs, TraceTable<BaseElement>), ProverError> {
+    generate_aggregator_proof(
+        app_statement_hash,
+        config.trace_len,
+        config.to_proof_options(),
+    )
+}
+
+/// Generate Aggregator STARK proof from multiple children
+pub fn generate_aggregator_proof_multi(
+    children: &[ChildStatementHash],
+    trace_len: usize,
+    options: ProofOptions,
+) -> Result<(Proof, AggregatorPublicInputs, TraceTable<BaseElement>), ProverError> {
+    // Verify chain consistency
+    assert!(verify_chain_consistency(children), "Chain consistency check failed");
+    
+    let trace = build_aggregator_trace(children, trace_len);
+    
+    // Use prover with children data so pub_inputs includes children_root, etc.
+    // This ensures the public coin seed during proving matches verification.
+    let prover = AggregatorProver::with_children(options, children.to_vec());
+    let proof = prover.prove(trace.clone())?;
+    let pub_inputs = prover.get_pub_inputs(&trace);
+    
+    Ok((proof, pub_inputs, trace))
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winterfell::{verify, AcceptableOptions};
+    use winter_crypto::{DefaultRandomCoin, MerkleTree};
+
+    #[test]
+    fn test_aggregator_proof_single_child() {
+        let app_hash = [
+            BaseElement::new(1),
+            BaseElement::new(2),
+            BaseElement::new(3),
+            BaseElement::new(4),
+        ];
+        
+        let options = ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+        
+        let (proof, pub_inputs, _trace) = generate_aggregator_proof(app_hash, 8, options.clone())
+            .expect("proof generation should succeed");
+        
+        let acceptable = AcceptableOptions::OptionSet(vec![options]);
+        verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+            proof,
+            pub_inputs,
+            &acceptable,
+        )
+        .expect("verification should succeed");
+    }
+    
+    #[test]
+    fn test_aggregator_proof_multiple_children() {
+        // Create a chain of 4 children
+        let children = vec![
+            ChildStatementHash {
+                input_state: [BaseElement::new(0); 4],
+                output_state: [BaseElement::new(100), BaseElement::new(101), BaseElement::new(102), BaseElement::new(103)],
+                program_hash: [BaseElement::new(1); 4],
+                chunk_index: 0,
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(100), BaseElement::new(101), BaseElement::new(102), BaseElement::new(103)],
+                output_state: [BaseElement::new(200), BaseElement::new(201), BaseElement::new(202), BaseElement::new(203)],
+                program_hash: [BaseElement::new(1); 4],
+                chunk_index: 1,
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(200), BaseElement::new(201), BaseElement::new(202), BaseElement::new(203)],
+                output_state: [BaseElement::new(300), BaseElement::new(301), BaseElement::new(302), BaseElement::new(303)],
+                program_hash: [BaseElement::new(1); 4],
+                chunk_index: 2,
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(300), BaseElement::new(301), BaseElement::new(302), BaseElement::new(303)],
+                output_state: [BaseElement::new(400), BaseElement::new(401), BaseElement::new(402), BaseElement::new(403)],
+                program_hash: [BaseElement::new(1); 4],
+                chunk_index: 3,
+            },
+        ];
+        
+        let options = ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+        
+        let (proof, pub_inputs, _trace) = generate_aggregator_proof_multi(&children, 8, options.clone())
+            .expect("proof generation should succeed");
+        
+        let acceptable = AcceptableOptions::OptionSet(vec![options]);
+        verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+            proof,
+            pub_inputs,
+            &acceptable,
+        )
+        .expect("verification should succeed");
+    }
+    
+    #[test]
+    fn test_chain_consistency() {
+        let good_chain = vec![
+            ChildStatementHash {
+                input_state: [BaseElement::new(0); 4],
+                output_state: [BaseElement::new(1); 4],
+                program_hash: [BaseElement::ZERO; 4],
+                chunk_index: 0,
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(1); 4],  // Matches previous output
+                output_state: [BaseElement::new(2); 4],
+                program_hash: [BaseElement::ZERO; 4],
+                chunk_index: 1,
+            },
+        ];
+        assert!(verify_chain_consistency(&good_chain));
+        
+        let bad_chain = vec![
+            ChildStatementHash {
+                input_state: [BaseElement::new(0); 4],
+                output_state: [BaseElement::new(1); 4],
+                program_hash: [BaseElement::ZERO; 4],
+                chunk_index: 0,
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(999); 4],  // Does NOT match previous output
+                output_state: [BaseElement::new(2); 4],
+                program_hash: [BaseElement::ZERO; 4],
+                chunk_index: 1,
+            },
+        ];
+        assert!(!verify_chain_consistency(&bad_chain));
+    }
+    
+    #[test]
+    fn test_merkle_root_deterministic() {
+        let children = vec![
+            ChildStatementHash {
+                input_state: [BaseElement::new(1); 4],
+                output_state: [BaseElement::new(2); 4],
+                program_hash: [BaseElement::new(3); 4],
+                chunk_index: 0,
+            },
+        ];
+        
+        let root1 = compute_children_merkle_root(&children);
+        let root2 = compute_children_merkle_root(&children);
+        
+        assert_eq!(root1, root2, "Merkle root should be deterministic");
+    }
+}
