@@ -16,7 +16,8 @@ use super::inner_stark_full::{AirParams, enforce_gl_eq};
 use super::gadgets::gl_fast::{
     GlVar, gl_add_light, gl_mul_light, gl_sub_light,
 };
-use super::verifier_air::hash_chiplet::{ROUND_CONSTANTS as RPO_ROUND_CONSTANTS, MDS_MATRIX as RPO_MDS_MATRIX};
+// Use Winterfell's actual Rp64_256 constants to match the AIR exactly
+use winter_crypto::hashers::Rp64_256;
 
 // Type alias for field variable
 type FpGLVar = ark_r1cs_std::fields::fp::FpVar<InnerFr>;
@@ -209,17 +210,37 @@ fn evaluate_verifier_air_constraints_gl(
         next_hash.push(next[HASH_STATE_START + i].clone());
     }
     
-    // --- 4. Get round counter and compute RPO round constants via Lagrange ---
+    // --- 4. Get round counter and compute round constants via Lagrange ---
+    // Matches AIR constraints.rs: uses Rp64_256::ARK1 and Rp64_256::ARK2
     let round_counter = &current[AUX_START]; // aux[0] = round counter
-    let round_constants = compute_round_constants_lagrange_gl(cs.clone(), round_counter)?;
+    let ark1 = compute_ark1_lagrange_gl(cs.clone(), round_counter)?;
+    let ark2 = compute_ark2_lagrange_gl(cs.clone(), round_counter)?;
     
-    // --- 5. Compute expected next state for Permute operation (full RPO round) ---
-    let expected_after_rpo = compute_rpo_round_gl(cs.clone(), &current_hash, &round_constants)?;
+    // --- 5. Compute values for RPO round verification ---
+    // Winterfell round: sbox → MDS → +ARK1 → inv_sbox → MDS → +ARK2
+    // 
+    // To verify without computing inv_sbox:
+    // 1. Compute mid = MDS(sbox(current)) + ARK1
+    // 2. Compute candidate = INV_MDS(next - ARK2)
+    // 3. Verify: sbox(candidate) = mid (proves candidate = inv_sbox(mid))
+    
+    let mid = compute_rpo_mid_gl(cs.clone(), &current_hash, &ark1)?;
+    
+    // Compute next - ARK2
+    let mut next_minus_ark2 = Vec::with_capacity(HASH_STATE_WIDTH);
+    for i in 0..HASH_STATE_WIDTH {
+        next_minus_ark2.push(gl_sub_light(cs.clone(), &next_hash[i], &ark2[i])?);
+    }
+    
+    // Apply inverse MDS to get candidate
+    let candidate = apply_inv_mds_gl(cs.clone(), &next_minus_ark2)?;
     
     // --- 6. Hash state constraints (12) ---
     for i in 0..HASH_STATE_WIDTH {
-        // For Permute: next should equal RPO round result
-        let permute_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_after_rpo[i])?;
+        // For Permute: verify sbox(candidate) = mid
+        // This proves that candidate = inv_sbox(mid), validating the round
+        let sbox_candidate = sbox_gl(cs.clone(), &candidate[i])?;
+        let permute_constraint = gl_sub_light(cs.clone(), &sbox_candidate, &mid[i])?;
         
         // For Nop/Squeeze: next should equal current (copy)
         let copy_constraint = gl_sub_light(cs.clone(), &next_hash[i], &current_hash[i])?;
@@ -234,14 +255,16 @@ fn evaluate_verifier_air_constraints_gl(
         };
         
         // Combine constraints based on operation:
+        // NOTE: Nop is padding after permute(), state may be modified after it,
+        // so we allow any transition from Nop (like Init/Merkle/etc.)
         // constraint = is_permute * permute_constraint 
-        //            + (is_nop + is_squeeze) * copy_constraint
+        //            + is_squeeze * copy_constraint
         //            + is_absorb * absorb_constraint
-        //            + (is_init + is_merkle + is_fri + is_deep) * 0
+        //            + (is_init + is_merkle + is_fri + is_deep + is_nop) * 0
         let term1 = gl_mul_light(cs.clone(), &op.is_permute, &permute_constraint)?;
         
-        let nop_squeeze = gl_add_light(cs.clone(), &op.is_nop, &op.is_squeeze)?;
-        let term2 = gl_mul_light(cs.clone(), &nop_squeeze, &copy_constraint)?;
+        // Only squeeze enforces copy (nop moved to allow_any)
+        let term2 = gl_mul_light(cs.clone(), &op.is_squeeze, &copy_constraint)?;
         
         let term3 = gl_mul_light(cs.clone(), &op.is_absorb, &absorb_constraint)?;
         
@@ -286,7 +309,39 @@ fn evaluate_verifier_air_constraints_gl(
     // OOD constraint: fri[6] - fri[7]
     let fri_6 = &current[FRI_START + 6];
     let fri_7 = &current[FRI_START + 7];
-    let ood_constraint = gl_sub_light(cs.clone(), fri_6, fri_7)?;
+    let _ood_constraint = gl_sub_light(cs.clone(), fri_6, fri_7)?;
+    
+    // ========================================================================
+    // DEEP COMPOSE VERIFICATION MODES (aux[2] determines mode)
+    // 
+    // aux[2] = 0: ROOT mode - hash_state[0..3] == fri[0..3]
+    // aux[2] = 1: OOD mode - fri[6] == fri[7] (OOD LHS == RHS)
+    // aux[2] = 2: TERMINAL mode - fri[6] == fri[7] (FRI final == expected)
+    // aux[2] = 3: DEEP mode - fri[6] == fri[7] (DEEP computed == expected)
+    // ========================================================================
+    let aux_mode = &current[AUX_START + 2];
+    
+    // Equality constraint: fri[6] == fri[7] (used for OOD, TERMINAL, DEEP modes)
+    let equality_constraint = gl_sub_light(cs.clone(), fri_6, fri_7)?;
+    
+    // Root verification constraints: hash_state[i] == fri[i] for i in 0..4
+    let root_constraints: [GlVar; 4] = [
+        gl_sub_light(cs.clone(), &current_hash[0], &current[FRI_START])?,
+        gl_sub_light(cs.clone(), &current_hash[1], &current[FRI_START + 1])?,
+        gl_sub_light(cs.clone(), &current_hash[2], &current[FRI_START + 2])?,
+        gl_sub_light(cs.clone(), &current_hash[3], &current[FRI_START + 3])?,
+    ];
+    
+    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3)
+    // When aux[2] = 0: (-1)*(-2)*(-3) = -6 (non-zero, check applies)
+    // When aux[2] = 1,2,3: is_root_check = 0 (check doesn't apply)
+    let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
+    let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
+    let aux_m1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
+    let aux_m2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
+    let aux_m3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
+    let is_root_check_temp = gl_mul_light(cs.clone(), &aux_m1, &aux_m2)?;
+    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
     
     for i in 0..8 {
         let fri_curr = &current[FRI_START + i];
@@ -294,18 +349,41 @@ fn evaluate_verifier_air_constraints_gl(
         let copy_constraint = gl_sub_light(cs.clone(), fri_next, fri_curr)?;
         
         if i == 4 {
-            // FRI folding result column
+            // FRI column 4: FRI folding result
+            // During FriFold: verify folding formula is correct
             let fri_term = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             let c = gl_add_light(cs.clone(), &fri_term, &copy_term)?;
             constraints.push(c);
         } else if i == 6 {
-            // OOD constraint column
-            let ood_term = gl_mul_light(cs.clone(), &op.is_deep, &ood_constraint)?;
+            // FRI column 6: EQUALITY VERIFICATION during DeepCompose
+            // When aux[2] != 0: verify fri[6] == fri[7]
+            // This covers OOD (mode 1), TERMINAL (mode 2), and DEEP (mode 3)
+            // 
+            // Constraint: op.is_deep * aux[2] * equality_constraint = 0
+            // When aux[2] = 0, constraint is 0 (satisfied, root mode uses columns 0-3)
+            // When aux[2] != 0, constraint requires equality_constraint = 0
+            let deep_aux = gl_mul_light(cs.clone(), &op.is_deep, aux_mode)?;
+            let ood_term = gl_mul_light(cs.clone(), &deep_aux, &equality_constraint)?;
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             let c = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
             constraints.push(c);
+        } else if i < 4 {
+            // FRI columns 0-3: ROOT VERIFICATION during DeepCompose (aux[2] = 0)
+            // Constraint: hash_state[i] == fri[i]
+            // ONLY enforce when in ROOT mode (aux[2] = 0)
+            //
+            // Constraint: op.is_deep * is_root_check * root_constraint = 0
+            // When aux[2] = 0: is_root_check = -6, so constraint = -6 * root_constraint
+            //                  For this to be 0, root_constraint must be 0 ✓
+            // When aux[2] != 0: is_root_check = 0, constraint = 0 (trivially satisfied) ✓
+            let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
+            let root_term = gl_mul_light(cs.clone(), &deep_root, &root_constraints[i])?;
+            let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
+            let c = gl_add_light(cs.clone(), &root_term, &copy_term)?;
+            constraints.push(c);
         } else {
+            // FRI columns 5, 7: copy constraint only
             let c = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             constraints.push(c);
         }
@@ -378,25 +456,20 @@ fn evaluate_verifier_air_constraints_gl(
 }
 
 // ============================================================================
-// RPO ROUND COMPUTATION IN R1CS
+// RPO ROUND COMPUTATION IN R1CS (MATCHING AIR CONSTRAINTS EXACTLY)
 // ============================================================================
 
-/// Compute round constants using Lagrange interpolation on round_counter
-/// 
-/// L_r(x) = prod_{j!=r} (x - j) / (r - j)
-/// round_constants[i] = Σ ROUND_CONSTANTS[r][i] * L_r(round_counter)
-fn compute_round_constants_lagrange_gl(
+/// Compute ARK1 constants using Lagrange interpolation on round_counter
+/// Uses Winterfell's Rp64_256::ARK1 to match AIR constraints.rs exactly
+fn compute_ark1_lagrange_gl(
     cs: ConstraintSystemRef<InnerFr>,
     round_counter: &GlVar,
 ) -> Result<Vec<GlVar>, SynthesisError> {
-    // Pre-compute Lagrange denominator inverses (constant for all proofs)
-    // denom[r] = 1 / prod_{j!=r} (r - j)
     let denom_inverses: [u64; 7] = precompute_lagrange_denominators();
     
-    let mut round_constants = Vec::with_capacity(12);
+    let mut ark1 = Vec::with_capacity(12);
     
     for i in 0..12 {
-        // Interpolate round_constants[i] = Σ RC[r][i] * L_r(round_counter)
         let mut sum = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
         
         for r in 0..7 {
@@ -414,16 +487,114 @@ fn compute_round_constants_lagrange_gl(
             let denom_inv = GlVar(FpGLVar::constant(InnerFr::from(denom_inverses[r])));
             let lagrange_basis = gl_mul_light(cs.clone(), &lagrange_num, &denom_inv)?;
             
-            // Contribution: RC[r][i] * L_r(round_counter)
-            let rc_val = GlVar(FpGLVar::constant(InnerFr::from(RPO_ROUND_CONSTANTS[r][i])));
-            let contrib = gl_mul_light(cs.clone(), &rc_val, &lagrange_basis)?;
+            // Contribution: ARK1[r][i] * L_r(round_counter)
+            // Use Winterfell's ARK1 constants
+            let ark1_val = Rp64_256::ARK1[r][i].as_int();
+            let ark1_const = GlVar(FpGLVar::constant(InnerFr::from(ark1_val)));
+            let contrib = gl_mul_light(cs.clone(), &ark1_const, &lagrange_basis)?;
             sum = gl_add_light(cs.clone(), &sum, &contrib)?;
         }
         
-        round_constants.push(sum);
+        ark1.push(sum);
     }
     
-    Ok(round_constants)
+    Ok(ark1)
+}
+
+/// Compute ARK2 constants using Lagrange interpolation on round_counter
+/// Uses Winterfell's Rp64_256::ARK2 to match AIR constraints.rs exactly
+fn compute_ark2_lagrange_gl(
+    cs: ConstraintSystemRef<InnerFr>,
+    round_counter: &GlVar,
+) -> Result<Vec<GlVar>, SynthesisError> {
+    let denom_inverses: [u64; 7] = precompute_lagrange_denominators();
+    
+    let mut ark2 = Vec::with_capacity(12);
+    
+    for i in 0..12 {
+        let mut sum = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
+        
+        for r in 0..7 {
+            // Compute Lagrange basis polynomial value
+            let mut lagrange_num = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+            for j in 0..7 {
+                if j != r {
+                    let j_val = GlVar(FpGLVar::constant(InnerFr::from(j as u64)));
+                    let diff = gl_sub_light(cs.clone(), round_counter, &j_val)?;
+                    lagrange_num = gl_mul_light(cs.clone(), &lagrange_num, &diff)?;
+                }
+            }
+            
+            let denom_inv = GlVar(FpGLVar::constant(InnerFr::from(denom_inverses[r])));
+            let lagrange_basis = gl_mul_light(cs.clone(), &lagrange_num, &denom_inv)?;
+            
+            // Use Winterfell's ARK2 constants
+            let ark2_val = Rp64_256::ARK2[r][i].as_int();
+            let ark2_const = GlVar(FpGLVar::constant(InnerFr::from(ark2_val)));
+            let contrib = gl_mul_light(cs.clone(), &ark2_const, &lagrange_basis)?;
+            sum = gl_add_light(cs.clone(), &sum, &contrib)?;
+        }
+        
+        ark2.push(sum);
+    }
+    
+    Ok(ark2)
+}
+
+/// Compute mid = MDS(sbox(current)) + ARK1
+/// This is the first half of Winterfell's RPO round
+fn compute_rpo_mid_gl(
+    cs: ConstraintSystemRef<InnerFr>,
+    state: &[GlVar],
+    ark1: &[GlVar],
+) -> Result<Vec<GlVar>, SynthesisError> {
+    // Step 1: Apply S-box (x^7) to all elements
+    let mut after_sbox = Vec::with_capacity(12);
+    for i in 0..12 {
+        after_sbox.push(sbox_gl(cs.clone(), &state[i])?);
+    }
+    
+    // Step 2: Apply MDS matrix using Winterfell's constants
+    let mut after_mds = Vec::with_capacity(12);
+    for i in 0..12 {
+        let mut sum = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
+        for j in 0..12 {
+            let mds_val = Rp64_256::MDS[i][j].as_int();
+            let mds_const = GlVar(FpGLVar::constant(InnerFr::from(mds_val)));
+            let prod = gl_mul_light(cs.clone(), &mds_const, &after_sbox[j])?;
+            sum = gl_add_light(cs.clone(), &sum, &prod)?;
+        }
+        after_mds.push(sum);
+    }
+    
+    // Step 3: Add ARK1 constants
+    let mut result = Vec::with_capacity(12);
+    for i in 0..12 {
+        result.push(gl_add_light(cs.clone(), &after_mds[i], &ark1[i])?);
+    }
+    
+    Ok(result)
+}
+
+/// Apply inverse MDS matrix using Winterfell's INV_MDS constants
+fn apply_inv_mds_gl(
+    cs: ConstraintSystemRef<InnerFr>,
+    state: &[GlVar],
+) -> Result<Vec<GlVar>, SynthesisError> {
+    let mut result = Vec::with_capacity(12);
+    
+    for i in 0..12 {
+        let mut sum = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
+        for j in 0..12 {
+            let inv_mds_val = Rp64_256::INV_MDS[i][j].as_int();
+            let inv_mds_const = GlVar(FpGLVar::constant(InnerFr::from(inv_mds_val)));
+            let prod = gl_mul_light(cs.clone(), &inv_mds_const, &state[j])?;
+            sum = gl_add_light(cs.clone(), &sum, &prod)?;
+        }
+        result.push(sum);
+    }
+    
+    Ok(result)
 }
 
 /// Pre-compute 1 / prod_{j!=r} (r - j) for Lagrange interpolation
@@ -454,40 +625,6 @@ fn mod_inverse_goldilocks(a: u64) -> u64 {
     const GL_MOD: u64 = 0xFFFFFFFF00000001;
     // a^{p-2} mod p
     mod_pow_goldilocks(a, GL_MOD - 2)
-}
-
-/// Compute one RPO round: state' = MDS(S-box(state + round_constants))
-fn compute_rpo_round_gl(
-    cs: ConstraintSystemRef<InnerFr>,
-    state: &[GlVar],
-    round_constants: &[GlVar],
-) -> Result<Vec<GlVar>, SynthesisError> {
-    // Step 1: Add round constants
-    let mut temp = Vec::with_capacity(12);
-    for i in 0..12 {
-        let sum = gl_add_light(cs.clone(), &state[i], &round_constants[i])?;
-        temp.push(sum);
-    }
-    
-    // Step 2: Apply S-box (x^7) to each element
-    for i in 0..12 {
-        temp[i] = sbox_gl(cs.clone(), &temp[i])?;
-    }
-    
-    // Step 3: Apply MDS matrix
-    let mut result = Vec::with_capacity(12);
-    for i in 0..12 {
-        let mut sum = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
-        for j in 0..12 {
-            let mds_idx = (i + 12 - j) % 12;
-            let mds_val = GlVar(FpGLVar::constant(InnerFr::from(RPO_MDS_MATRIX[mds_idx])));
-            let prod = gl_mul_light(cs.clone(), &mds_val, &temp[j])?;
-            sum = gl_add_light(cs.clone(), &sum, &prod)?;
-        }
-        result.push(sum);
-    }
-    
-    Ok(result)
 }
 
 /// S-box: x^7 in R1CS

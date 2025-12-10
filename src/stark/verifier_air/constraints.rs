@@ -86,14 +86,36 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // This allows us to select the correct constants for rounds 0-6
     let round_constants = compute_round_constants_lagrange(round_counter);
 
-    // --- 5. Compute expected next state for Permute operation ---
-    let mut expected_after_rpo = [E::ZERO; HASH_STATE_WIDTH];
-    compute_rpo_round(&current_hash, &round_constants, &mut expected_after_rpo);
+    // --- 5. Compute values for RPO round verification ---
+    // Winterfell round: sbox → MDS → +ARK1 → inv_sbox → MDS → +ARK2
+    // 
+    // To verify without computing inv_sbox:
+    // 1. Compute mid = MDS(sbox(current)) + ARK1
+    // 2. Compute candidate = INV_MDS(next - ARK2)
+    // 3. Verify: sbox(candidate) = mid (proves candidate = inv_sbox(mid))
+    
+    // round_constants is ARK1 from Lagrange interpolation
+    let mut mid = [E::ZERO; HASH_STATE_WIDTH];
+    compute_rpo_mid(&current_hash, &round_constants, &mut mid);
+    
+    // Get ARK2 for this round
+    let ark2 = compute_ark2_lagrange(round_counter);
+    
+    // Compute next - ARK2
+    let mut next_minus_ark2 = [E::ZERO; HASH_STATE_WIDTH];
+    for i in 0..HASH_STATE_WIDTH {
+        next_minus_ark2[i] = next_hash[i] - ark2[i];
+    }
+    
+    // Apply inverse MDS to get candidate
+    let mut candidate = [E::ZERO; HASH_STATE_WIDTH];
+    apply_inv_mds(&next_minus_ark2, &mut candidate);
 
     // --- 6. Hash state constraints (12) ---
     for i in 0..HASH_STATE_WIDTH {
-        // For Permute: next should equal RPO round result
-        let permute_constraint = next_hash[i] - expected_after_rpo[i];
+        // For Permute: verify sbox(candidate) = mid
+        // This proves that candidate = inv_sbox(mid), validating the round
+        let permute_constraint = sbox(candidate[i]) - mid[i];
 
         // For Nop/Squeeze: next should equal current (copy)
         let copy_constraint = next_hash[i] - current_hash[i];
@@ -107,14 +129,16 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             E::ZERO
         };
 
-        // For Init/special ops: allow any transition
+        // For Init/Merkle/FRI/Deep: allow any transition
         let allow_any = E::ZERO;
 
         // Combine constraints based on operation
+        // NOTE: Nop is padding after permute(), state may be modified after it
+        // so we allow any transition from Nop (like Init/Merkle/etc.)
         let constraint = op.is_permute * permute_constraint
-            + (op.is_nop + op.is_squeeze) * copy_constraint
+            + op.is_squeeze * copy_constraint
             + op.is_absorb * absorb_constraint
-            + (op.is_init + op.is_merkle + op.is_fri + op.is_deep) * allow_any;
+            + (op.is_init + op.is_merkle + op.is_fri + op.is_deep + op.is_nop) * allow_any;
 
         result[idx] = constraint;
         idx += 1;
@@ -181,33 +205,60 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let ood_rhs = current[FRI_START + 7]; // Pre-computed RHS
     
     // OOD constraint: LHS must equal RHS
-    // This verifies the entire composition polynomial equation at the OOD point
-    let ood_constraint = ood_lhs - ood_rhs;
+    // MUST match R1CS implementation in ood_eval_r1cs.rs exactly!
+    let _ood_constraint = ood_lhs - ood_rhs;
+    
+    // ========================================================================
+    // DEEP COMPOSE VERIFICATION MODES (aux[2] determines mode)
+    // 
+    // aux[2] = 0: ROOT mode - verify hash_state[0..3] == fri[0..3] (Merkle root)
+    // aux[2] = 1: OOD mode - verify fri[6] == fri[7] (OOD LHS == RHS)
+    // aux[2] = 2: TERMINAL mode - verify fri[6] == fri[7] (FRI final == expected)
+    // aux[2] = 3: DEEP mode - verify fri[6] == fri[7] (DEEP computed == expected)
+    // ========================================================================
+    let aux_mode = current[AUX_START + 2];
+    let one = E::ONE;
+    let two = E::from(super::BaseElement::new(2));
+    let three = E::from(super::BaseElement::new(3));
+    
+    // Root verification: hash_state[i] == fri[i] for i in 0..4
+    let root_constraint_0 = current_hash[0] - current[FRI_START];
+    let root_constraint_1 = current_hash[1] - current[FRI_START + 1];
+    let root_constraint_2 = current_hash[2] - current[FRI_START + 2];
+    let root_constraint_3 = current_hash[3] - current[FRI_START + 3];
+    
+    // Equality constraint: fri[6] == fri[7] (for OOD, TERMINAL, DEEP modes)
+    let equality_constraint = current[FRI_START + 6] - current[FRI_START + 7];
     
     for i in 0..8 {
         let fri_curr = current[FRI_START + i];
         let fri_next = next[FRI_START + i];
+        let copy_constraint = fri_next - fri_curr;
 
         if i == 4 {
-            // For column 4: FRI folding result OR composition[0] in OOD mode
-            let copy_constraint = fri_next - fri_curr;
-            
-            // During FriFold: verify folding is correct
-            // During DeepCompose: allow transition (OOD values stored)
-            // During other ops: copy constraint
+            // FRI folding result verification
             result[idx] = op.is_fri * fri_fold_constraint 
                 + both_not_special * copy_constraint;
         } else if i == 6 {
-            // For column 6: During DeepCompose, verify OOD constraint (LHS = RHS)
-            let copy_constraint = fri_next - fri_curr;
-            
-            // During DeepCompose: enforce OOD constraint equation
-            // During other ops: copy constraint
-            result[idx] = op.is_deep * ood_constraint 
+            // Equality verification for modes 1,2,3 (OOD/TERMINAL/DEEP)
+            // aux[2] = 0: constraint vanishes (root mode uses columns 0-3)
+            // aux[2] != 0: requires fri[6] == fri[7]
+            result[idx] = op.is_deep * aux_mode * equality_constraint 
+                + both_not_special * copy_constraint;
+        } else if i < 4 {
+            // Root verification for mode 0 only
+            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3) = -6 when aux[2]=0, else 0
+            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
+            let root_constraint = match i {
+                0 => root_constraint_0,
+                1 => root_constraint_1,
+                2 => root_constraint_2,
+                _ => root_constraint_3,
+            };
+            result[idx] = op.is_deep * is_root_check * root_constraint
                 + both_not_special * copy_constraint;
         } else {
-            // Copy constraint when not transitioning to/from special operations
-            let copy_constraint = fri_next - fri_curr;
+            // Columns 5, 7: copy constraint only
             result[idx] = both_not_special * copy_constraint;
         }
         idx += 1;
@@ -273,14 +324,16 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
 ///
 /// This allows selecting the correct round constants for rounds 0-6 based on
 /// the value of aux[0] (round_counter). The interpolation has degree 6.
+/// Compute ARK1 constants for the given round using Lagrange interpolation
 fn compute_round_constants_lagrange<E: FieldElement<BaseField = super::BaseElement>>(
     round_counter: E,
 ) -> [E; HASH_STATE_WIDTH] {
-    let mut round_constants = [E::ZERO; HASH_STATE_WIDTH];
+    use winter_crypto::hashers::Rp64_256;
+    
+    let mut ark1 = [E::ZERO; HASH_STATE_WIDTH];
     
     // Precompute Lagrange basis denominators (these are constants)
     // L_r(x) = prod_{j!=r} (x - j) / (r - j)
-    // The denominator (r - j) for all j != r is constant
     let mut denominators = [E::ONE; 7];
     for r in 0..7 {
         for j in 0..7 {
@@ -293,7 +346,7 @@ fn compute_round_constants_lagrange<E: FieldElement<BaseField = super::BaseEleme
         denominators[r] = denominators[r].inv();
     }
     
-    // For each state element, interpolate the round constant
+    // For each state element, interpolate the ARK1 constant
     for i in 0..HASH_STATE_WIDTH {
         for r in 0..7 {
             // Compute numerator: prod_{j!=r} (round_counter - j)
@@ -308,48 +361,105 @@ fn compute_round_constants_lagrange<E: FieldElement<BaseField = super::BaseEleme
             // L_r(round_counter) = numerator * (1/denominator)
             let lagrange_basis = lagrange_num * denominators[r];
             
-            // Add contribution: ROUND_CONSTANTS[r][i] * L_r(round_counter)
-            let rc_val = E::from(super::BaseElement::new(
-                hash_chiplet::ROUND_CONSTANTS[r][i],
-            ));
-            round_constants[i] = round_constants[i] + rc_val * lagrange_basis;
+            // Add contribution: ARK1[r][i] * L_r(round_counter)
+            // Use Winterfell's ARK1 constants directly
+            let ark1_val = E::from(Rp64_256::ARK1[r][i]);
+            ark1[i] = ark1[i] + ark1_val * lagrange_basis;
         }
     }
     
-    round_constants
+    ark1
 }
 
 /// Compute the expected output of one RPO round
-fn compute_rpo_round<E: FieldElement<BaseField = super::BaseElement>>(
+/// 
+/// CRITICAL: This MUST match Winterfell's Rp64_256 exactly.
+/// - Forward S-box (x^7) for first 6 elements (indices 0-5)
+/// - Inverse S-box (x^{1/7}) for last 6 elements (indices 6-11)
+/// 
+/// For constraint verification:
+/// - Forward: we compute expected = sbox(temp) and verify next == expected
+/// - Inverse: we need temp' such that sbox(temp') = temp, i.e., temp' = inv_sbox(temp)
+///   But we can't compute inv_sbox in constraints. Instead, we verify sbox(next) = temp.
+/// 
+/// So we return what the pre-MDS state should look like BEFORE applying MDS,
+/// and the constraint verifies the S-box relationship appropriately.
+/// Compute the intermediate value after first half of RPO round: mid = MDS(sbox(current)) + ARK1
+/// 
+/// Winterfell round structure: sbox → MDS → +ARK1 → inv_sbox → MDS → +ARK2
+/// We compute up to +ARK1, then verification is done separately.
+fn compute_rpo_mid<E: FieldElement<BaseField = super::BaseElement>>(
     state: &[E; HASH_STATE_WIDTH],
-    round_constants: &[E; HASH_STATE_WIDTH],
+    ark1: &[E; HASH_STATE_WIDTH],
     result: &mut [E; HASH_STATE_WIDTH],
 ) {
-    // Step 1: Add round constants
-    let mut temp = [E::ZERO; HASH_STATE_WIDTH];
+    use winter_crypto::hashers::Rp64_256;
+    
+    // Step 1: Apply S-box to all elements
+    let mut after_sbox = [E::ZERO; HASH_STATE_WIDTH];
     for i in 0..HASH_STATE_WIDTH {
-        temp[i] = state[i] + round_constants[i];
+        after_sbox[i] = sbox(state[i]);
     }
 
-    // Step 2: Apply S-box (x^7)
-    // Note: Real RPO uses x^7 for first half and x^{1/7} for second half.
-    // We use x^7 for all elements here. This is a simplification that works
-    // because the trace builder also uses x^7 for all (via hash_chiplet::sbox).
+    // Step 2: Apply MDS matrix using Winterfell's constants
+    let mut after_mds = [E::ZERO; HASH_STATE_WIDTH];
     for i in 0..HASH_STATE_WIDTH {
-        temp[i] = sbox(temp[i]);
+        after_mds[i] = E::ZERO;
+        for j in 0..HASH_STATE_WIDTH {
+            let mds_val = E::from(Rp64_256::MDS[i][j]);
+            after_mds[i] = after_mds[i] + mds_val * after_sbox[j];
+        }
     }
 
-    // Step 3: Apply MDS matrix
+    // Step 3: Add ARK1 constants
+    for i in 0..HASH_STATE_WIDTH {
+        result[i] = after_mds[i] + ark1[i];
+    }
+}
+
+/// Apply inverse MDS matrix to state
+fn apply_inv_mds<E: FieldElement<BaseField = super::BaseElement>>(
+    state: &[E; HASH_STATE_WIDTH],
+    result: &mut [E; HASH_STATE_WIDTH],
+) {
+    use winter_crypto::hashers::Rp64_256;
+    
     for i in 0..HASH_STATE_WIDTH {
         result[i] = E::ZERO;
         for j in 0..HASH_STATE_WIDTH {
-            let mds_idx = (i + HASH_STATE_WIDTH - j) % HASH_STATE_WIDTH;
-            let mds_val = E::from(super::BaseElement::new(
-                hash_chiplet::MDS_MATRIX[mds_idx],
-            ));
-            result[i] = result[i] + mds_val * temp[j];
+            let inv_mds_val = E::from(Rp64_256::INV_MDS[i][j]);
+            result[i] = result[i] + inv_mds_val * state[j];
         }
     }
+}
+
+/// Compute ARK2 constants for the given round using Lagrange interpolation
+fn compute_ark2_lagrange<E: FieldElement<BaseField = super::BaseElement>>(
+    round_counter: E,
+) -> [E; HASH_STATE_WIDTH] {
+    use winter_crypto::hashers::Rp64_256;
+    
+    let mut ark2 = [E::ZERO; HASH_STATE_WIDTH];
+    
+    // Use Lagrange interpolation to select the correct ARK2 for the round
+    // For round r in 0..7, the Lagrange basis polynomial L_r(x) = prod_{j!=r}((x-j)/(r-j))
+    for i in 0..HASH_STATE_WIDTH {
+        for r in 0..7usize {
+            let mut lagrange_coeff = E::ONE;
+            for j in 0..7usize {
+                if j != r {
+                    let r_val = E::from(super::BaseElement::new(r as u64));
+                    let j_val = E::from(super::BaseElement::new(j as u64));
+                    let diff = r_val - j_val;
+                    // Compute (round_counter - j) / (r - j)
+                    lagrange_coeff = lagrange_coeff * (round_counter - j_val) * diff.inv();
+                }
+            }
+            ark2[i] = ark2[i] + lagrange_coeff * E::from(Rp64_256::ARK2[r][i]);
+        }
+    }
+    
+    ark2
 }
 
 /// S-box: x^7

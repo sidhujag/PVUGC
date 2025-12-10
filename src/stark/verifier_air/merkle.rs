@@ -110,7 +110,9 @@ fn rpo_round(state: &mut [BaseElement; STATE_WIDTH], round: usize) {
 
 /// Inverse S-box: x^{1/7} mod p
 /// Uses the fact that (1/7) mod (p-1) = INV_ALPHA
-fn inv_sbox(x: BaseElement) -> BaseElement {
+/// 
+/// CRITICAL: This must match Winterfell's inverse S-box exactly.
+pub fn inv_sbox(x: BaseElement) -> BaseElement {
     // For Goldilocks: INV_ALPHA = 10540996611094048183
     const INV_ALPHA: u64 = 10540996611094048183;
     x.exp(INV_ALPHA.into())

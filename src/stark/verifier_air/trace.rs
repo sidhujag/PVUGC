@@ -128,33 +128,11 @@ impl VerifierTraceBuilder {
         self.emit_row(VerifierOp::Nop);
     }
 
-    /// Apply one RPO round to the hash state
+    /// Apply one RPO round using Winterfell's implementation directly
     fn apply_rpo_round(&mut self, round: usize) {
-        use super::hash_chiplet::{MDS_MATRIX, ROUND_CONSTANTS, sbox};
-
-        // Add round constants (round-specific)
-        for i in 0..HASH_STATE_WIDTH {
-            self.hash_state[i] = self.hash_state[i]
-                + BaseElement::new(ROUND_CONSTANTS[round % 7][i]);
-        }
-
-        // Apply S-box (x^7 for all elements)
-        // Note: Standard RPO uses x^7 for first half and x^{1/7} for second half,
-        // but for constraint simplicity, we use x^7 for all elements.
-        for i in 0..HASH_STATE_WIDTH {
-            self.hash_state[i] = sbox(self.hash_state[i]);
-        }
-
-        // Apply MDS matrix
-        let mut new_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
-        for i in 0..HASH_STATE_WIDTH {
-            for j in 0..HASH_STATE_WIDTH {
-                let idx = (i + HASH_STATE_WIDTH - j) % HASH_STATE_WIDTH;
-                new_state[i] = new_state[i]
-                    + BaseElement::new(MDS_MATRIX[idx]) * self.hash_state[j];
-            }
-        }
-        self.hash_state = new_state;
+        use winter_crypto::hashers::Rp64_256;
+        // Use Winterfell's round function directly
+        Rp64_256::apply_round(&mut self.hash_state, round);
     }
 
     /// Squeeze 4 elements from the sponge (capacity)
@@ -170,8 +148,19 @@ impl VerifierTraceBuilder {
     }
 
     /// Verify a single Merkle path step
+    /// 
+    /// Matches Winterfell's merge function: parent = hash_elements(left || right)
+    /// Output is from rate portion (indices 4-7), copied to capacity (0-3) for next step.
     pub fn merkle_step(&mut self, sibling: [BaseElement; 4], direction: bool) {
-        // Store sibling in FRI working columns
+        // Save current digest (in indices 0-3) before modifying state
+        let current_digest = [
+            self.hash_state[0],
+            self.hash_state[1],
+            self.hash_state[2],
+            self.hash_state[3],
+        ];
+        
+        // Store sibling in FRI working columns for AIR constraint verification
         for i in 0..4 {
             self.fri_state[i] = sibling[i];
         }
@@ -184,26 +173,39 @@ impl VerifierTraceBuilder {
 
         self.emit_row(VerifierOp::MerklePath);
 
-        // Hash current digest with sibling using RPO sponge
-        // This follows the standard Merkle tree compression pattern:
-        // parent = RPO(left || right) where left/right order depends on direction
-        let mut input = [BaseElement::ZERO; 8];
+        // Reset state for hash_elements (merge = hash(left || right))
+        for i in 0..HASH_STATE_WIDTH {
+            self.hash_state[i] = BaseElement::ZERO;
+        }
+        
+        // Set state[0] = input length (8 elements for merge)
+        self.hash_state[0] = BaseElement::new(8);
+
+        // Absorb left || right into rate portion (indices 4-11)
         if direction {
-            // Current is right child
+            // Current is right child: absorb sibling || current_digest
             for i in 0..4 {
-                input[i] = sibling[i];
-                input[4 + i] = self.hash_state[i];
+                self.hash_state[4 + i] = sibling[i];
+                self.hash_state[8 + i] = current_digest[i];
             }
         } else {
-            // Current is left child
+            // Current is left child: absorb current_digest || sibling
             for i in 0..4 {
-                input[i] = self.hash_state[i];
-                input[4 + i] = sibling[i];
+                self.hash_state[4 + i] = current_digest[i];
+                self.hash_state[8 + i] = sibling[i];
             }
         }
 
-        self.absorb(&input);
+        // Emit as Init (allows any state change) since we reset the sponge for merge
+        // Then permute to compute the merge hash
+        self.emit_row(VerifierOp::Init);
         self.permute();
+        
+        // Output is from rate portion (indices 4-7)
+        // Copy to capacity (0-3) for next merkle_step or verify_root
+        for i in 0..4 {
+            self.hash_state[i] = self.hash_state[4 + i];
+        }
     }
 
     /// Perform FRI folding step
@@ -226,10 +228,85 @@ impl VerifierTraceBuilder {
         g
     }
 
+    /// Verify FRI terminal condition (CRITICAL FOR SECURITY!)
+    /// 
+    /// This verifies that the final folded value matches the remainder polynomial
+    /// or is constant (depending on terminal mode).
+    /// 
+    /// For Constant terminal: all final values must be equal
+    /// For Poly terminal: final_value == P(x) where P is the remainder polynomial
+    /// 
+    /// Parameters:
+    /// - final_value: The final folded value for this query
+    /// - expected_value: The expected value (either first value for constant, or P(x))
+    /// - is_constant_mode: True if using constant terminal (all values equal)
+    /// 
+    /// Returns true if verification passes.
+    pub fn verify_fri_terminal(
+        &mut self,
+        final_value: BaseElement,
+        expected_value: BaseElement,
+    ) -> bool {
+        // Store values in FRI columns for constraint verification
+        // Layout: [final_value, expected_value, _, _, _, _, terminal_diff, _]
+        self.fri_state[0] = final_value;
+        self.fri_state[1] = expected_value;
+        
+        // Compute difference for constraint: final_value - expected_value
+        let diff = final_value - expected_value;
+        self.fri_state[6] = diff;
+        self.fri_state[7] = BaseElement::ZERO; // Expected to be zero
+        
+        // Set mode = TERMINAL VERIFICATION (aux[2] = 2)
+        // NOTE: We use a distinct mode value to differentiate from ROOT (0) and OOD (1)
+        self.aux_state[2] = BaseElement::new(2u64);
+        
+        // Emit DeepCompose row - AIR will verify fri[6] == fri[7] (diff == 0)
+        self.emit_row(VerifierOp::DeepCompose);
+        
+        diff == BaseElement::ZERO
+    }
+
+    /// Verify DEEP composition value (CRITICAL FOR SECURITY!)
+    /// 
+    /// This verifies that the DEEP evaluation at a query position is correctly
+    /// computed from the trace and composition queries at that position.
+    /// 
+    /// The DEEP polynomial is: 
+    ///   DEEP(x) = Σ γᵢ * (T(x) - T(z)) / (x - z) + Σ γⱼ * (T(x) - T(z·g)) / (x - z·g) + ...
+    /// 
+    /// Parameters:
+    /// - deep_value: The DEEP polynomial evaluation at query position
+    /// - expected_deep: The independently computed expected value
+    /// 
+    /// Returns true if verification passes.
+    pub fn verify_deep_value(
+        &mut self,
+        deep_value: BaseElement,
+        expected_deep: BaseElement,
+    ) -> bool {
+        // Store values in FRI columns for constraint verification
+        self.fri_state[0] = deep_value;
+        self.fri_state[1] = expected_deep;
+        
+        // Compute difference
+        let diff = deep_value - expected_deep;
+        self.fri_state[6] = diff;
+        self.fri_state[7] = BaseElement::ZERO;
+        
+        // Set mode = DEEP VERIFICATION (aux[2] = 3)
+        self.aux_state[2] = BaseElement::new(3u64);
+        
+        // Emit DeepCompose row
+        self.emit_row(VerifierOp::DeepCompose);
+        
+        diff == BaseElement::ZERO
+    }
+
     /// Verify OOD constraint equation
     ///
     /// This is the critical check that ensures the composition polynomial
-    /// correctly represents the Aggregator's constraint quotient.
+    /// correctly represents the child AIR's constraint quotient.
     ///
     /// Uses the formula:
     /// ```text
@@ -246,6 +323,8 @@ impl VerifierTraceBuilder {
     /// - trace_len: length of the trace (power of 2)
     /// - constraint_coeffs: [alpha_0, alpha_1, beta_0] from Fiat-Shamir
     /// - pub_result: expected boundary value
+    /// 
+    /// Uses VdfLike (2-column) child constraints for backward compatibility.
     pub fn verify_ood_constraints(
         &mut self,
         ood_frame: &super::ood_eval::OodFrame,
@@ -255,7 +334,38 @@ impl VerifierTraceBuilder {
         constraint_coeffs: &[BaseElement; 3],
         pub_result: BaseElement,
     ) -> bool {
-        use super::ood_eval::{OodParams, verify_ood_constraint_equation};
+        self.verify_ood_constraints_typed(
+            ood_frame,
+            z,
+            g_trace,
+            trace_len,
+            &constraint_coeffs.to_vec(),
+            pub_result,
+            super::ood_eval::ChildAirType::VdfLike,
+        )
+    }
+    
+    /// Verify OOD constraint equation with explicit child AIR type
+    ///
+    /// This version allows specifying the child AIR type for recursive verification.
+    /// Different child types have different constraints that need to be evaluated.
+    ///
+    /// # Child Types
+    ///
+    /// - `VdfLike`: 2-column VDF constraints (legacy Aggregator)
+    /// - `Vdf3Col`: 3-column VDF constraints
+    /// - `VerifierAir`: 27-column Verifier/Aggregator constraints (recursive verification)
+    pub fn verify_ood_constraints_typed(
+        &mut self,
+        ood_frame: &super::ood_eval::OodFrame,
+        z: BaseElement,
+        g_trace: BaseElement,
+        trace_len: usize,
+        constraint_coeffs: &Vec<BaseElement>,
+        pub_result: BaseElement,
+        child_type: super::ood_eval::ChildAirType,
+    ) -> bool {
+        use super::ood_eval::{OodParams, verify_ood_constraint_equation_typed, evaluate_child_constraints};
 
         // Compute all values needed for the constraint equation
         let z_pow_n = z.exp((trace_len as u64).into());
@@ -264,22 +374,35 @@ impl VerifierTraceBuilder {
         let zerofier_num = z_pow_n - BaseElement::ONE;
         let exemption_sq = exemption * exemption;
 
-        // Get trace and composition values
-        let curr_0 = ood_frame.trace_current.get(0).copied().unwrap_or(BaseElement::ZERO);
-        let curr_1 = ood_frame.trace_current.get(1).copied().unwrap_or(BaseElement::ZERO);
-        let next_0 = ood_frame.trace_next.get(0).copied().unwrap_or(BaseElement::ZERO);
-        let next_1 = ood_frame.trace_next.get(1).copied().unwrap_or(BaseElement::ZERO);
+        // Get composition values
         let comp_0 = ood_frame.composition.get(0).copied().unwrap_or(BaseElement::ZERO);
         let comp_1 = ood_frame.composition.get(1).copied().unwrap_or(BaseElement::ZERO);
 
-        // Compute transition constraints
-        let c0 = next_0 - (curr_0 * curr_0 * curr_0 + curr_1);
-        let c1 = next_1 - curr_0;
-        let transition_sum = constraint_coeffs[0] * c0 + constraint_coeffs[1] * c1;
+        // Compute transition constraints using child-type-specific evaluator
+        let constraints = evaluate_child_constraints(
+            &ood_frame.trace_current,
+            &ood_frame.trace_next,
+            child_type,
+        );
+        
+        // Combine constraints with coefficients
+        let mut transition_sum = BaseElement::ZERO;
+        for (i, c) in constraints.iter().enumerate() {
+            if i < constraint_coeffs.len() {
+                transition_sum = transition_sum + constraint_coeffs[i] * *c;
+            }
+        }
 
         // Compute boundary constraint
-        let boundary_value = curr_1 - pub_result;
-        let boundary_sum = constraint_coeffs[2] * boundary_value;
+        let boundary_col = if child_type == super::ood_eval::ChildAirType::VerifierAir { 26 } else { 1 };
+        let boundary_value = ood_frame.trace_current.get(boundary_col)
+            .copied()
+            .unwrap_or(BaseElement::ZERO) - pub_result;
+        let num_constraints = child_type.num_constraints();
+        let boundary_coeff = constraint_coeffs.get(num_constraints)
+            .copied()
+            .unwrap_or(BaseElement::ZERO);
+        let boundary_sum = boundary_coeff * boundary_value;
 
         // Compute LHS: transition_sum * exemption² + boundary_sum * zerofier_num
         let lhs = transition_sum * exemption_sq + boundary_sum * zerofier_num;
@@ -289,20 +412,12 @@ impl VerifierTraceBuilder {
         let rhs = c_combined * zerofier_num * exemption;
 
         // Store values in FRI columns for AIR constraint verification
-        // Layout: [curr[0], curr[1], next[0], next[1], comp[0], comp[1], lhs, rhs]
-        self.fri_state[0] = curr_0;
-        self.fri_state[1] = curr_1;
-        self.fri_state[2] = next_0;
-        self.fri_state[3] = next_1;
-        self.fri_state[4] = comp_0;
-        self.fri_state[5] = comp_1;
+        // Layout: [_, _, _, _, _, _, lhs, rhs]
         self.fri_state[6] = lhs;  // Pre-computed LHS
         self.fri_state[7] = rhs;  // Pre-computed RHS
 
-        // Store constraint coefficients in aux columns
-        self.aux_state[0] = constraint_coeffs[0]; // alpha_0
-        self.aux_state[1] = constraint_coeffs[1]; // alpha_1
-        self.aux_state[2] = constraint_coeffs[2]; // beta_0
+        // Set mode = OOD VERIFICATION (aux[2] = 1)
+        self.aux_state[2] = BaseElement::ONE;
 
         // Emit DeepCompose row - AIR will verify fri[6] = fri[7] (LHS = RHS)
         self.emit_row(VerifierOp::DeepCompose);
@@ -312,13 +427,121 @@ impl VerifierTraceBuilder {
             z,
             trace_len,
             g_trace,
-            constraint_coeffs: constraint_coeffs.to_vec(),
+            constraint_coeffs: constraint_coeffs.clone(),
             pub_result,
         };
 
-        match verify_ood_constraint_equation(ood_frame, &params) {
-            Ok(()) => true,
-            Err(_) => false,
+        match verify_ood_constraint_equation_typed(ood_frame, &params, child_type) {
+            Ok(()) => {
+                eprintln!("[TRACE] OOD verification PASSED for {:?}", child_type);
+                true
+            }
+            Err(e) => {
+                eprintln!("[TRACE] OOD verification FAILED for {:?}: {:?}", child_type, e);
+                eprintln!("[TRACE] LHS={:?}, RHS={:?}, diff={:?}", lhs, rhs, lhs - rhs);
+                false
+            }
+        }
+    }
+
+    /// Check that computed Merkle root matches expected commitment (local check only)
+    /// 
+    /// Returns true if hash_state[0..3] == expected_root, false otherwise.
+    pub fn check_root(&self, expected_root: &[BaseElement; 4]) -> bool {
+        self.hash_state[0] == expected_root[0]
+            && self.hash_state[1] == expected_root[1]
+            && self.hash_state[2] == expected_root[2]
+            && self.hash_state[3] == expected_root[3]
+    }
+    
+    /// Verify Merkle root in AIR (enforced by transition constraints)
+    /// 
+    /// CRITICAL FOR SECURITY! This emits a DeepCompose row that the AIR
+    /// constraint verifies: hash_state[0..3] == fri_state[0..3]
+    /// 
+    /// The expected root is stored in fri_state, computed root is in hash_state.
+    /// Mode aux[2]=0 tells the AIR to check root verification.
+    /// 
+    /// Returns true if local check passes (AIR constraint will also enforce).
+    pub fn verify_root(&mut self, expected_root: [BaseElement; 4]) -> bool {
+        // Store expected root in FRI columns for AIR verification
+        for i in 0..4 {
+            self.fri_state[i] = expected_root[i];
+        }
+        
+        // Set mode = ROOT VERIFICATION (aux[2] = 0)
+        self.aux_state[2] = BaseElement::ZERO;
+        
+        // Emit DeepCompose row - AIR will verify hash_state[0..3] == fri_state[0..3]
+        self.emit_row(VerifierOp::DeepCompose);
+        
+        // Return local check result for caller to track
+        self.check_root(&expected_root)
+    }
+    
+    /// Get current hash state (for debugging)
+    pub fn get_hash_state(&self) -> &[BaseElement; HASH_STATE_WIDTH] {
+        &self.hash_state
+    }
+
+    /// Initialize hash state for a new Merkle path verification
+    /// 
+    /// Before starting a new Merkle path, the hash state should contain
+    /// the leaf digest. This function hashes all leaf data using RPO sponge
+    /// construction matching Winterfell's `hash_elements`:
+    /// - state[0] = input length (domain separation)
+    /// - Absorb elements into rate portion (state[4..12])
+    /// - Permute after each block of 8 elements
+    /// - OUTPUT is from rate portion (indices 4-7), copied to capacity (0-3)
+    ///   for subsequent merkle_step operations
+    pub fn init_leaf(&mut self, leaf_data: &[BaseElement]) {
+        // Reset state to zero
+        for i in 0..HASH_STATE_WIDTH {
+            self.hash_state[i] = BaseElement::ZERO;
+        }
+        
+        // CRITICAL: Set state[0] = input length for domain separation
+        // This matches Winterfell's hash_elements behavior
+        self.hash_state[0] = BaseElement::new(leaf_data.len() as u64);
+        
+        // Process leaf data in chunks of 8 (RPO rate)
+        let mut rate_idx = 0;
+        let mut first_emission = true;
+        for &elem in leaf_data.iter() {
+            // Add element to rate portion (state[4 + rate_idx])
+            self.hash_state[4 + rate_idx] = self.hash_state[4 + rate_idx] + elem;
+            rate_idx += 1;
+            
+            // If we've filled 8 rate elements, emit and permute
+            if rate_idx == 8 {
+                // First emission uses Init (allows state reset), subsequent use Absorb
+                if first_emission {
+                    self.emit_row(VerifierOp::Init);
+                    first_emission = false;
+                } else {
+                self.emit_row(VerifierOp::Absorb);
+                }
+                self.permute();
+                rate_idx = 0;
+            }
+        }
+        
+        // If there are remaining elements (partial block), emit and permute
+        if rate_idx > 0 || leaf_data.is_empty() {
+            // First emission uses Init (allows state reset), subsequent use Absorb
+            if first_emission {
+                self.emit_row(VerifierOp::Init);
+            } else {
+            self.emit_row(VerifierOp::Absorb);
+            }
+            self.permute();
+        }
+        
+        // CRITICAL: For hash_elements, output is from RATE portion (indices 4-7)
+        // Copy to capacity (0-3) so merkle_step can use it as the current digest
+        // This matches Winterfell's Rp64_256::hash_elements output location
+        for i in 0..4 {
+            self.hash_state[i] = self.hash_state[4 + i];
         }
     }
 
@@ -492,5 +715,117 @@ mod tests {
         assert_eq!(s0, BaseElement::ONE);
         assert_eq!(s1, BaseElement::ONE);
         assert_eq!(s2, BaseElement::ONE);
+    }
+    
+    /// Test that our hash matches Winterfell's Rp64_256
+    #[test]
+    fn test_hash_matches_winterfell() {
+        use winter_crypto::hashers::Rp64_256;
+        use winter_crypto::{Digest, ElementHasher};
+        
+        // Test hash_elements with various inputs
+        let test_inputs: Vec<Vec<BaseElement>> = vec![
+            vec![BaseElement::new(1), BaseElement::new(2)],
+            vec![BaseElement::new(42)],
+            (0..8).map(|i| BaseElement::new(i)).collect(),
+            (0..16).map(|i| BaseElement::new(i * 7)).collect(),
+        ];
+        
+        for input in test_inputs {
+            // Compute with Winterfell
+            let winterfell_digest = Rp64_256::hash_elements(&input);
+            let digest_bytes = winterfell_digest.as_bytes();
+            
+            // Extract as 4 GL values (8 bytes each, LE)
+            let mut winterfell_arr = [BaseElement::ZERO; 4];
+            for i in 0..4 {
+                let chunk = &digest_bytes[i * 8..(i + 1) * 8];
+                let val = u64::from_le_bytes(chunk.try_into().unwrap());
+                winterfell_arr[i] = BaseElement::new(val);
+            }
+            
+            // Compute with our implementation
+            let mut builder = VerifierTraceBuilder::new(256);
+            builder.init_leaf(&input);
+            let our_digest = [
+                builder.hash_state[0],
+                builder.hash_state[1],
+                builder.hash_state[2],
+                builder.hash_state[3],
+            ];
+            
+            assert_eq!(
+                our_digest, winterfell_arr,
+                "Hash mismatch for input len {}: our {:?} vs winterfell {:?}",
+                input.len(), our_digest, winterfell_arr
+            );
+        }
+    }
+    
+    /// Test that our merge matches Winterfell's merge
+    #[test]
+    fn test_merge_matches_winterfell() {
+        use winter_crypto::hashers::Rp64_256;
+        use winter_crypto::{Digest, ElementHasher, Hasher};
+        
+        // First hash two inputs to get digests
+        let left_input = vec![BaseElement::new(1), BaseElement::new(2), BaseElement::new(3), BaseElement::new(4)];
+        let right_input = vec![BaseElement::new(5), BaseElement::new(6), BaseElement::new(7), BaseElement::new(8)];
+        
+        let left_digest = Rp64_256::hash_elements(&left_input);
+        let right_digest = Rp64_256::hash_elements(&right_input);
+        
+        // Merge with Winterfell
+        let winterfell_result = Rp64_256::merge(&[left_digest, right_digest]);
+        let result_bytes = winterfell_result.as_bytes();
+        
+        let mut winterfell_arr = [BaseElement::ZERO; 4];
+        for i in 0..4 {
+            let chunk = &result_bytes[i * 8..(i + 1) * 8];
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            winterfell_arr[i] = BaseElement::new(val);
+        }
+        
+        // Extract left digest as BaseElement array
+        let left_bytes = left_digest.as_bytes();
+        let mut left_arr = [BaseElement::ZERO; 4];
+        for i in 0..4 {
+            let chunk = &left_bytes[i * 8..(i + 1) * 8];
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            left_arr[i] = BaseElement::new(val);
+        }
+        
+        // Extract right digest as BaseElement array
+        let right_bytes = right_digest.as_bytes();
+        let mut right_arr = [BaseElement::ZERO; 4];
+        for i in 0..4 {
+            let chunk = &right_bytes[i * 8..(i + 1) * 8];
+            let val = u64::from_le_bytes(chunk.try_into().unwrap());
+            right_arr[i] = BaseElement::new(val);
+        }
+        
+        // Compute with our implementation
+        let mut builder = VerifierTraceBuilder::new(256);
+        // Start with left as the initial digest (in indices 0-3)
+        builder.hash_state[0] = left_arr[0];
+        builder.hash_state[1] = left_arr[1];
+        builder.hash_state[2] = left_arr[2];
+        builder.hash_state[3] = left_arr[3];
+        
+        // Apply merkle_step with right as sibling, direction=false (left is current)
+        builder.merkle_step(right_arr, false);
+        
+        let our_digest = [
+            builder.hash_state[0],
+            builder.hash_state[1],
+            builder.hash_state[2],
+            builder.hash_state[3],
+        ];
+        
+        assert_eq!(
+            our_digest, winterfell_arr,
+            "Merge mismatch: our {:?} vs winterfell {:?}",
+            our_digest, winterfell_arr
+        );
     }
 }

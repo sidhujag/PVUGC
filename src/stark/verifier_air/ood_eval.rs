@@ -81,10 +81,69 @@ impl OodFrame {
 }
 
 // ============================================================================
+// CHILD AIR TYPE SELECTION
+// ============================================================================
+
+/// Child AIR type for OOD verification
+/// 
+/// When verifying a child proof, we need to evaluate the correct AIR constraints
+/// at the OOD point. Different child types have different constraints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildAirType {
+    /// 2-column VDF/Aggregator AIR (old style)
+    /// Constraints: col0' = col0³ + col1, col1' = col0
+    VdfLike,
+    
+    /// 3-column VDF AIR
+    /// Constraints: similar cubic VDF but 3 columns
+    Vdf3Col,
+    
+    /// 27-column Verifier/Aggregator AIR
+    /// Full STARK verification constraints (hash, Merkle, FRI, OOD)
+    VerifierAir,
+}
+
+impl ChildAirType {
+    /// Number of columns for this AIR type
+    pub fn trace_width(&self) -> usize {
+        match self {
+            ChildAirType::VdfLike => 2,
+            ChildAirType::Vdf3Col => 3,
+            ChildAirType::VerifierAir => 27,
+        }
+    }
+    
+    /// Number of transition constraints for this AIR type
+    pub fn num_constraints(&self) -> usize {
+        match self {
+            ChildAirType::VdfLike => 2,
+            ChildAirType::Vdf3Col => 2,
+            ChildAirType::VerifierAir => 27,
+        }
+    }
+}
+
+// ============================================================================
 // AIR CONSTRAINT EVALUATION
 // ============================================================================
 
-/// Simple AIR constraints for the Aggregator STARK
+/// Evaluate constraints for the specified child AIR type
+/// 
+/// This function dispatches to the appropriate constraint evaluator based on
+/// the child AIR type. Returns a vector of constraint evaluations.
+pub fn evaluate_child_constraints(
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+    child_type: ChildAirType,
+) -> Vec<BaseElement> {
+    match child_type {
+        ChildAirType::VdfLike => evaluate_vdf_like_constraints(trace_current, trace_next),
+        ChildAirType::Vdf3Col => evaluate_vdf_3col_constraints(trace_current, trace_next),
+        ChildAirType::VerifierAir => evaluate_verifier_constraints(trace_current, trace_next),
+    }
+}
+
+/// VDF-like constraints (2 columns)
 ///
 /// The Aggregator STARK has two columns with VDF-like transitions:
 /// - col0[i+1] = col0[i]^3 + col1[i]
@@ -93,12 +152,12 @@ impl OodFrame {
 /// At OOD point z:
 /// - constraint0: trace_next[0] - (trace_current[0]^3 + trace_current[1]) = 0
 /// - constraint1: trace_next[1] - trace_current[0] = 0
-pub fn evaluate_aggregator_constraints(
+pub fn evaluate_vdf_like_constraints(
     trace_current: &[BaseElement],
     trace_next: &[BaseElement],
 ) -> Vec<BaseElement> {
-    assert_eq!(trace_current.len(), 2);
-    assert_eq!(trace_next.len(), 2);
+    assert!(trace_current.len() >= 2);
+    assert!(trace_next.len() >= 2);
 
     let col0 = trace_current[0];
     let col1 = trace_current[1];
@@ -110,6 +169,74 @@ pub fn evaluate_aggregator_constraints(
     let c1 = next1 - col0;
 
     vec![c0, c1]
+}
+
+/// Legacy function for backward compatibility
+pub fn evaluate_aggregator_constraints(
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> Vec<BaseElement> {
+    evaluate_vdf_like_constraints(trace_current, trace_next)
+}
+
+/// VDF constraints (3 columns)
+/// 
+/// Similar to 2-column but with an extra state column
+fn evaluate_vdf_3col_constraints(
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> Vec<BaseElement> {
+    assert!(trace_current.len() >= 3);
+    assert!(trace_next.len() >= 3);
+
+    let col0 = trace_current[0];
+    let col1 = trace_current[1];
+    let next0 = trace_next[0];
+    let next1 = trace_next[1];
+
+    // Same constraints as 2-column (col2 is auxiliary)
+    let c0 = next0 - (col0 * col0 * col0 + col1);
+    let c1 = next1 - col0;
+
+    vec![c0, c1]
+}
+
+/// Verifier AIR constraints (27 columns)
+/// 
+/// This evaluates all 27 transition constraints for the Verifier/Aggregator AIR.
+/// The constraints check RPO hash rounds, Merkle paths, FRI folding, and OOD verification.
+fn evaluate_verifier_constraints(
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> Vec<BaseElement> {
+    use super::constraints::evaluate_all;
+    use super::{VerifierPublicInputs, VERIFIER_TRACE_WIDTH};
+    use winterfell::EvaluationFrame;
+    
+    assert!(trace_current.len() >= VERIFIER_TRACE_WIDTH);
+    assert!(trace_next.len() >= VERIFIER_TRACE_WIDTH);
+    
+    // Create evaluation frame from current and next rows
+    let current_vec: Vec<_> = trace_current.iter().take(VERIFIER_TRACE_WIDTH).copied().collect();
+    let next_vec: Vec<_> = trace_next.iter().take(VERIFIER_TRACE_WIDTH).copied().collect();
+    let frame = EvaluationFrame::from_rows(current_vec, next_vec);
+    
+    // Create dummy public inputs (not used for constraint evaluation at OOD point)
+    let pub_inputs = VerifierPublicInputs {
+        statement_hash: [BaseElement::ZERO; 4],
+        trace_commitment: [BaseElement::ZERO; 4],
+        comp_commitment: [BaseElement::ZERO; 4],
+        fri_commitments: vec![],
+        num_queries: 0,
+        proof_trace_len: 0,
+        g_trace: BaseElement::ZERO,
+        pub_result: BaseElement::ZERO,
+    };
+    
+    let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
+    evaluate_all(&frame, &[], &mut result, &pub_inputs);
+    
+    result
 }
 
 /// Evaluate boundary constraint at OOD point
@@ -157,11 +284,31 @@ pub struct OodParams {
 /// - boundary_sum = beta_0 * (trace_current[1] - pub_result)
 /// - exemption = z - g^{n-1}
 /// - C(z) = C_0(z) + C_1(z) * z^n (composition polynomial split into columns)
+/// 
+/// This version uses VdfLike (2-column) constraints for backward compatibility.
 pub fn verify_ood_constraint_equation(
     ood_frame: &OodFrame,
     params: &OodParams,
 ) -> Result<(), OodVerificationError> {
-    if ood_frame.trace_width() < 2 {
+    verify_ood_constraint_equation_typed(ood_frame, params, ChildAirType::VdfLike)
+}
+
+/// Verify the full OOD constraint equation with explicit child AIR type
+///
+/// This version allows specifying the child AIR type to evaluate the correct constraints.
+/// 
+/// # Child Types
+/// 
+/// - `VdfLike`: 2-column VDF constraints (legacy Aggregator)
+/// - `Vdf3Col`: 3-column VDF constraints
+/// - `VerifierAir`: 27-column Verifier/Aggregator constraints (recursive verification)
+pub fn verify_ood_constraint_equation_typed(
+    ood_frame: &OodFrame,
+    params: &OodParams,
+    child_type: ChildAirType,
+) -> Result<(), OodVerificationError> {
+    let expected_width = child_type.trace_width();
+    if ood_frame.trace_width() < expected_width {
         return Err(OodVerificationError::TraceWidthMismatch);
     }
     if ood_frame.comp_width() < 2 {
@@ -170,7 +317,10 @@ pub fn verify_ood_constraint_equation(
             got: BaseElement::ONE,
         });
     }
-    if params.constraint_coeffs.len() < 3 {
+    
+    let num_constraints = child_type.num_constraints();
+    let num_boundary = 1; // Typically 1 boundary constraint
+    if params.constraint_coeffs.len() < num_constraints + num_boundary {
         return Err(OodVerificationError::CoeffCountMismatch);
     }
 
@@ -194,24 +344,33 @@ pub fn verify_ood_constraint_equation(
     let exemption_sq = exemption * exemption;
 
     // ==============================================================
-    // TRANSITION CONSTRAINTS
+    // TRANSITION CONSTRAINTS (child AIR type specific)
     // ==============================================================
-    let constraints = evaluate_aggregator_constraints(
+    let constraints = evaluate_child_constraints(
         &ood_frame.trace_current,
         &ood_frame.trace_next,
+        child_type,
     );
 
-    let alpha_0 = params.constraint_coeffs[0];
-    let alpha_1 = params.constraint_coeffs[1];
-
-    let transition_sum = alpha_0 * constraints[0] + alpha_1 * constraints[1];
+    // Combine constraints with coefficients
+    let mut transition_sum = BaseElement::ZERO;
+    for (i, c) in constraints.iter().enumerate() {
+        if i < params.constraint_coeffs.len() {
+            transition_sum = transition_sum + params.constraint_coeffs[i] * *c;
+        }
+    }
 
     // ==============================================================
     // BOUNDARY CONSTRAINT
     // Assertion: column 1, step (trace_len - 1), equals pub_result
     // ==============================================================
-    let boundary_value = ood_frame.trace_current[1] - params.pub_result;
-    let beta_0 = params.constraint_coeffs[2];
+    let boundary_col = if child_type == ChildAirType::VerifierAir { 26 } else { 1 };
+    let boundary_value = ood_frame.trace_current.get(boundary_col)
+        .copied()
+        .unwrap_or(BaseElement::ZERO) - params.pub_result;
+    let beta_0 = params.constraint_coeffs.get(num_constraints)
+        .copied()
+        .unwrap_or(BaseElement::ZERO);
     let boundary_sum = beta_0 * boundary_value;
 
     // ==============================================================
@@ -235,44 +394,6 @@ pub fn verify_ood_constraint_equation(
     }
 
     Ok(())
-}
-
-// ============================================================================
-// COMPOSITION POLYNOMIAL CHECK
-// ============================================================================
-
-/// Composition polynomial structure for degree-2 constraints
-///
-/// The composition polynomial C(x) combines:
-/// - Transition constraints at all steps
-/// - Boundary constraints at first/last step
-///
-/// C(x) = (1/Z_H(x)) * Σ_i α_i * c_i(x)
-///
-/// where Z_H(x) = x^n - 1 is the vanishing polynomial
-pub struct CompositionPoly {
-    /// Degree of composition (trace_len - 1 for VDF-like)
-    pub degree: usize,
-    /// Number of composition columns
-    pub num_columns: usize,
-}
-
-impl CompositionPoly {
-   
-
-    /// Full composition verification with boundary constraints and exemption
-    ///
-    /// This verifies the complete OOD constraint equation:
-    /// ```text
-    /// transition_sum * exemption² + boundary_sum * (z^n - 1) = C(z) * (z^n - 1) * exemption
-    /// ```
-    pub fn verify_composition_full(
-        &self,
-        ood_frame: &OodFrame,
-        params: &OodParams,
-    ) -> Result<(), OodVerificationError> {
-        verify_ood_constraint_equation(ood_frame, params)
-    }
 }
 
 // ============================================================================

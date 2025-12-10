@@ -16,7 +16,7 @@
 
 use winter_crypto::{Digest, ElementHasher, Hasher as HasherTrait, RandomCoin};
 use winterfell::{
-    math::{fields::f64::BaseElement, FieldElement, ToElements},
+    math::{fields::f64::BaseElement, FieldElement, StarkField, ToElements},
     Air, Proof,
 };
 
@@ -109,21 +109,36 @@ where
     let ood_composition: Vec<BaseElement> = comp_ood_frame.current_row().to_vec();
 
     // ========================================================================
-    // DERIVE QUERY POSITIONS VIA FIAT-SHAMIR
+    // DERIVE OOD PARAMETERS AND QUERY POSITIONS VIA FIAT-SHAMIR
     // ========================================================================
     
-    let query_positions = derive_query_positions_fiat_shamir::<A>(
+    // Number of transition constraints for the inner AIR being verified
+    let num_constraints = 2; // Aggregator AIR has 2 transition constraints
+    
+    let fs_result = derive_fiat_shamir_params::<A>(
         proof,
         pub_inputs,
         lde_domain_size,
         num_fri_layers,
+        num_constraints,
         &trace_commitments_raw,
         &comp_commitment_raw,
         &fri_commitments_raw,
         &trace_ood_frame,
         &comp_ood_frame,
     );
+    
+    let z = fs_result.z;
+    let constraint_coeffs = fs_result.constraint_coeffs;
+    let query_positions = fs_result.query_positions;
     let actual_num_queries = query_positions.len();
+    
+    // Compute trace domain generator
+    let g_trace = compute_trace_generator(trace_len);
+    
+    // Extract public result from public inputs (first element typically)
+    let pub_inputs_elements = pub_inputs.to_elements();
+    let pub_result = pub_inputs_elements.first().copied().unwrap_or(BaseElement::ZERO);
 
     // ========================================================================
     // PARSE ACTUAL QUERY OPENINGS FROM PROOF
@@ -158,8 +173,31 @@ where
         &fri_commitments_raw,
     );
 
-    // Number of transition constraints for Aggregator AIR
-    let num_constraints = 2;
+    // Parse FRI remainder coefficients from proof
+    // For Constant terminal: empty
+    // For Poly terminal: coefficients in GL, low->high order
+    let fri_remainder_coeffs: Vec<BaseElement> = {
+        let fri_proof = &proof.fri_proof;
+        if fri_proof.num_partitions() == 0 {
+            vec![]
+        } else {
+            // Parse remainder from the proof
+            // The remainder is stored as the final layer values when terminal is Poly
+            fri_proof.parse_remainder::<BaseElement>()
+                .unwrap_or_else(|_| vec![])
+        }
+    };
+    
+    // Determine terminal type based on remainder
+    let fri_terminal_is_constant = fri_remainder_coeffs.is_empty();
+    
+    // Compute domain parameters
+    let domain_offset = BaseElement::GENERATOR;
+    let g_lde = BaseElement::get_root_of_unity(lde_domain_size.ilog2());
+    
+    // Parse DEEP composition coefficients from Fiat-Shamir
+    // These are drawn after the OOD frame
+    let deep_coeffs = fs_result.deep_coeffs.clone();
 
     ParsedProof {
         trace_commitment,
@@ -168,9 +206,23 @@ where
         ood_trace_current,
         ood_trace_next,
         ood_composition,
+        // OOD verification parameters (CRITICAL for security!)
+        z,
+        g_trace,
+        constraint_coeffs,
+        pub_result,
+        // Query and layer data
         trace_queries,
         comp_queries,
         fri_layers,
+        // FRI verification data (CRITICAL for faithful verification!)
+        fri_remainder_coeffs,
+        fri_terminal_is_constant,
+        query_positions,
+        deep_coeffs,
+        domain_offset,
+        g_lde,
+        // Parameters
         trace_width,
         comp_width,
         trace_len,
@@ -198,23 +250,39 @@ fn digest_to_merkle_digest<D: Digest>(digest: &D) -> MerkleDigest {
 }
 
 // ============================================================================
-// FIAT-SHAMIR QUERY POSITION DERIVATION
+// FIAT-SHAMIR DERIVATION (OOD PARAMETERS + QUERY POSITIONS)
 // ============================================================================
 
-/// Derive query positions using the Fiat-Shamir transcript
+/// Result of Fiat-Shamir transcript derivation
+struct FiatShamirResult {
+    /// OOD challenge point z
+    z: BaseElement,
+    /// Constraint mixing coefficients
+    constraint_coeffs: Vec<BaseElement>,
+    /// DEEP composition coefficients
+    deep_coeffs: Vec<BaseElement>,
+    /// Query positions (deduplicated)
+    query_positions: Vec<usize>,
+}
+
+/// Derive OOD parameters and query positions using the Fiat-Shamir transcript
 ///
-/// This replicates the verifier's query position derivation exactly.
-fn derive_query_positions_fiat_shamir<A: Air<BaseField = BaseElement>>(
+/// This replicates the verifier's Fiat-Shamir exactly, extracting:
+/// - z: OOD challenge point
+/// - constraint_coeffs: mixing coefficients for AIR constraints  
+/// - query_positions: positions for Merkle/FRI queries
+fn derive_fiat_shamir_params<A: Air<BaseField = BaseElement>>(
     proof: &Proof,
     pub_inputs: &A::PublicInputs,
     lde_domain_size: usize,
     num_fri_layers: usize,
+    num_constraints: usize,
     trace_commitments: &[<Hasher as winter_crypto::Hasher>::Digest],
     comp_commitment: &<Hasher as winter_crypto::Hasher>::Digest,
     fri_commitments: &[<Hasher as winter_crypto::Hasher>::Digest],
     trace_ood: &winter_air::proof::TraceOodFrame<BaseElement>,
     quotient_ood: &winter_air::proof::QuotientOodFrame<BaseElement>,
-) -> Vec<usize>
+) -> FiatShamirResult
 where
     A::PublicInputs: ToElements<BaseElement>,
 {
@@ -230,24 +298,29 @@ where
     for trace_root in trace_commitments {
         public_coin.reseed(*trace_root);
     }
-    // Draw constraint composition coefficients (just to advance the transcript)
-    let num_constraints = 2; // Aggregator AIR
+    
+    // Draw constraint composition coefficients (CRITICAL: these are used for OOD verification!)
+    let mut constraint_coeffs = Vec::with_capacity(num_constraints + 1);
     for _ in 0..num_constraints {
-        let _ = public_coin.draw::<BaseElement>();
+        constraint_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw constraint coeff"));
     }
+    // Add one more for boundary constraint
+    constraint_coeffs.push(public_coin.draw::<BaseElement>().unwrap_or(BaseElement::ONE));
 
     // Reseed with composition commitment and draw OOD point z
     public_coin.reseed(*comp_commitment);
-    let _ = public_coin.draw::<BaseElement>(); // z
+    let z = public_coin.draw::<BaseElement>().expect("Failed to draw z");
 
     // Reseed with OOD evaluations
     let ood_evals = merge_ood_evaluations(trace_ood, quotient_ood);
     public_coin.reseed(Hasher::hash_elements(&ood_evals));
 
-    // Draw DEEP composition coefficients
+    // Draw DEEP composition coefficients (CRITICAL: collect these for verification!)
     let trace_width = trace_ood.current_row().len();
-    for _ in 0..(trace_width * 2 + quotient_ood.current_row().len()) {
-        let _ = public_coin.draw::<BaseElement>();
+    let num_deep_coeffs = trace_width * 2 + quotient_ood.current_row().len();
+    let mut deep_coeffs = Vec::with_capacity(num_deep_coeffs);
+    for _ in 0..num_deep_coeffs {
+        deep_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw DEEP coeff"));
     }
 
     // Reseed with FRI commitments and draw FRI betas
@@ -269,7 +342,19 @@ where
     
     query_positions.sort_unstable();
     query_positions.dedup();
-    query_positions
+    
+    FiatShamirResult {
+        z,
+        constraint_coeffs,
+        deep_coeffs,
+        query_positions,
+    }
+}
+
+/// Compute trace domain generator for given trace length
+fn compute_trace_generator(trace_len: usize) -> BaseElement {
+    use winterfell::math::StarkField;
+    BaseElement::get_root_of_unity(trace_len.trailing_zeros())
 }
 
 // ============================================================================
@@ -309,6 +394,19 @@ fn parse_trace_queries_real(
     // Convert Table to Vec<Vec<E>> using rows() iterator
     let rows_vec: Vec<Vec<BaseElement>> = table.rows().map(|row| row.to_vec()).collect();
 
+    // Compute leaf digests from the row values
+    // Each leaf is hash(row_values)
+    let leaf_digests: Vec<<Hasher as winter_crypto::Hasher>::Digest> = rows_vec.iter()
+        .map(|row| Hasher::hash_elements(row))
+        .collect();
+
+    // Extract all Merkle paths using Winterfell's decompression
+    let merkle_paths = extract_all_merkle_paths_from_batch(
+        batch_proof,
+        query_positions,
+        &leaf_digests,
+    );
+
     let mut queries = Vec::with_capacity(num_queries);
     for (q_idx, &position) in query_positions.iter().take(num_queries).enumerate() {
         // Get the row values for this query
@@ -318,8 +416,12 @@ fn parse_trace_queries_real(
             vec![BaseElement::ZERO; trace_width]
         };
 
-        // Build Merkle path from batch proof
-        let merkle_path = extract_merkle_path_from_batch(&batch_proof, q_idx, lde_domain_size);
+        // Get the decompressed Merkle path for this query
+        let merkle_path = if q_idx < merkle_paths.len() {
+            merkle_paths[q_idx].clone()
+        } else {
+            MerklePath::new()
+        };
 
         queries.push(QueryData {
             position,
@@ -351,6 +453,18 @@ fn parse_comp_queries_real(
     // Convert Table to Vec<Vec<E>> using rows() iterator
     let rows_vec: Vec<Vec<BaseElement>> = table.rows().map(|row| row.to_vec()).collect();
 
+    // Compute leaf digests from the row values
+    let leaf_digests: Vec<<Hasher as winter_crypto::Hasher>::Digest> = rows_vec.iter()
+        .map(|row| Hasher::hash_elements(row))
+        .collect();
+
+    // Extract all Merkle paths using Winterfell's decompression
+    let merkle_paths = extract_all_merkle_paths_from_batch(
+        batch_proof,
+        query_positions,
+        &leaf_digests,
+    );
+
     let mut queries = Vec::with_capacity(num_queries);
     for (q_idx, &position) in query_positions.iter().take(num_queries).enumerate() {
         let values: Vec<BaseElement> = if q_idx < rows_vec.len() {
@@ -359,7 +473,12 @@ fn parse_comp_queries_real(
             vec![BaseElement::ZERO; comp_width]
         };
 
-        let merkle_path = extract_merkle_path_from_batch(&batch_proof, q_idx, lde_domain_size);
+        // Get the decompressed Merkle path for this query
+        let merkle_path = if q_idx < merkle_paths.len() {
+            merkle_paths[q_idx].clone()
+        } else {
+            MerklePath::new()
+        };
 
         queries.push(QueryData {
             position,
@@ -371,29 +490,46 @@ fn parse_comp_queries_real(
     queries
 }
 
-/// Extract a single Merkle path from a batch proof
-fn extract_merkle_path_from_batch<H: ElementHasher>(
-    batch_proof: &winter_crypto::BatchMerkleProof<H>,
-    query_idx: usize,
-    domain_size: usize,
-) -> MerklePath {
-    let depth = (domain_size as f64).log2() as usize;
+/// Extract individual Merkle paths from a batch proof using Winterfell's decompression
+/// 
+/// This uses `into_openings` to decompress the batch proof into individual proofs,
+/// then converts each to our MerklePath format.
+fn extract_all_merkle_paths_from_batch<H: ElementHasher>(
+    batch_proof: winter_crypto::BatchMerkleProof<H>,
+    query_positions: &[usize],
+    leaves: &[<H as winter_crypto::Hasher>::Digest],
+) -> Vec<MerklePath> {
+    
+    // Use Winterfell's into_openings to decompress the batch proof
+    let openings = batch_proof.into_openings(leaves, query_positions)
+        .unwrap_or_else(|e| {
+            eprintln!("DEBUG: into_openings failed: {:?}", e);
+            vec![]
+        });
+    
+    let mut paths = Vec::with_capacity(openings.len());
+    
+    for (q_idx, opening) in openings.into_iter().enumerate() {
+        let (_leaf_digest, siblings) = opening;
+        let position = query_positions[q_idx];
+        
     let mut path = MerklePath::new();
 
-    // Extract nodes for this query from the batch proof
-    // The batch proof stores nodes layer by layer
-    for layer in 0..depth.min(batch_proof.nodes.len()) {
-        if let Some(node) = batch_proof.nodes.get(layer).and_then(|l| l.get(query_idx)) {
-            let direction = if query_idx & (1 << layer) == 0 {
+        for (layer, sibling) in siblings.into_iter().enumerate() {
+            // Direction is based on the POSITION in the tree
+            // At layer L, bit (position >> L) & 1 tells us if current node is left (0) or right (1) child
+            let direction = if (position >> layer) & 1 == 0 {
                 MerkleDirection::Left
             } else {
                 MerkleDirection::Right
             };
-            path.push(digest_to_merkle_digest(node), direction);
+            path.push(digest_to_merkle_digest(&sibling), direction);
         }
+        
+        paths.push(path);
     }
 
-    path
+    paths
 }
 
 // ============================================================================

@@ -45,6 +45,9 @@ pub mod prover;
 pub mod proof_parser;
 pub mod aggregator_integration;
 
+// Re-export common verification function for use by Aggregator
+pub use prover::{append_proof_verification, VerificationResult};
+
 #[cfg(test)]
 mod integration_test;
 
@@ -190,25 +193,36 @@ impl Air for VerifierAir {
         }
 
         // Hash state constraints (12): 
+        // For Permute: op.is_permute (deg 3) * sbox(candidate) - mid (deg 7)
+        //   where candidate = inv_mds(next - ark2) and mid = mds(sbox(current)) + ark1
+        //   Lagrange interpolation for ark1/ark2 adds degree 6 (product of 6 terms)
+        //   Total: 3 + 7 + 6 = 16, but actual evaluation may simplify
         // With RPO verification: degree 45 (Lagrange*6 + S-box*7 + op_flag*3 ≈ 44)
-        // Actual observed: 22484 = 44 * 511, so degree is 45
         for _ in 0..HASH_STATE_WIDTH {
             degrees.push(TransitionConstraintDegree::new(45));
         }
 
         // FRI/DEEP working constraints (8):
-        // First 4: degree 7 (both_not_special * copy, active with real FRI operations)
-        // Index 4: degree 5 (FRI folding verification: is_fri * fold_constraint)
-        //          Actual eval degree is 1020/255 ≈ 4, but need declared >= actual
-        // Rest: degree 1 (may evaluate to zero depending on trace structure)
+        // Columns 0-3, 5, 7: copy constraint (both_not_special * copy)
+        // Column 4: FRI folding (op.is_fri * fold + both_not_special * copy)
+        // Column 6: OOD verification (op.is_deep * ood + both_not_special * copy)
+        // 
+        // NOTE: Winterfell requires declared degree to MATCH actual degree.
+        // If constraint always evaluates to 0, declare degree 1.
         for i in 0..8 {
-            if i < 4 {
-                degrees.push(TransitionConstraintDegree::new(7));
-            } else if i == 4 {
-                // FRI folding constraint
+            if i == 4 {
+                // FRI folding constraint: degree 5
                 degrees.push(TransitionConstraintDegree::new(5));
-            } else {
+            } else if i == 6 {
+                // OOD constraint: op.is_deep(3) * ood(1) + both_not_special(6) * copy(1) = degree 7
+                degrees.push(TransitionConstraintDegree::new(7));
+            } else if i == 5 {
+                // Column 5: may always be 0 due to trace structure
                 degrees.push(TransitionConstraintDegree::new(1));
+            } else {
+                // Columns 0-3, 7: copy constraints
+                // May be 0 if no non-special→non-special transitions
+                degrees.push(TransitionConstraintDegree::new(7));
             }
         }
 

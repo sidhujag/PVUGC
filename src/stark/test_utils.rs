@@ -19,10 +19,11 @@ use winter_math::fields::f64::BaseElement;
 use winter_math::{FieldElement, ToElements};
 use winterfell::{Air, Proof, ProofOptions, Prover, Trace};
 
-use super::aggregator_air::{generate_aggregator_proof, AggregatorAir, AggregatorConfig};
+use super::aggregator_air::{generate_aggregator_proof, generate_verifying_aggregator_proof, AggregatorAir, AggregatorConfig};
 use super::stark_proof_parser::{
     derive_query_positions, parse_proof_for_circuit_with_query_positions,
 };
+use super::verifier_air::proof_parser::parse_proof;
 use super::tests::helpers::cubic_fib::{generate_test_cubic_fib_proof_rpo, CubicFibAir};
 use super::tests::helpers::simple_vdf::{build_vdf_trace, generate_test_vdf_proof_rpo, VdfAir, VdfProver};
 use super::{AirParams, FullStarkVerifierCircuit, StarkInnerFr};
@@ -445,6 +446,186 @@ fn build_vdf_recursive_stark_instance_with_config(
     VdfStarkInstance {
         statement_hash: verifier_result.statement_hash,
         circuit: verifier_result.circuit,
+    }
+}
+
+// ============================================================================
+// VERIFYING AGGREGATOR FLOW (2 App proofs → Verifying Aggregator → Groth16)
+// ============================================================================
+
+/// Build a verifying aggregator instance that ACTUALLY VERIFIES 2 VDF proofs
+/// 
+/// Architecture:
+/// ```text
+/// VDF STARK 0 ─┐
+///              ├─→ Verifying Aggregator (verifies both in AIR) ──→ Groth16
+/// VDF STARK 1 ─┘
+/// ```
+/// 
+/// The Aggregator's trace contains the VERIFICATION of both VDF proofs,
+/// so OOD evaluation uses VerifierAir constraints (not VDF constraints).
+pub fn build_verifying_aggregator_instance(
+    start0: u64, steps0: usize,
+    start1: u64, steps1: usize,
+) -> VdfStarkInstance {
+    use super::verifier_air::VerifierAir;
+    
+    // Step 1: Generate first VDF proof
+    let vdf0_start = BaseElement::new(start0);
+    let vdf0_trace = build_vdf_trace(vdf0_start, steps0);
+    let vdf0_options = ProofOptions::new(
+        2, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    let vdf0_prover = VdfProver::<Rp64_256>::new(vdf0_options.clone());
+    let vdf0_proof = vdf0_prover.prove(vdf0_trace.clone()).expect("VDF 0 proof failed");
+    let vdf0_result = vdf0_trace.get(1, vdf0_trace.length() - 1);
+    
+    // Verify VDF 0
+    let acceptable0 = winterfell::AcceptableOptions::OptionSet(vec![vdf0_options.clone()]);
+    winterfell::verify::<VdfAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+        vdf0_proof.clone(),
+        vdf0_result,
+        &acceptable0,
+    ).expect("VDF 0 verification failed");
+    
+    // Step 2: Generate second VDF proof
+    let vdf1_start = BaseElement::new(start1);
+    let vdf1_trace = build_vdf_trace(vdf1_start, steps1);
+    let vdf1_options = ProofOptions::new(
+        2, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    let vdf1_prover = VdfProver::<Rp64_256>::new(vdf1_options.clone());
+    let vdf1_proof = vdf1_prover.prove(vdf1_trace.clone()).expect("VDF 1 proof failed");
+    let vdf1_result = vdf1_trace.get(1, vdf1_trace.length() - 1);
+    
+    // Verify VDF 1
+    let acceptable1 = winterfell::AcceptableOptions::OptionSet(vec![vdf1_options.clone()]);
+    winterfell::verify::<VdfAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+        vdf1_proof.clone(),
+        vdf1_result,
+        &acceptable1,
+    ).expect("VDF 1 verification failed");
+    
+    // Step 3: Parse proofs for the verifying aggregator
+    let parsed0 = parse_proof::<VdfAir>(&vdf0_proof, &vdf0_result);
+    let parsed1 = parse_proof::<VdfAir>(&vdf1_proof, &vdf1_result);
+    
+    // Step 4: Generate Verifying Aggregator proof
+    // This proof uses VerifierAir constraints (27 columns)
+    let agg_options = ProofOptions::new(
+        2, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    let (agg_proof, agg_pub_inputs, _agg_trace) = 
+        generate_verifying_aggregator_proof(&parsed0, &parsed1, agg_options.clone())
+            .expect("Verifying Aggregator proof failed");
+    
+    // Verify the aggregator proof (sanity check)
+    let acceptable_agg = winterfell::AcceptableOptions::OptionSet(vec![agg_options]);
+    winterfell::verify::<VerifierAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+        agg_proof.clone(),
+        agg_pub_inputs.clone(),
+        &acceptable_agg,
+    ).expect("Verifying Aggregator verification failed");
+    
+    // Step 5: Build the Groth16 circuit
+    // This circuit verifies the VerifierAir proof (NOT VdfAir!)
+    build_verifier_air_instance(agg_proof, agg_pub_inputs)
+}
+
+/// Build a Groth16 instance from a VerifierAir proof
+fn build_verifier_air_instance(
+    proof: Proof,
+    pub_inputs: super::verifier_air::VerifierPublicInputs,
+) -> VdfStarkInstance {
+    use super::verifier_air::VerifierAir;
+    
+    let trace_len = proof.context.trace_info().length();
+    let lde_domain_size = proof.context.lde_domain_size();
+    let num_queries = proof.options().num_queries();
+    let trace_width = proof.context.trace_info().main_trace_width();
+    
+    // Create AIR for domain parameters
+    let air = VerifierAir::new(
+        proof.context.trace_info().clone(),
+        pub_inputs.clone(),
+        proof.options().clone(),
+    );
+    
+    let lde_generator = air.lde_domain_generator().as_int();
+    let domain_offset = air.domain_offset().as_int();
+    let g_trace = air.trace_domain_generator().as_int();
+    
+    let coeffs_len = proof
+        .fri_proof
+        .clone()
+        .parse_remainder::<BaseElement>()
+        .map(|v: Vec<BaseElement>| v.len())
+        .unwrap_or(0);
+    let fri_terminal = if coeffs_len == 0 {
+        FriTerminalKind::Constant
+    } else {
+        FriTerminalKind::Poly { degree: coeffs_len - 1 }
+    };
+    
+    // Use same version constant (circuit format indicator)
+    use super::AGGREGATOR_VERSION;
+    
+    let comp_width = air.context().num_constraint_composition_columns();
+    let num_constraints = proof.context.num_constraints();
+    let fri_num_layers = proof
+        .options()
+        .to_fri_options()
+        .num_fri_layers(lde_domain_size);
+    
+    let air_params = AirParams {
+        trace_width,
+        comp_width,
+        trace_len,
+        lde_blowup: lde_domain_size / trace_len,
+        num_queries,
+        fri_folding_factor: 2,
+        fri_num_layers,
+        lde_generator,
+        domain_offset,
+        g_lde: lde_generator,
+        g_trace,
+        combiner_kind: CombinerKind::RandomRho,
+        fri_terminal,
+        num_constraint_coeffs: num_constraints,
+        grinding_factor: proof.options().grinding_factor(),
+        aggregator_version: AGGREGATOR_VERSION,
+    };
+    
+    // Convert public inputs to u64 for circuit
+    let pub_inputs_u64: Vec<u64> = pub_inputs.to_elements()
+        .iter()
+        .map(|e| e.as_int())
+        .collect();
+    
+    let query_positions = derive_query_positions::<Rp64_256, _>(&proof, &air, &pub_inputs);
+    
+    let circuit = parse_proof_for_circuit_with_query_positions::<Rp64_256, MerkleTree<Rp64_256>>(
+        &proof,
+        pub_inputs_u64,
+        air_params,
+        query_positions,
+    );
+    
+    VdfStarkInstance {
+        statement_hash: circuit.statement_hash,
+        circuit,
     }
 }
 
