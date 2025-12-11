@@ -143,6 +143,7 @@ impl Prover for VerifierProver {
                 pub_result: BaseElement::ZERO,
                 expected_checkpoint_count: 0, // Will fail boundary assertion if used
                 interpreter_hash: [BaseElement::ZERO; 4],
+                expected_mode_counter: 0, // Will fail boundary assertion if used
             }
         })
     }

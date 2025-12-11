@@ -54,7 +54,8 @@ pub fn verify_ood_equation_in_circuit(
     if ood_trace_current.len() < NUM_TRANSITION_CONSTRAINTS || ood_trace_next.len() < NUM_TRANSITION_CONSTRAINTS {
         return Err(SynthesisError::Unsatisfiable);
     }
-    if constraint_coeffs.len() < NUM_TRANSITION_CONSTRAINTS + 5 {
+    // Need 27 transition + 8 boundary (4 capacity + 2 initial aux + 2 final aux)
+    if constraint_coeffs.len() < NUM_TRANSITION_CONSTRAINTS + 8 {
         return Err(SynthesisError::Unsatisfiable);
     }
     
@@ -81,26 +82,23 @@ pub fn verify_ood_equation_in_circuit(
     let exemption = gl_sub_light(cs.clone(), &z_gl, &g_pow_n_minus_1_gl)?;
     let z_minus_1 = gl_sub_light(cs.clone(), &z_gl, &one)?;
     
-    // Extract interpreter_hash from public inputs (last 4 elements)
-    // Minimum layout: statement_hash(4) + trace_commit(4) + comp_commit(4) + 
-    //                 num_queries(1) + trace_len(1) + g_trace(1) + pub_result(1) + 
-    //                 expected_checkpoints(1) + interpreter_hash(4) = 21 minimum
+    // Extract interpreter_hash and mode_counter from public inputs
+    // Layout: statement_hash(4) + trace_commit(4) + comp_commit(4) + 
+    //         num_queries(1) + trace_len(1) + g_trace(1) + pub_result(1) + 
+    //         expected_checkpoints(1) + expected_mode_counter(1) + interpreter_hash(4) = 22 minimum
     // 
-    // SECURITY: Must require minimum length to ensure interpreter_hash doesn't
-    // overlap with statement_hash (indices 0..4). Failing to check this would
-    // allow an attacker to omit interpreter_hash or have it read from statement_hash.
+    // SECURITY: Must require minimum length to ensure fields don't overlap.
     let pub_len = stark_pub_inputs.len();
-    let interpreter_hash: [u64; 4] = if pub_len >= 21 {
-        [
-            stark_pub_inputs[pub_len - 4],
-            stark_pub_inputs[pub_len - 3],
-            stark_pub_inputs[pub_len - 2],
-            stark_pub_inputs[pub_len - 1],
-        ]
-    } else {
-        // Malformed public inputs - interpreter_hash is required
+    if pub_len < 22 {
         return Err(SynthesisError::Unsatisfiable);
-    };
+    }
+    
+    let interpreter_hash: [u64; 4] = [
+        stark_pub_inputs[pub_len - 4],
+        stark_pub_inputs[pub_len - 3],
+        stark_pub_inputs[pub_len - 2],
+        stark_pub_inputs[pub_len - 1],
+    ];
     
     // =========================================================================
     // STEP 2: Evaluate all 27 VerifierAir transition constraints (HARDCODED)
@@ -150,25 +148,44 @@ pub fn verify_ood_equation_in_circuit(
         initial_sum = gl_add_light(cs.clone(), &initial_sum, &term)?;
     }
     
-    // Initial aux[3] = 0 (column 26) - coeff index 31
-    let initial_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 4;
+    // Initial aux[1] = 0 (column 24) - coeff index 31
+    // (Matches AIR assertion order: capacity[0-3], then aux[1], then aux[3])
+    let initial_aux1_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 4;
+    let beta_aux1_init = GlVar(constraint_coeffs[initial_aux1_coeff_idx].clone());
+    let val_24 = &ood_trace_current[24];
+    let aux1_init_term = gl_mul_light(cs.clone(), &beta_aux1_init, val_24)?;
+    initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux1_init_term)?;
+    
+    // Initial aux[3] = 0 (column 26) - coeff index 32
+    let initial_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
     let beta_aux3_init = GlVar(constraint_coeffs[initial_aux3_coeff_idx].clone());
     let val_26 = &ood_trace_current[26];
     let aux3_init_term = gl_mul_light(cs.clone(), &beta_aux3_init, val_26)?;
     initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux3_init_term)?;
     
-    // Final aux[3] = expected_checkpoint_count (column 26) - coeff index 32
-    // Get expected checkpoint count from public inputs
-    // Layout: [..., expected_checkpoint_count, interpreter_hash[0..4]]
-    // So expected_checkpoint_count is at position pub_len - 5
-    // (Safe: we already validated pub_len >= 21 above)
-    let expected_checkpoints = stark_pub_inputs[pub_len - 5];
+    // Final aux[1] = expected_mode_counter (column 24) - coeff index 33
+    // Layout: [..., expected_checkpoint_count, expected_mode_counter, interpreter_hash[0..4]]
+    // So expected_mode_counter is at position pub_len - 5
+    let expected_mode_counter = stark_pub_inputs[pub_len - 5];
+    let expected_mode_counter_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_mode_counter)));
+    
+    let final_aux1_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 6;
+    let beta_aux1_final = GlVar(constraint_coeffs[final_aux1_coeff_idx].clone());
+    let val_24_minus_expected = gl_sub_light(cs.clone(), val_24, &expected_mode_counter_gl)?;
+    let aux1_final_term = gl_mul_light(cs.clone(), &beta_aux1_final, &val_24_minus_expected)?;
+    
+    // Final aux[3] = expected_checkpoint_count (column 26) - coeff index 34
+    // expected_checkpoint_count is at position pub_len - 6
+    let expected_checkpoints = stark_pub_inputs[pub_len - 6];
     let expected_checkpoints_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_checkpoints)));
     
-    let final_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
-    let beta_final = GlVar(constraint_coeffs[final_coeff_idx].clone());
-    let val_minus_expected = gl_sub_light(cs.clone(), val_26, &expected_checkpoints_gl)?;
-    let final_term = gl_mul_light(cs.clone(), &beta_final, &val_minus_expected)?;
+    let final_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 7;
+    let beta_aux3_final = GlVar(constraint_coeffs[final_aux3_coeff_idx].clone());
+    let val_26_minus_expected = gl_sub_light(cs.clone(), val_26, &expected_checkpoints_gl)?;
+    let aux3_final_term = gl_mul_light(cs.clone(), &beta_aux3_final, &val_26_minus_expected)?;
+    
+    // Combine both final terms
+    let final_term = gl_add_light(cs.clone(), &aux1_final_term, &aux3_final_term)?;
     
     // =========================================================================
     // STEP 6: Verify OOD equation (avoiding division by multiplying through)
@@ -560,6 +577,66 @@ fn evaluate_verifier_air_constraints_gl(
             let c1 = gl_add_light(cs.clone(), &permute_check, &merkle_binary_check)?;
             let c = gl_add_light(cs.clone(), &c1, &basic_check)?;
             constraints.push(c);
+        } else if i == 1 {
+            // Mode counter
+            //
+            // Tracks statement hash (mode 4) and interpreter hash (mode 5) verifications.
+            // Packed encoding: aux[1] = statement_count + 64 * interpreter_count
+            //
+            // Update rules:
+            // - On DeepCompose mode 4: aux[1] += 1
+            // - On DeepCompose mode 5: aux[1] += 64
+            // - Otherwise: aux[1] unchanged
+            //
+            // Constraint: aux[1]_next - aux[1]_curr - is_deep * (is_mode_4 + is_mode_5 * 64) = 0
+            //
+            // We reuse is_statement_check and is_interpreter_check from FRI constraints
+            // but need to normalize them to 0/1
+            let mode = aux_mode;
+            let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
+            let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
+            let four_gl = GlVar(FpGLVar::constant(InnerFr::from(4u64)));
+            let five_gl = GlVar(FpGLVar::constant(InnerFr::from(5u64)));
+            let sixty_four = GlVar(FpGLVar::constant(InnerFr::from(64u64)));
+            
+            // Compute mode selectors (reusing what we have)
+            let mode_m1 = gl_sub_light(cs.clone(), mode, &one)?;
+            let mode_m2 = gl_sub_light(cs.clone(), mode, &two_gl)?;
+            let mode_m3 = gl_sub_light(cs.clone(), mode, &three_gl)?;
+            let mode_m4 = gl_sub_light(cs.clone(), mode, &four_gl)?;
+            let mode_m5 = gl_sub_light(cs.clone(), mode, &five_gl)?;
+            
+            // is_mode_4_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-5) = -24 when mode=4
+            let p1 = gl_mul_light(cs.clone(), mode, &mode_m1)?;
+            let p2 = gl_mul_light(cs.clone(), &p1, &mode_m2)?;
+            let p3 = gl_mul_light(cs.clone(), &p2, &mode_m3)?;
+            let is_mode_4_raw = gl_mul_light(cs.clone(), &p3, &mode_m5)?;
+            // Normalize: divide by -24 (multiply by inverse)
+            // (-24)^(-1) mod p = 768614336225607680
+            let neg_24_inv = GlVar(FpGLVar::constant(InnerFr::from(768614336225607680u64)));
+            let is_mode_4 = gl_mul_light(cs.clone(), &is_mode_4_raw, &neg_24_inv)?;
+            
+            // is_mode_5_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-4) = 120 when mode=5
+            let q1 = gl_mul_light(cs.clone(), mode, &mode_m1)?;
+            let q2 = gl_mul_light(cs.clone(), &q1, &mode_m2)?;
+            let q3 = gl_mul_light(cs.clone(), &q2, &mode_m3)?;
+            let is_mode_5_raw = gl_mul_light(cs.clone(), &q3, &mode_m4)?;
+            // Normalize: divide by 120
+            // 120^(-1) mod p = 18293021202169462785
+            let inv_120 = GlVar(FpGLVar::constant(InnerFr::from(18293021202169462785u64)));
+            let is_mode_5 = gl_mul_light(cs.clone(), &is_mode_5_raw, &inv_120)?;
+            
+            // increment = is_mode_4 + is_mode_5 * 64
+            let mode_5_scaled = gl_mul_light(cs.clone(), &is_mode_5, &sixty_four)?;
+            let mode_increment = gl_add_light(cs.clone(), &is_mode_4, &mode_5_scaled)?;
+            
+            // final_increment = is_deep * mode_increment
+            let final_increment = gl_mul_light(cs.clone(), &op.is_deep, &mode_increment)?;
+            
+            // Constraint: aux[1]_next - aux[1]_curr - final_increment = 0
+            let diff = gl_sub_light(cs.clone(), aux_next, aux_curr)?;
+            let c = gl_sub_light(cs.clone(), &diff, &final_increment)?;
+            constraints.push(c);
         } else if i == 3 {
             // Checkpoint counter
             // 
@@ -572,7 +649,7 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_sub_light(cs.clone(), &checkpoint_constraint, &op.is_deep)?;
             constraints.push(c);
         } else {
-            // Allow any for aux[1,2]
+            // aux[2]: mode value - updated freely by prover
             constraints.push(zero.clone());
         }
     }

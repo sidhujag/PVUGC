@@ -152,11 +152,17 @@ pub struct VerifierPublicInputs {
     /// Interpreter/formula hash - binds the constraint formula to public input
     /// For Generic children, this is the hash of the EncodedFormula.
     pub interpreter_hash: [BaseElement; 4],
+    /// Expected mode counter
+    /// 
+    /// Packed encoding: statement_count + 64 * interpreter_count
+    /// For single proof: 1 + 64*1 = 65
+    /// For multi-proof (N children): 1 + 64*N
+    pub expected_mode_counter: usize,
 }
 
 impl ToElements<BaseElement> for VerifierPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut elements = Vec::with_capacity(23 + self.fri_commitments.len() * 4);
+        let mut elements = Vec::with_capacity(24 + self.fri_commitments.len() * 4);
         elements.extend_from_slice(&self.statement_hash);
         elements.extend_from_slice(&self.trace_commitment);
         elements.extend_from_slice(&self.comp_commitment);
@@ -168,6 +174,7 @@ impl ToElements<BaseElement> for VerifierPublicInputs {
         elements.push(self.g_trace);
         elements.push(self.pub_result);
         elements.push(BaseElement::new(self.expected_checkpoint_count as u64));
+        elements.push(BaseElement::new(self.expected_mode_counter as u64));
         elements.extend_from_slice(&self.interpreter_hash);
         elements
     }
@@ -192,6 +199,18 @@ impl VerifierPublicInputs {
             // With FRI: statement hash + OOD + interpreter hash + (trace + comp + DEEP + FRI layers + terminal) per query
             3 + num_queries * (2 + 1 + num_fri_layers + 1)
         }
+    }
+    
+    /// Compute expected mode counter from number of child proofs
+    /// 
+    /// Packed encoding: statement_count + 64 * interpreter_count
+    /// - statement_count: always 1 (one combined statement hash verification)
+    /// - interpreter_count: number of OOD verifications (one per child proof)
+    /// 
+    /// For single proof verification: 1 + 64*1 = 65
+    /// For verifying aggregator (N children): 1 + 64*N
+    pub fn compute_expected_mode_counter(num_child_proofs: usize) -> usize {
+        1 + 64 * num_child_proofs
     }
 }
 
@@ -282,28 +301,37 @@ impl Air for VerifierAir {
 
         // Auxiliary constraints (4):
         // aux[0]: degree 10 (round counter range check: is_permute*prod(rc-i) for i in 0..7)
-        // aux[1,2]: degree 7 declared (aux_both_not_special * copy), but may be 0 in practice
-        //           if no Nop→Nop or Squeeze→Squeeze transitions occur
+        // aux[1]: degree 8 (mode counter: is_deep * is_mode_4/5 normalized selectors)
+        // aux[2]: mode value - unconstrained
         // aux[3]: degree 3 (checkpoint counter: aux_next - aux_curr - op.is_deep)
-        //         op.is_deep = s2 * s1 * (1 - s0) has degree 3
         for i in 0..4 {
             if i == 0 {
                 // Round counter: max(is_permute*7-term-product, basic_ops*(rc-7))
                 // = max(3+7, 3+1) = degree 10
                 degrees.push(TransitionConstraintDegree::new(10));
+            } else if i == 1 {
+                // Mode counter: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 + is_mode_5 * 64)
+                // is_deep = degree 3, is_mode_4/5 = degree 5
+                // Total: 3 + 5 = degree 8
+                degrees.push(TransitionConstraintDegree::new(8));
             } else if i == 3 {
                 // Checkpoint counter: aux_next - aux_curr - op.is_deep
                 // op.is_deep = s2 * s1 * (1 - s0) = degree 3
                 degrees.push(TransitionConstraintDegree::new(3));
             } else {
-                // aux[1,2]: In practice these may always be 0 (no Nop→Nop transitions)
-                // Declare degree 1 to handle the zero case
+                // aux[2]: mode value - unconstrained
                 degrees.push(TransitionConstraintDegree::new(1));
             }
         }
 
-        // 4 initial capacity zeros + 1 initial aux[3]=0 + 1 final aux[3]=expected_checkpoint_count
-        let num_assertions = 6;
+        // Boundary assertions:
+        // - 4 initial capacity zeros (columns 3-6)
+        // - 1 initial aux[1] = 0 (mode counter)
+        // - 1 initial aux[3] = 0 (checkpoint counter)
+        // - 1 final aux[1] = expected_mode_counter
+        // - 1 final aux[3] = expected_checkpoint_count
+        // Total: 8
+        let num_assertions = 8;
 
         let context = AirContext::new(trace_info, degrees, num_assertions, options);
 
@@ -327,20 +355,38 @@ impl Air for VerifierAir {
             ));
         }
 
-        // Initial checkpoint counter must be 0
-        // aux[3] is at index VERIFIER_TRACE_WIDTH - 1 (column 26)
+        // Initial mode counter must be 0
+        // aux[1] is at column 24
         assertions.push(Assertion::single(
-            VERIFIER_TRACE_WIDTH - 1, // aux[3] = checkpoint counter
+            24, // aux[1] = mode counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
 
+        // Initial checkpoint counter must be 0
+        // aux[3] is at column 26
+        assertions.push(Assertion::single(
+            26, // aux[3] = checkpoint counter
+            0,
+            BaseElement::ZERO, // Starts at 0
+        ));
+
+        let last_row = self.context.trace_len() - 1;
+        
+        // Final mode counter must equal expected value
+        // Packed encoding: statement_count + 64 * interpreter_count
+        // For single proof: 1 + 64*1 = 65
+        // For multi-proof (N children): 1 + 64*N
+        assertions.push(Assertion::single(
+            24, // aux[1] = mode counter
+            last_row,
+            BaseElement::new(self.pub_inputs.expected_mode_counter as u64),
+        ));
+
         // Final checkpoint count must equal expected value
         // This ensures all verification steps were executed (not skipped).
-        // Without this, a malicious prover could skip verification and fake acceptance.
-        let last_row = self.context.trace_len() - 1;
         assertions.push(Assertion::single(
-            VERIFIER_TRACE_WIDTH - 1, // aux[3] = checkpoint counter
+            26, // aux[3] = checkpoint counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64),
         ));
@@ -383,6 +429,7 @@ mod tests {
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             interpreter_hash: [BaseElement::ZERO; 4],
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 
         let trace_info = TraceInfo::new(VERIFIER_TRACE_WIDTH, 64);
@@ -411,11 +458,12 @@ mod tests {
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             interpreter_hash: [BaseElement::ZERO; 4],
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 
         let elements = pub_inputs.to_elements();
-        // 4 + 4 + 4 + 8 + 4 + 1 + 1 + 1 + 1 + 4 = 29 elements (added interpreter_hash)
-        assert_eq!(elements.len(), 29);
+        // 4 + 4 + 4 + 8 + 1 + 1 + 1 + 1 + 1 + 1 + 4 = 30 elements (added expected_mode_counter)
+        assert_eq!(elements.len(), 30);
     }
     
     #[test]

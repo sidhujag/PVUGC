@@ -843,6 +843,9 @@ pub fn generate_verifying_aggregator_proof(
     let child_type = ChildAirType::generic_vdf();
     let interpreter_hash = child_type.compute_formula_hash();
     
+    // Mode counter: 1 statement + 2 interpreters (one per child)
+    let expected_mode_counter = VerifierPublicInputs::compute_expected_mode_counter(2);
+    
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
         trace_commitment: result0.trace_commitment,  // From first child
@@ -854,6 +857,7 @@ pub fn generate_verifying_aggregator_proof(
         pub_result: child0_proof.pub_result,
         expected_checkpoint_count: total_checkpoints,
         interpreter_hash,
+        expected_mode_counter,
     };
     
     // Generate proof using VerifierProver

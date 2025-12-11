@@ -82,11 +82,23 @@ impl VerifierTraceBuilder {
 
         self.row += 1;
         
-        // Increment checkpoint counter after DeepCompose operations.
+        // After DeepCompose operations, update counters
         // DeepCompose = 6, which means verification occurred at this step.
-        // The transition constraint will enforce: next[aux[3]] = current[aux[3]] + 1
         if op == VerifierOp::DeepCompose {
+            // Increment checkpoint counter
+            // The transition constraint will enforce: next[aux[3]] = current[aux[3]] + 1
             self.aux_state[3] = self.aux_state[3] + BaseElement::ONE;
+            
+            // Update mode counter based on mode (aux[2])
+            // Mode 4 (statement): add 1
+            // Mode 5 (interpreter): add 64
+            // Packed encoding: statement_count + 64 * interpreter_count
+            let mode = self.aux_state[2].as_int();
+            if mode == 4 {
+                self.aux_state[1] = self.aux_state[1] + BaseElement::ONE;
+            } else if mode == 5 {
+                self.aux_state[1] = self.aux_state[1] + BaseElement::new(64);
+            }
         }
     }
 
@@ -715,6 +727,7 @@ mod tests {
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             interpreter_hash: [BaseElement::ZERO; 4],
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 
         // We don't have a real Proof here, but we can test the trace building logic

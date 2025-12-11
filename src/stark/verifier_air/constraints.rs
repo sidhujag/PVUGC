@@ -342,6 +342,58 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let basic_check = basic_ops * (rc - seven);
             
             result[idx] = permute_check + merkle_binary_check + basic_check;
+        } else if i == 1 {
+            // mode counter (aux[1])
+            //
+            // Tracks statement hash (mode 4) and interpreter hash (mode 5) verifications.
+            // Packed encoding: aux[1] = statement_count + 64 * interpreter_count
+            //
+            // Final boundary: aux[1] = 1 + 64 = 65 (exactly 1 of each)
+            //
+            // This prevents attacks where an attacker skips these critical bindings
+            // or substitutes other check types.
+            //
+            // Update rules:
+            // - On DeepCompose mode 4: aux[1] += 1 (increment statement count)
+            // - On DeepCompose mode 5: aux[1] += 64 (increment interpreter count)
+            // - Otherwise: aux[1] unchanged (copy)
+            //
+            // is_mode_4 and is_mode_5 are computed using the existing selectors:
+            // is_statement_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-5)
+            //   = 4*3*2*1*(-1) = -24 when mode=4, 0 otherwise
+            // is_interpreter_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-4)
+            //   = 5*4*3*2*1 = 120 when mode=5, 0 otherwise
+            //
+            // We normalize by dividing by these constants to get 0/1 indicators.
+            let mode = current[AUX_START + 2];
+            let one = E::ONE;
+            let two = E::from(super::BaseElement::new(2));
+            let three = E::from(super::BaseElement::new(3));
+            let four = E::from(super::BaseElement::new(4));
+            let five = E::from(super::BaseElement::new(5));
+            
+            // Raw selector for mode 4 (non-zero = -24 when mode=4)
+            let mode_4_raw = mode * (mode - one) * (mode - two) * (mode - three) * (mode - five);
+            // Normalize: divide by -24 to get 1 when mode=4
+            // (-24)^(-1) mod p: since 768614336225607680 * 24 = p-1, we have (-24)^(-1) = 768614336225607680
+            let neg_24_inv = E::from(super::BaseElement::new(768614336225607680u64));
+            let is_mode_4 = mode_4_raw * neg_24_inv;
+            
+            // Raw selector for mode 5 (non-zero = 120 when mode=5)
+            let mode_5_raw = mode * (mode - one) * (mode - two) * (mode - three) * (mode - four);
+            // Normalize: divide by 120 to get 1 when mode=5
+            // 120^(-1) mod p: since 153722867245121536 * 120 = p-1, we have 120^(-1) = p - 153722867245121536
+            let inv_120 = E::from(super::BaseElement::new(18293021202169462785u64));
+            let is_mode_5 = mode_5_raw * inv_120;
+            
+            // Increment values
+            let sixty_four = E::from(super::BaseElement::new(64));
+            
+            // Constraint: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 * 1 + is_mode_5 * 64)
+            let increment = op.is_deep * (is_mode_4 + is_mode_5 * sixty_four);
+            let mode_counter_constraint = aux_next - aux_curr - increment;
+            
+            result[idx] = mode_counter_constraint;
         } else if i == 3 {
             // Checkpoint counter (aux[3])
             // 
@@ -354,8 +406,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let checkpoint_constraint = aux_next - aux_curr - op.is_deep;
             result[idx] = checkpoint_constraint;
         } else {
-            // Aux columns 1 and 2: currently unused, allow any values
-            // These could be used for additional verification state in future extensions
+            // aux[0]: round counter (handled above)
+            // aux[2]: mode value - updated freely by prover, used by other constraints
             result[idx] = E::ZERO;
         }
         idx += 1;

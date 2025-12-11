@@ -596,6 +596,7 @@ fn evaluate_verifier_constraints(
         pub_result: BaseElement::ZERO,
         expected_checkpoint_count: 0,
         interpreter_hash: [BaseElement::ZERO; 4],
+        expected_mode_counter: 0,
     };
     
     let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
@@ -1014,6 +1015,7 @@ mod tests {
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: 0,
             interpreter_hash: [BaseElement::ZERO; 4],
+            expected_mode_counter: 0,
         };
         let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
         
