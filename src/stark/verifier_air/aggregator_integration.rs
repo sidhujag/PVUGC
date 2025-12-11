@@ -78,6 +78,26 @@ impl RecursiveConfig {
             ),
         }
     }
+    
+    /// Test configuration with meaningful FRI layers
+    /// 
+    /// Uses larger aggregator trace (256 rows) to generate actual FRI folding.
+    /// This tests the full FRI verification path in VerifierAir.
+    pub fn test_with_fri() -> Self {
+        Self {
+            aggregator_config: AggregatorConfig::test_with_fri(),
+            verifier_options: winterfell::ProofOptions::new(
+                4,  // num_queries
+                64, // blowup_factor (must be >= max constraint degree + 1)
+                0,  // grinding_factor
+                winterfell::FieldExtension::None,
+                2,  // FRI folding factor
+                7,  // Must be 2^n - 1 (7 = 2^3 - 1)
+                winterfell::BatchingMethod::Linear,
+                winterfell::BatchingMethod::Linear,
+            ),
+        }
+    }
 }
 
 // ============================================================================
@@ -128,15 +148,25 @@ impl RecursiveVerifier {
         // g_trace = ω^(2^64 / trace_len) where ω is primitive root of Goldilocks
         let g_trace = compute_trace_generator(parsed.trace_len);
 
+        // NOTE: Use num_fri_layers (actual layers verified) not fri_commitments.len()
+        // fri_commitments may include an extra commitment for the remainder polynomial
+        let expected_checkpoints = VerifierPublicInputs::compute_expected_checkpoints(
+            parsed.num_queries, 
+            parsed.num_fri_layers,
+        );
+        eprintln!("[PUB_INPUTS] num_queries={}, num_fri_layers={}, expected_checkpoints={}",
+            parsed.num_queries, parsed.num_fri_layers, expected_checkpoints);
+        
         VerifierPublicInputs {
-            statement_hash: hash_aggregator_statement(aggregator_pub_inputs),
+            statement_hash: compute_statement_hash_from_parsed(&parsed),
             trace_commitment: parsed.trace_commitment,
             comp_commitment: parsed.comp_commitment,
-            fri_commitments: parsed.fri_commitments,
+            fri_commitments: parsed.fri_commitments.clone(),
             num_queries: parsed.num_queries,
             proof_trace_len: parsed.trace_len,
             g_trace,
             pub_result: aggregator_pub_inputs.result,
+            expected_checkpoint_count: expected_checkpoints,
         }
     }
 
@@ -163,17 +193,69 @@ fn parse_aggregator_proof(
     parse_proof::<AggregatorAir>(proof, pub_inputs)
 }
 
-/// Hash the Aggregator's public inputs into a statement hash
+/// Absorb input into sponge state and apply RPO permutation
+#[inline]
+fn sponge_absorb_permute(state: &mut [BaseElement; 12], input: &[BaseElement; 8]) {
+    use winter_crypto::hashers::Rp64_256;
+    
+    // XOR into rate portion (elements 4-11)
+    for i in 0..8 {
+        state[4 + i] = state[4 + i] + input[i];
+    }
+    // Apply 7 RPO rounds
+    for round in 0..7 {
+        Rp64_256::apply_round(state, round);
+    }
+}
+
+/// Compute statement hash from proof commitments
+/// 
+/// This replicates the exact sponge construction used by the prover:
+/// 1. Initialize sponge state to zeros
+/// 2. For each 8-element chunk: XOR into rate portion (elements 4-11), then permute
+/// 3. Return elements 0-3 as the hash
+/// 
+/// The AIR constraint verifies: hash_state[0..3] == pub_inputs.statement_hash
+fn compute_statement_hash_from_parsed(parsed: &super::prover::ParsedProof) -> MerkleDigest {
+    use winterfell::math::FieldElement;
+    
+    // Initialize sponge state to zeros (matching init_sponge)
+    let mut state = [BaseElement::ZERO; 12];
+    
+    // Absorb context elements
+    let context_elements = parsed.context_to_elements();
+    for chunk in context_elements.chunks(8) {
+        let mut absorb_buf = [BaseElement::ZERO; 8];
+        for (i, &e) in chunk.iter().enumerate() {
+            absorb_buf[i] = e;
+        }
+        sponge_absorb_permute(&mut state, &absorb_buf);
+    }
+    
+    // Absorb trace commitment
+    let mut commit_buf = [BaseElement::ZERO; 8];
+    commit_buf[0..4].copy_from_slice(&parsed.trace_commitment);
+    sponge_absorb_permute(&mut state, &commit_buf);
+    
+    // Absorb comp commitment
+    commit_buf = [BaseElement::ZERO; 8];
+    commit_buf[0..4].copy_from_slice(&parsed.comp_commitment);
+    sponge_absorb_permute(&mut state, &commit_buf);
+    
+    // Absorb FRI commitments
+    for fri_commit in &parsed.fri_commitments {
+        commit_buf = [BaseElement::ZERO; 8];
+        commit_buf[0..4].copy_from_slice(fri_commit);
+        sponge_absorb_permute(&mut state, &commit_buf);
+    }
+    
+    // Squeeze: return first 4 elements (matching squeeze)
+    [state[0], state[1], state[2], state[3]]
+}
+
+/// Hash the Aggregator's public inputs into a statement hash (legacy)
+#[allow(dead_code)]
 fn hash_aggregator_statement(pub_inputs: &AggregatorPublicInputs) -> MerkleDigest {
-    // The statement hash binds all the public inputs together
-    // This is what gets verified by Groth16
-    //
-    // We include:
-    // - result: The final accumulated VDF result
-    // - children_root[0..2]: First two elements of the children Merkle root
-    //
-    // This provides cryptographic binding between the STARK proof and
-    // the statement that Groth16 ultimately verifies.
     [
         pub_inputs.result,
         pub_inputs.children_root[0],

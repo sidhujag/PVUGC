@@ -54,15 +54,28 @@ impl VerifierProver {
     /// 
     /// Uses the common `append_proof_verification` function which can be
     /// reused by Aggregator AIR for verifying multiple proofs.
+    /// 
+    /// NOTE: This assumes the proof is an AggregatorAir proof (2 constraints).
+    /// For VdfAir proofs, use `build_verification_trace_typed` with the correct child type.
     pub fn build_verification_trace(
         &self,
         proof_data: &ParsedProof,
     ) -> TraceTable<BaseElement> {
+        // Default to AggregatorAir (2 constraints) for backward compatibility
+        self.build_verification_trace_typed(proof_data, super::ood_eval::ChildAirType::generic_aggregator_vdf())
+    }
+    
+    /// Generate a verification trace with explicit child AIR type
+    pub fn build_verification_trace_typed(
+        &self,
+        proof_data: &ParsedProof,
+        child_type: super::ood_eval::ChildAirType,
+    ) -> TraceTable<BaseElement> {
         let estimated_len = estimate_trace_length(proof_data);
         let mut builder = VerifierTraceBuilder::new(estimated_len);
 
-        // Use common verification function
-        let result = append_proof_verification(&mut builder, proof_data);
+        // Use common verification function with specified child type
+        let result = append_proof_verification(&mut builder, proof_data, child_type);
 
         // CRITICAL: Only accept if all verification checks passed
         // Boundary assertion enforces acceptance_flag = 1, so invalid proofs fail
@@ -74,15 +87,25 @@ impl VerifierProver {
     /// Generate a verification trace and return the statement hash
     /// 
     /// This variant returns the verification result for use in aggregation.
+    /// NOTE: This assumes the proof is an AggregatorAir proof (2 constraints).
     pub fn build_verification_trace_with_result(
         &self,
         proof_data: &ParsedProof,
     ) -> (TraceTable<BaseElement>, VerificationResult) {
+        self.build_verification_trace_with_result_typed(proof_data, super::ood_eval::ChildAirType::generic_aggregator_vdf())
+    }
+    
+    /// Generate a verification trace and return the statement hash with explicit child type
+    pub fn build_verification_trace_with_result_typed(
+        &self,
+        proof_data: &ParsedProof,
+        child_type: super::ood_eval::ChildAirType,
+    ) -> (TraceTable<BaseElement>, VerificationResult) {
         let estimated_len = estimate_trace_length(proof_data);
         let mut builder = VerifierTraceBuilder::new(estimated_len);
 
-        // Use common verification function
-        let result = append_proof_verification(&mut builder, proof_data);
+        // Use common verification function with specified child type
+        let result = append_proof_verification(&mut builder, proof_data, child_type);
 
         // CRITICAL: Only accept if all verification checks passed
         builder.accept(result.valid);
@@ -118,6 +141,7 @@ impl Prover for VerifierProver {
                 proof_trace_len: 8,
                 g_trace: BaseElement::new(18446744069414584320u64),
                 pub_result: BaseElement::ZERO,
+                expected_checkpoint_count: 0, // Will fail boundary assertion if used
             }
         })
     }
@@ -193,23 +217,25 @@ pub struct VerificationResult {
 /// - Merkle hash correctness: Each merkle_step is constrained
 /// - Root verification: verify_root emits DeepCompose rows with AIR checks
 /// - OOD verification: verify_ood_constraints checks the inner proof's constraints
+/// 
+/// # Parameters
+/// 
+/// - `child_type`: The AIR type of the proof being verified. This determines
+///   which constraint formula to use for OOD verification.
+///   - Use `ChildAirType::generic_vdf()` for VdfAir proofs (1 constraint)
+///   - Use `ChildAirType::generic_aggregator_vdf()` for AggregatorAir proofs (2 constraints)
+///   - Use `ChildAirType::VerifierAir` for recursive VerifierAir proofs
 pub fn append_proof_verification(
     builder: &mut VerifierTraceBuilder,
     proof_data: &ParsedProof,
+    child_type: super::ood_eval::ChildAirType,
 ) -> VerificationResult {
     // Track verification results - ALL checks must pass for acceptance
     let mut all_valid = true;
     
     // === Sanity Checks (like R1CS) ===
     // Check required data is present
-    
-    eprintln!("[VERIFIER AIR] Proof stats: trace_width={}, comp_width={}, trace_len={}", 
-        proof_data.trace_width, proof_data.comp_width, proof_data.trace_len);
-    eprintln!("[VERIFIER AIR] num_fri_layers={}, fri_layers.len()={}", 
-        proof_data.num_fri_layers, proof_data.fri_layers.len());
-    eprintln!("[VERIFIER AIR] trace_queries={}, comp_queries={}, deep_coeffs={}", 
-        proof_data.trace_queries.len(), proof_data.comp_queries.len(), proof_data.deep_coeffs.len());
-    
+
     if proof_data.trace_queries.is_empty() { 
         eprintln!("[VERIFIER AIR] FAIL: trace_queries is empty");
         all_valid = false; 
@@ -236,7 +262,9 @@ pub fn append_proof_verification(
         all_valid = false; 
     }
     
-    let expected_deep_coeffs = proof_data.trace_width * 2 + proof_data.comp_width;
+    // Winterfell DEEP uses same gamma for both z and z*g terms:
+    // Coefficients: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
+    let expected_deep_coeffs = proof_data.trace_width + proof_data.comp_width;
     if proof_data.deep_coeffs.len() < expected_deep_coeffs { 
         eprintln!("[VERIFIER AIR] FAIL: deep_coeffs.len()={} < expected={}", 
             proof_data.deep_coeffs.len(), expected_deep_coeffs);
@@ -285,37 +313,56 @@ pub fn append_proof_verification(
         builder.permute();
     }
 
-    // === Phase 3: OOD VERIFICATION (CRITICAL FOR SECURITY!) ===
+    // === SECURITY CRITICAL: Statement Hash Verification ===
+    // The statement hash binds all commitments to the public inputs.
+    // The AIR constraint verifies: hash_state[0..3] == pub_inputs.statement_hash
+    // This prevents an attacker from verifying a DIFFERENT proof than what's claimed.
+    // 
+    // After absorbing all commitments, the hash_state[0..3] contains the computed hash.
+    // We emit a DeepCompose row with mode=4 (STATEMENT), and the AIR enforces it
+    // equals pub_inputs.statement_hash.
+    {
+        // Squeeze to get the computed statement hash
+        let computed_hash = builder.squeeze();
+        
+        // Verify statement hash - the real check is the AIR constraint
+        // which compares hash_state to pub_inputs.statement_hash
+        let statement_ok = builder.verify_statement_hash(computed_hash);
+        if !statement_ok {
+            eprintln!("[VERIFIER AIR] FAIL: Statement hash verification failed");
+            all_valid = false;
+        }
+    }
+
+    // === Phase 3: OOD VERIFICATION ===
     // Verify the inner proof's AIR constraints at the OOD point z.
-    // This prevents the "Free Key" attack where an attacker substitutes a trivial AIR.
     {
         use super::ood_eval::OodFrame;
         
         let ood_frame = OodFrame::new(
             proof_data.ood_trace_current.clone(),
             proof_data.ood_trace_next.clone(),
-            proof_data.ood_composition.clone(),
-            vec![BaseElement::ZERO; proof_data.comp_width],
+            proof_data.ood_comp_current.clone(),
+            proof_data.ood_comp_next.clone(),
         );
         
         // Use constraint coefficients from Fiat-Shamir
-        let coeffs: [BaseElement; 3] = if proof_data.constraint_coeffs.len() >= 3 {
-            [
-                proof_data.constraint_coeffs[0],
-                proof_data.constraint_coeffs[1],
-                proof_data.constraint_coeffs[2],
-            ]
+        // Need at least num_constraints + 1 (for boundary)
+        let num_constraints = child_type.num_constraints();
+        let coeffs: Vec<BaseElement> = if proof_data.constraint_coeffs.len() >= num_constraints + 1 {
+            proof_data.constraint_coeffs[..num_constraints + 1].to_vec()
         } else {
-            [BaseElement::ONE; 3]
+            vec![BaseElement::ONE; num_constraints + 1]
         };
         
-        let ood_valid = builder.verify_ood_constraints(
+        let ood_valid = builder.verify_ood_constraints_typed(
             &ood_frame,
             proof_data.z,
             proof_data.g_trace,
             proof_data.trace_len,
             &coeffs,
             proof_data.pub_result,
+            child_type.clone(),
         );
         
         if !ood_valid {
@@ -385,26 +432,39 @@ pub fn append_proof_verification(
         let comp_query = proof_data.comp_queries.get(q_idx);
         
         if let (Some(trace_q), Some(comp_q)) = (trace_query, comp_query) {
-            // Compute expected DEEP value at this query position
-            let x = fri_query.x;
+            // Use fri_query.x which is already computed from the original LDE domain position
+            let position = proof_data.query_positions.get(q_idx).copied().unwrap_or(0);
+            let x = fri_query.x;  // Already: offset * g_lde^position
+            
             let expected_deep = compute_deep_value(
                 x,
                 &trace_q.values,
                 &comp_q.values,
                 &proof_data.ood_trace_current,
                 &proof_data.ood_trace_next,
-                &proof_data.ood_composition,
+                &proof_data.ood_comp_current,
+                &proof_data.ood_comp_next,
                 proof_data.z,
                 proof_data.g_trace,
                 &proof_data.deep_coeffs,
             );
             
-            // The prover's DEEP value is f_x for the first FRI layer
-            let prover_deep = fri_query.f_x;
+            // For upper-half positions, the query is at the HIGH position
+            // so actual f(x) = f_neg_x, not f_x
+            let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
+            let is_upper_half = position >= lde_domain_size / 2;
+            let prover_deep = if is_upper_half {
+                fri_query.f_neg_x  // Upper half: actual f(x) is at high position
+            } else {
+                fri_query.f_x      // Lower half: actual f(x) is at low position
+            };
             
-            // Verify DEEP computation is correct (AIR enforces via mode 3)
+            // DEEP verification: Compare prover's FRI value with our computed value
+            // This ensures the DEEP composition polynomial was computed correctly
             let deep_ok = builder.verify_deep_value(prover_deep, expected_deep);
             if !deep_ok {
+                eprintln!("[DEEP FAIL] q_idx={}, prover_deep={}, expected_deep={}", 
+                    q_idx, prover_deep.as_int(), expected_deep.as_int());
                 all_valid = false;
             }
         }
@@ -414,11 +474,44 @@ pub fn append_proof_verification(
     // === Phase 7: FRI layer verification ===
     // Track final folded values for terminal verification
     let mut final_folded_values: Vec<BaseElement> = Vec::new();
+    let mut final_layer_x_values: Vec<BaseElement> = Vec::new();
+    
+    // Track positions through FRI layers (like R1CS does)
+    // Each layer halves the domain, so position folds: new_pos = old_pos % (domain_size / 2)
+    let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
+    let mut folded_positions: Vec<usize> = proof_data.query_positions.clone();
+    let mut current_domain_size = lde_domain_size;
+    
+    eprintln!("[FRI LAYERS] proof_data.fri_layers.len()={}, num_fri_layers={}, num_queries={}, fri_commitments.len()={}", 
+        proof_data.fri_layers.len(), proof_data.num_fri_layers, proof_data.num_queries, proof_data.fri_commitments.len());
+    eprintln!("[FRI LAYERS] Initial query_positions: {:?}", proof_data.query_positions);
+    eprintln!("[FRI LAYERS] domain_offset={}, g_lde={}, trace_len={}, lde_blowup={}", 
+        proof_data.domain_offset.as_int(), proof_data.g_lde.as_int(), 
+        proof_data.trace_len, proof_data.lde_blowup);
+    
+    // NOTE: Length checks here are defense-in-depth. The REAL security is:
+    //   - AIR constraints verify Merkle roots match commitments
+    //   - AIR constraints verify FRI folding formula
+    //   - If attacker provides wrong/missing data, constraints fail → proof invalid
+    //
+    // Even if attacker omits commitments:
+    //   - verify_root checks computed hash against commitment
+    //   - Wrong commitment → hash mismatch → all_valid=false
+    //   - Final trace has valid=0 → AIR rejects
     
     for (layer_idx, layer) in proof_data.fri_layers.iter().enumerate() {
-        for query in &layer.queries {
+        // Get commitment for this layer from centralized list (matches R1CS pattern)
+        // If missing, use zeros - AIR constraints will reject (hash won't match zeros)
+        let layer_commitment = proof_data.fri_commitments.get(layer_idx)
+            .copied()
+            .unwrap_or_else(|| {
+                eprintln!("[VERIFIER AIR] Missing commitment for layer {} - will fail verification", layer_idx);
+                [BaseElement::ZERO; 4]  // Merkle verify_root will fail against zeros
+            });
+            
+        for (q_idx, query) in layer.queries.iter().enumerate() {
             // Initialize hash state with the FRI layer values being committed
-            // For folding factor 2: the leaf is (f_x, f_neg_x) pair
+            // For folding factor 2: the leaf is (val_low, val_high) pair = (f_x, f_neg_x)
             builder.init_leaf(&[query.f_x, query.f_neg_x]);
             
             // Verify Merkle path for this FRI layer
@@ -427,58 +520,149 @@ pub fn append_proof_verification(
             }
             
             // CRITICAL: Verify computed root matches FRI layer commitment
-            if layer_idx < proof_data.fri_commitments.len() {
-                let root_ok = builder.verify_root(proof_data.fri_commitments[layer_idx]);
-                if !root_ok {
-                    all_valid = false;
-                }
+            let root_ok = builder.verify_root(layer_commitment);
+            if !root_ok {
+                eprintln!("[FRI ROOT FAIL] layer_idx={}", layer_idx);
+                all_valid = false;
             }
             
             // Fold evaluation - AIR constraint verifies formula is correct
             // NOTE: This is done AFTER root verification because the folded value
             // feeds into the NEXT layer, not this layer's commitment
+            //
+            // CRITICAL: For upper-half positions (>= domain_size/2), the query is at
+            // the HIGH position, so actual f(x) = f_neg_x and f(-x) = f_x
+            // We must swap the arguments to fri_fold accordingly
+            let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
+            let is_upper_half = pos >= current_domain_size / 2;
+            let (actual_f_x, actual_f_neg_x) = if is_upper_half {
+                (query.f_neg_x, query.f_x)  // Swap for upper half
+            } else {
+                (query.f_x, query.f_neg_x)
+            };
             let folded = builder.fri_fold(
-                query.f_x,
-                query.f_neg_x,
+                actual_f_x,
+                actual_f_neg_x,
                 query.x,
                 layer.beta,
             );
             
-            // Track final layer's folded values for terminal verification
+            // Track final layer's folded values and x values for terminal verification
             if layer_idx == proof_data.fri_layers.len() - 1 {
                 final_folded_values.push(folded);
+                // Store the x value from this layer
+                final_layer_x_values.push(query.x);
+                eprintln!("[LAST LAYER QUERY {}] x={}, f_x={}, f_neg_x={}, folded={}",
+                    final_folded_values.len() - 1, query.x.as_int(), 
+                    query.f_x.as_int(), query.f_neg_x.as_int(), folded.as_int());
             }
         }
+        
+        // After processing this layer, fold positions to next domain size
+        // Each fold halves the domain: new_pos = old_pos % (domain_size / 2)
+        current_domain_size /= 2;
+        folded_positions = folded_positions.iter()
+            .map(|&pos| pos % current_domain_size)
+            .collect();
     }
 
     // === Phase 8: FRI Terminal Verification (CRITICAL!) ===
     // Verify that the final folded values are consistent.
     // For Constant terminal: all final values must be equal
     // For Poly terminal: final values must match remainder polynomial evaluation
+    eprintln!("[FRI TERMINAL] final_folded_values.len()={}, is_constant={}, remainder_coeffs.len()={}", 
+        final_folded_values.len(), proof_data.fri_terminal_is_constant, proof_data.fri_remainder_coeffs.len());
+    
     if !final_folded_values.is_empty() {
         if proof_data.fri_terminal_is_constant {
             // Constant terminal: all values should equal the first value
             let first_val = final_folded_values[0];
-            for &final_val in &final_folded_values[1..] {
+            for (i, &final_val) in final_folded_values[1..].iter().enumerate() {
+                eprintln!("[FRI TERMINAL] Constant check {}", i);
                 let terminal_ok = builder.verify_fri_terminal(final_val, first_val);
                 if !terminal_ok {
                     all_valid = false;
                 }
             }
         } else if !proof_data.fri_remainder_coeffs.is_empty() && !proof_data.fri_layers.is_empty() {
-            // Polynomial terminal: values should match P(x) at folded positions
-            let last_layer = &proof_data.fri_layers[proof_data.fri_layers.len() - 1];
+            // Polynomial terminal: values should match P(x) at x in the TERMINAL domain
+            // 
+            // The terminal domain has generator g_terminal = g_lde^(2^num_layers)
+            // x_terminal = offset * g_terminal^terminal_pos
+            //
+            // This matches R1CS implementation in fri.rs lines 293-332
+            
+            let num_layers = proof_data.fri_layers.len();
+            
+            // Compute g_terminal = g_lde^(2^num_layers) by repeated squaring
+            let mut g_terminal = proof_data.g_lde;
+            for _ in 0..num_layers {
+                g_terminal = g_terminal * g_terminal;
+            }
+            
+            eprintln!("[FRI TERMINAL] g_terminal={}, domain_offset={}", 
+                g_terminal.as_int(), proof_data.domain_offset.as_int());
+            eprintln!("[FRI TERMINAL] folded_positions={:?}", folded_positions);
+            eprintln!("[FRI TERMINAL] remainder_coeffs ({}): {:?}", 
+                proof_data.fri_remainder_coeffs.len(),
+                proof_data.fri_remainder_coeffs.iter().map(|c| c.as_int()).collect::<Vec<_>>());
+            
+            // Compute offset^(2^num_layers) for the terminal domain
+            // After k folds, the coset offset becomes offset^(2^k)
+            let mut offset_power = proof_data.domain_offset;
+            for _ in 0..num_layers {
+                offset_power = offset_power * offset_power;
+            }
+            eprintln!("[FRI TERMINAL] offset^(2^{})={} (orig offset={})", 
+                num_layers, offset_power.as_int(), proof_data.domain_offset.as_int());
+            
+            // Debug: try with REVERSED coefficients (low->high with Horner)
+            // If coeffs are [c0, c1, c2, ...] in low-to-high order, 
+            // Horner expects high-to-low, so we should reverse
+            let reversed_coeffs: Vec<BaseElement> = proof_data.fri_remainder_coeffs.iter().rev().copied().collect();
+            eprintln!("[FRI TERMINAL] Trying REVERSED coeffs with offset * g^pos:");
             for (i, &final_val) in final_folded_values.iter().enumerate() {
-                if let Some(query) = last_layer.queries.get(i) {
-                    // Evaluate remainder polynomial at query.x (post-folding x)
-                    let expected = evaluate_polynomial(
-                        &proof_data.fri_remainder_coeffs, 
-                        query.x
-                    );
-                    let terminal_ok = builder.verify_fri_terminal(final_val, expected);
-                    if !terminal_ok {
-                        all_valid = false;
-                    }
+                let pos = folded_positions.get(i).copied().unwrap_or(0);
+                let x = proof_data.domain_offset * g_terminal.exp(pos as u64);
+                let eval = evaluate_polynomial(&reversed_coeffs, x);
+                eprintln!("  Query {}: pos={}, x={}, final={}, P(x)={}, match={}", 
+                    i, pos, x.as_int(), 
+                    final_val.as_int(), eval.as_int(), final_val == eval);
+            }
+            
+            for (i, &final_val) in final_folded_values.iter().enumerate() {
+                // Use the position tracked through all FRI layer folds
+                let terminal_pos = folded_positions.get(i).copied().unwrap_or(0);
+                
+                // Compute x_terminal = offset * g_terminal^terminal_pos
+                let x_terminal = proof_data.domain_offset * g_terminal.exp(terminal_pos as u64);
+                
+                
+                // Evaluate remainder polynomial at x_terminal
+                // Try both orderings to debug
+                let expected_high_to_low = evaluate_polynomial(&proof_data.fri_remainder_coeffs, x_terminal);
+                
+                // Also try low-to-high order: P(x) = c[0] + c[1]*x + c[2]*x^2 + ...
+                let mut expected_low_to_high = BaseElement::ZERO;
+                let mut x_power = BaseElement::ONE;
+                for &coeff in &proof_data.fri_remainder_coeffs {
+                    expected_low_to_high = expected_low_to_high + coeff * x_power;
+                    x_power = x_power * x_terminal;
+                }
+                
+                let expected = expected_high_to_low;
+                
+                let diff = final_val - expected;
+                eprintln!("[FRI TERMINAL] Query {}: pos={}, x_terminal={}", i, terminal_pos, x_terminal.as_int());
+                eprintln!("  final={}, exp_h2l={}, exp_l2h={}", 
+                    final_val.as_int(), expected_high_to_low.as_int(), expected_low_to_high.as_int());
+                eprintln!("  match_h2l={}, match_l2h={}", 
+                    final_val == expected_high_to_low, final_val == expected_low_to_high);
+                
+                let terminal_ok = builder.verify_fri_terminal(final_val, expected);
+                if !terminal_ok {
+                    eprintln!("[FRI TERMINAL] FAIL: Query {} diff={}", i, diff.as_int());
+                    all_valid = false;
                 }
             }
         }
@@ -492,6 +676,8 @@ pub fn append_proof_verification(
         &proof_data.fri_commitments,
     );
 
+    eprintln!("[VERIFICATION] Final all_valid={}", all_valid);
+    
     VerificationResult {
         valid: all_valid,
         statement_hash,
@@ -541,92 +727,117 @@ fn compute_statement_hash(
 /// DEEP(x) = Σ γᵢ * (T(x) - T(z)) / (x - z) + Σ γⱼ * (T(x) - T(z·g)) / (x - z·g) + comp terms
 /// 
 /// This combines trace and composition polynomial quotients weighted by random coefficients.
+/// 
+/// DEEP composition per Winterfell's exact formula (composer.rs):
+/// result = (t1_num * den_zg + t2_num * den_z) / (den_z * den_zg)
+/// 
+/// Where:
+/// - t1_num = Σ(T(x)-T(z))*γ for trace + Σ(C(x)-C(z))*γ for comp
+/// - t2_num = Σ(T(x)-T(z*g))*γ for trace + Σ(C(x)-C(z*g))*γ for comp
+/// 
+/// CRITICAL: Same gamma is used for BOTH z and z*g terms for each column!
+/// Coefficient layout: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
 fn compute_deep_value(
     x: BaseElement,
     trace_values: &[BaseElement],  // T(x) for all trace columns
     comp_values: &[BaseElement],   // C(x) for all composition columns
     ood_trace_current: &[BaseElement], // T(z)
     ood_trace_next: &[BaseElement],    // T(z·g)
-    ood_composition: &[BaseElement],   // C(z)
+    ood_comp_current: &[BaseElement],  // C(z)
+    ood_comp_next: &[BaseElement],     // C(z·g) - from quotient OOD next row
     z: BaseElement,
     g_trace: BaseElement,
-    deep_coeffs: &[BaseElement],  // γ coefficients
+    deep_coeffs: &[BaseElement],  // γ coefficients: [trace_gammas..., comp_gammas...]
 ) -> BaseElement {
     // Compute denominators
     let den_z = x - z;           // x - z
-    let den_zg = x - (z * g_trace); // x - z·g
+    let zg = z * g_trace;
+    let den_zg = x - zg;         // x - z·g
     
     // If either denominator is zero, return zero (degenerate case)
     if den_z == BaseElement::ZERO || den_zg == BaseElement::ZERO {
         return BaseElement::ZERO;
     }
     
-    // Compute inverse denominators for division
-    let inv_den_z = den_z.inv();
-    let inv_den_zg = den_zg.inv();
+    let trace_w = trace_values.len();
+    let comp_w = comp_values.len();
     
-    let mut result = BaseElement::ZERO;
+    // Accumulate numerators for z and z*g terms
+    let mut t1_num = BaseElement::ZERO; // sum for z terms
+    let mut t2_num = BaseElement::ZERO; // sum for z*g terms
+    
     let mut coeff_idx = 0;
     
-    // Process trace columns: Σ γᵢ * (T(x) - T(z)) / (x - z)
-    for (col, &t_x) in trace_values.iter().enumerate() {
+    // Process trace columns - SAME gamma for both z and z*g terms
+    for col in 0..trace_w {
         if coeff_idx >= deep_coeffs.len() { break; }
         let gamma = deep_coeffs[coeff_idx];
         coeff_idx += 1;
         
-        // Quotient for (T(x) - T(z)) / (x - z)
+        let t_x = trace_values[col];
+        
+        // z term: (T(x) - T(z)) * γ
         if col < ood_trace_current.len() {
             let t_z = ood_trace_current[col];
-            let numerator = t_x - t_z;
-            let quotient = numerator * inv_den_z;
-            result = result + (gamma * quotient);
+            let diff_z = t_x - t_z;
+            t1_num = t1_num + (diff_z * gamma);
         }
-    }
-    
-    // Process trace columns for next: Σ γᵢ * (T(x) - T(z·g)) / (x - z·g)
-    for (col, &t_x) in trace_values.iter().enumerate() {
-        if coeff_idx >= deep_coeffs.len() { break; }
-        let gamma = deep_coeffs[coeff_idx];
-        coeff_idx += 1;
         
-        // Quotient for (T(x) - T(z·g)) / (x - z·g)
+        // z*g term: (T(x) - T(z*g)) * γ (SAME gamma!)
         if col < ood_trace_next.len() {
             let t_zg = ood_trace_next[col];
-            let numerator = t_x - t_zg;
-            let quotient = numerator * inv_den_zg;
-            result = result + (gamma * quotient);
+            let diff_zg = t_x - t_zg;
+            t2_num = t2_num + (diff_zg * gamma);
         }
     }
     
-    // Process composition columns: Σ γⱼ * (C(x) - C(z)) / (x - z)
-    for (col, &c_x) in comp_values.iter().enumerate() {
+    // Process composition columns - SAME gamma for both z and z*g terms
+    // Winterfell uses ood_quotient_frame.next_row() for z*g, NOT current!
+    for col in 0..comp_w {
         if coeff_idx >= deep_coeffs.len() { break; }
         let gamma = deep_coeffs[coeff_idx];
         coeff_idx += 1;
         
-        if col < ood_composition.len() {
-            let c_z = ood_composition[col];
-            let numerator = c_x - c_z;
-            let quotient = numerator * inv_den_z;
-            result = result + (gamma * quotient);
+        let c_x = comp_values[col];
+        
+        // z term: (C(x) - C(z)) * γ
+        if col < ood_comp_current.len() {
+            let c_z = ood_comp_current[col];
+            let diff_z = c_x - c_z;
+            t1_num = t1_num + (diff_z * gamma);
+        }
+        
+        // z*g term: (C(x) - C(z*g)) * γ - uses NEXT row from OOD frame!
+        if col < ood_comp_next.len() {
+            let c_zg = ood_comp_next[col];
+            let diff_zg = c_x - c_zg;
+            t2_num = t2_num + (diff_zg * gamma);
         }
     }
     
-    result
+    // DEEP composition: (t1_num * den_zg + t2_num * den_z) / (den_z * den_zg)
+    let cross1 = t1_num * den_zg;
+    let cross2 = t2_num * den_z;
+    let numerator = cross1 + cross2;
+    let denominator = den_z * den_zg;
+    
+    numerator * denominator.inv()
 }
 
 /// Evaluate polynomial at a point using Horner's method
-/// 
-/// P(x) = c[0] + c[1]*x + c[2]*x² + ... + c[n]*x^n
+///
+/// Coefficients are in HIGH to LOW order (matches R1CS/Winterfell):
+/// P(x) = c[0]*x^n + c[1]*x^(n-1) + ... + c[n-1]*x + c[n]
 fn evaluate_polynomial(coeffs: &[BaseElement], x: BaseElement) -> BaseElement {
     if coeffs.is_empty() {
         return BaseElement::ZERO;
     }
-    
-    // Horner's method: start from highest degree
-    let mut result = coeffs[coeffs.len() - 1];
-    for i in (0..coeffs.len() - 1).rev() {
-        result = result * x + coeffs[i];
+
+    // Horner's method: P(x) = ((...((c[0]*x + c[1])*x + c[2])*x + ...)*x + c[n])
+    // Start with c[0], multiply by x and add next coefficient
+    let mut result = coeffs[0];
+    for &coeff in &coeffs[1..] {
+        result = result * x + coeff;
     }
     result
 }
@@ -646,7 +857,8 @@ pub struct ParsedProof {
     // OOD frame
     pub ood_trace_current: Vec<BaseElement>,
     pub ood_trace_next: Vec<BaseElement>,
-    pub ood_composition: Vec<BaseElement>,
+    pub ood_comp_current: Vec<BaseElement>,  // C(z)
+    pub ood_comp_next: Vec<BaseElement>,     // C(z*g) - needed for DEEP composition!
 
     // OOD verification parameters (CRITICAL for security!)
     /// OOD challenge point z (derived from Fiat-Shamir)
@@ -711,7 +923,8 @@ pub struct QueryData {
 /// FRI layer data
 #[derive(Clone, Debug)]
 pub struct FriLayerData {
-    pub commitment: MerkleDigest,
+    // Note: commitment is accessed via proof_data.fri_commitments[layer_idx]
+    // to avoid duplication (matches R1CS pattern)
     pub beta: BaseElement,
     pub queries: Vec<FriQueryData>,
 }
@@ -719,8 +932,11 @@ pub struct FriLayerData {
 /// Single FRI query
 #[derive(Clone, Debug)]
 pub struct FriQueryData {
+    /// Value at the low position (val_low)
     pub f_x: BaseElement,
+    /// Value at the high position (val_high)  
     pub f_neg_x: BaseElement,
+    /// Domain element at query position
     pub x: BaseElement,
     pub merkle_path: MerklePath,
 }
@@ -765,7 +981,8 @@ mod tests {
             fri_commitments: vec![[BaseElement::new(3); 4], [BaseElement::new(4); 4]],
             ood_trace_current: vec![BaseElement::new(10), BaseElement::new(11)],
             ood_trace_next: vec![BaseElement::new(12), BaseElement::new(13)],
-            ood_composition: vec![BaseElement::new(20)],
+            ood_comp_current: vec![BaseElement::new(20)],
+            ood_comp_next: vec![BaseElement::new(21)],
             // OOD verification parameters
             z: BaseElement::new(42), // Test OOD challenge point
             g_trace: BaseElement::get_root_of_unity(3), // trace_len=8, so log2=3
@@ -846,13 +1063,13 @@ mod tests {
         let comp_values = vec![BaseElement::new(20)];   // C(x) = 20
         let ood_trace_current = vec![BaseElement::new(5)];  // T(z) = 5
         let ood_trace_next = vec![BaseElement::new(7)];     // T(z*g) = 7
-        let ood_composition = vec![BaseElement::new(15)];   // C(z) = 15
+        let ood_comp_current = vec![BaseElement::new(15)];  // C(z) = 15
+        let ood_comp_next = vec![BaseElement::new(17)];     // C(z*g) = 17
         
-        // Coefficients: γ0 for T(z), γ1 for T(z*g), γ2 for C(z)
+        // Coefficients: γ0 for trace, γ1 for comp (same coeff for z and z*g terms!)
         let deep_coeffs = vec![
-            BaseElement::new(1), // γ0
-            BaseElement::new(1), // γ1  
-            BaseElement::new(1), // γ2
+            BaseElement::new(1), // γ0 - trace col 0
+            BaseElement::new(1), // γ1 - comp col 0
         ];
         
         let result = compute_deep_value(
@@ -861,7 +1078,8 @@ mod tests {
             &comp_values,
             &ood_trace_current,
             &ood_trace_next,
-            &ood_composition,
+            &ood_comp_current,
+            &ood_comp_next,
             z,
             g_trace,
             &deep_coeffs,
@@ -883,7 +1101,8 @@ mod tests {
             &comp_values,
             &ood_trace_current,
             &ood_trace_next,
-            &ood_composition,
+            &ood_comp_current,
+            &ood_comp_next,
             z2,
             g_trace,
             &deep_coeffs,
@@ -891,9 +1110,10 @@ mod tests {
         
         // x - z = 100 - 30 = 70
         // x - z*g = 100 - 60 = 40
-        // term1 = 1 * (10 - 5) / 70 = 5/70
-        // term2 = 1 * (10 - 7) / 40 = 3/40
-        // term3 = 1 * (20 - 15) / 70 = 5/70
+        // Winterfell formula: (t1_num * den_zg + t2_num * den_z) / (den_z * den_zg)
+        // t1_num = (10-5)*1 + (20-15)*1 = 5 + 5 = 10
+        // t2_num = (10-7)*1 + (20-17)*1 = 3 + 3 = 6
+        // result = (10*40 + 6*70) / (70*40) = (400 + 420) / 2800 = 820/2800
         // Total = 5/70 + 3/40 + 5/70 = 10/70 + 3/40
         
         // Just verify result is non-zero and deterministic
@@ -902,20 +1122,20 @@ mod tests {
 
     #[test]
     fn test_evaluate_polynomial() {
-        // P(x) = 1 + 2x + 3x²
+        // Coefficients in HIGH to LOW order: P(x) = 3x² + 2x + 1
         let coeffs = vec![
-            BaseElement::new(1),
-            BaseElement::new(2),
-            BaseElement::new(3),
+            BaseElement::new(3),  // x² coefficient
+            BaseElement::new(2),  // x coefficient
+            BaseElement::new(1),  // constant
         ];
-        
+
         // P(0) = 1
         assert_eq!(evaluate_polynomial(&coeffs, BaseElement::ZERO), BaseElement::new(1));
-        
-        // P(1) = 1 + 2 + 3 = 6
+
+        // P(1) = 3 + 2 + 1 = 6
         assert_eq!(evaluate_polynomial(&coeffs, BaseElement::ONE), BaseElement::new(6));
-        
-        // P(2) = 1 + 4 + 12 = 17
+
+        // P(2) = 3*4 + 2*2 + 1 = 12 + 4 + 1 = 17
         assert_eq!(evaluate_polynomial(&coeffs, BaseElement::new(2)), BaseElement::new(17));
     }
 }

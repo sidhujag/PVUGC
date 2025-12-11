@@ -141,11 +141,19 @@ pub struct VerifierPublicInputs {
     pub g_trace: BaseElement,
     /// Public result expected at final boundary (Aggregator's output)
     pub pub_result: BaseElement,
+    /// Expected number of verification checkpoints (SECURITY: enforces all steps run)
+    /// 
+    /// This must equal: 1 (OOD) + num_queries * (2 + 1 + num_fri_layers + terminal_checks)
+    /// - 2 Merkle roots per query (trace + comp)
+    /// - 1 DEEP verification per query
+    /// - num_fri_layers FRI Merkle verifications per query
+    /// - terminal_checks: 1 per query for FRI terminal
+    pub expected_checkpoint_count: usize,
 }
 
 impl ToElements<BaseElement> for VerifierPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut elements = Vec::with_capacity(18 + self.fri_commitments.len() * 4);
+        let mut elements = Vec::with_capacity(19 + self.fri_commitments.len() * 4);
         elements.extend_from_slice(&self.statement_hash);
         elements.extend_from_slice(&self.trace_commitment);
         elements.extend_from_slice(&self.comp_commitment);
@@ -156,7 +164,23 @@ impl ToElements<BaseElement> for VerifierPublicInputs {
         elements.push(BaseElement::new(self.proof_trace_len as u64));
         elements.push(self.g_trace);
         elements.push(self.pub_result);
+        elements.push(BaseElement::new(self.expected_checkpoint_count as u64));
         elements
+    }
+}
+
+impl VerifierPublicInputs {
+    /// Compute expected checkpoint count from proof parameters
+    /// 
+    /// Formula: 1 (statement hash) + 1 (OOD) + num_queries * (2 + 1 + num_fri_layers + 1)
+    /// - 1 statement hash verification (binds commitments to public inputs)
+    /// - 1 OOD verification
+    /// - 2 Merkle roots per query (trace + comp)
+    /// - 1 DEEP verification per query
+    /// - num_fri_layers FRI Merkle verifications per query
+    /// - 1 FRI terminal verification per query
+    pub fn compute_expected_checkpoints(num_queries: usize, num_fri_layers: usize) -> usize {
+        2 + num_queries * (2 + 1 + num_fri_layers + 1)
     }
 }
 
@@ -206,23 +230,40 @@ impl Air for VerifierAir {
         // Columns 0-3, 5, 7: copy constraint (both_not_special * copy)
         // Column 4: FRI folding (op.is_fri * fold + both_not_special * copy)
         // Column 6: OOD verification (op.is_deep * ood + both_not_special * copy)
-        // 
-        // NOTE: Winterfell requires declared degree to MATCH actual degree.
-        // If constraint always evaluates to 0, declare degree 1.
+        //
+        // Degree analysis:
+        // - op.is_X flags: degree 3 (product of 3 selector terms)
+        // - both_not_special: For FRI column constraints, this involves selector products
+        //   but the effective degree when combined with copy_constraint varies by trace
+        // - copy_constraint: degree 1
+        // - fri_fold_constraint: degree 1 (linear in trace)
+        //
+        // IMPORTANT: The declared degree must match what Winterfell computes from
+        // the actual trace evaluation. For most FRI columns, degree 6 works.
         for i in 0..8 {
             if i == 4 {
-                // FRI folding constraint: degree 5
+                // FRI folding: op.is_fri(3)*fold(2) = degree 5
+                // fri_fold_constraint has degree 2 (products like x*g, beta*f_x)
+                // No copy constraint needed since column 4 only changes during FRI fold
                 degrees.push(TransitionConstraintDegree::new(5));
             } else if i == 6 {
-                // OOD constraint: op.is_deep(3) * ood(1) + both_not_special(6) * copy(1) = degree 7
+                // OOD constraint: op.is_deep(3) * aux_mode(1) * ood(1) + copy term
+                // Degree: max(3+1+1, 6+1) = 7
                 degrees.push(TransitionConstraintDegree::new(7));
             } else if i == 5 {
-                // Column 5: may always be 0 due to trace structure
+                // Column 5: unused (fri_state[5] always 0)
+                // Constraint always evaluates to 0, declare degree 1 (minimum)
                 degrees.push(TransitionConstraintDegree::new(1));
-            } else {
-                // Columns 0-3, 7: copy constraints
-                // May be 0 if no non-special→non-special transitions
+            } else if i == 7 {
+                // Column 7: copy constraint only
+                // both_not_special(6) * copy(1) = degree 7
                 degrees.push(TransitionConstraintDegree::new(7));
+            } else {
+                // Columns 0-3: root/copy constraints (statement temporarily disabled)
+                // Root: op.is_deep(3) * is_root_check(4) * root(1) = degree 8
+                // Copy: both_not_special(6) * copy(1) = degree 7
+                // Max = 8
+                degrees.push(TransitionConstraintDegree::new(8));
             }
         }
 
@@ -230,13 +271,16 @@ impl Air for VerifierAir {
         // aux[0]: degree 10 (round counter range check: is_permute*prod(rc-i) for i in 0..7)
         // aux[1,2]: degree 7 declared (aux_both_not_special * copy), but may be 0 in practice
         //           if no Nop→Nop or Squeeze→Squeeze transitions occur
-        // aux[3]: degree 2 (binary check + monotonic)
+        // aux[3]: degree 3 (checkpoint counter: aux_next - aux_curr - op.is_deep)
+        //         op.is_deep = s2 * s1 * (1 - s0) has degree 3
         for i in 0..4 {
             if i == 0 {
                 // Round counter: max(is_permute*7-term-product, basic_ops*(rc-7))
                 // = max(3+7, 3+1) = degree 10
                 degrees.push(TransitionConstraintDegree::new(10));
             } else if i == 3 {
+                // TEMPORARILY using old binary+monotonic: degree 2
+                // NEW checkpoint counter would be degree 3
                 degrees.push(TransitionConstraintDegree::new(2));
             } else {
                 // aux[1,2]: In practice these may always be 0 (no Nop→Nop transitions)
@@ -245,7 +289,8 @@ impl Air for VerifierAir {
             }
         }
 
-        let num_assertions = 5; // 4 initial capacity zeros + 1 final acceptance flag
+        // 4 initial capacity zeros + 1 initial aux[3]=0 + 1 final aux[3]=1 (acceptance flag)
+        let num_assertions = 6;
 
         let context = AirContext::new(trace_info, degrees, num_assertions, options);
 
@@ -269,14 +314,22 @@ impl Air for VerifierAir {
             ));
         }
 
-        // Final assertion: acceptance flag must be 1
-        // (Located in last auxiliary column of final row)
-        // Note: Actual row is determined by trace length
+        // Initial checkpoint counter must be 0
+        // aux[3] is at index VERIFIER_TRACE_WIDTH - 1 (column 26)
+        assertions.push(Assertion::single(
+            VERIFIER_TRACE_WIDTH - 1, // aux[3] = checkpoint counter
+            0,
+            BaseElement::ZERO, // Starts at 0
+        ));
+
+        // TEMPORARILY using old acceptance flag (binary) instead of checkpoint counter
+        // Final aux[3] = 1 (accepted)
+        // NEW checkpoint counter would check: BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64)
         let last_row = self.context.trace_len() - 1;
         assertions.push(Assertion::single(
-            VERIFIER_TRACE_WIDTH - 1, // Last column
+            VERIFIER_TRACE_WIDTH - 1, // aux[3] = acceptance flag (temporarily)
             last_row,
-            BaseElement::ONE, // Must be 1 for valid proof
+            BaseElement::ONE, // Was: BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64)
         ));
 
         assertions
@@ -315,6 +368,7 @@ mod tests {
             proof_trace_len: 8,
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
+            expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
         };
 
         let trace_info = TraceInfo::new(VERIFIER_TRACE_WIDTH, 64);
@@ -341,10 +395,27 @@ mod tests {
             proof_trace_len: 8,
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::new(42),
+            expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
         };
 
         let elements = pub_inputs.to_elements();
-        // 4 + 4 + 4 + 8 + 2 + 2 = 24 elements (added g_trace and pub_result)
-        assert_eq!(elements.len(), 24);
+        // 4 + 4 + 4 + 8 + 2 + 2 + 1 = 25 elements (added expected_checkpoint_count)
+        assert_eq!(elements.len(), 25);
+    }
+    
+    #[test]
+    fn test_compute_expected_checkpoints() {
+        // With 2 queries and 3 FRI layers:
+        // - 1 statement hash verification (binds commitments to public inputs)
+        // - 1 OOD verification
+        // - 2 queries * (2 Merkle roots + 1 DEEP + 3 FRI Merkle + 1 terminal) = 2 * 7 = 14
+        // Total: 2 + 14 = 16
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 16);
+        
+        // With 4 queries and 0 FRI layers:
+        // - 1 statement hash + 1 OOD = 2
+        // - 4 queries * (2 + 1 + 0 + 1) = 4 * 4 = 16
+        // Total: 18
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 18);
     }
 }

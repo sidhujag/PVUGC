@@ -128,6 +128,22 @@ impl AggregatorConfig {
         }
     }
     
+    /// Test configuration with meaningful FRI layers
+    /// 
+    /// Uses larger trace to generate actual FRI folding rounds.
+    /// LDE domain = 256 × 8 = 2048, with remainder 7 gives ~8 FRI layers.
+    /// ~24 bits of security from FRI (4 queries × 3 bits × 2 layers checked)
+    pub fn test_with_fri() -> Self {
+        Self {
+            trace_len: 256,        // Larger trace for FRI layers
+            num_queries: 4,
+            lde_blowup: 8,
+            grinding_factor: 0,
+            fri_folding_factor: 2,
+            fri_max_remainder: 7,  // Must be 2^n - 1 (7 = 2^3 - 1)
+        }
+    }
+    
     /// Convert to Winterfell ProofOptions
     pub fn to_proof_options(&self) -> ProofOptions {
         ProofOptions::new(
@@ -701,11 +717,16 @@ pub fn build_verifying_aggregator_trace(
     
     let mut builder = VerifierTraceBuilder::new(total_len);
     
+    // Use generic VDF formula for VdfAir child proofs
+    // NOTE: If verifying other AIR types, pass the appropriate ChildAirType
+    use super::verifier_air::ood_eval::ChildAirType;
+    let child_type = ChildAirType::generic_vdf();
+    
     // === Phase 1: Verify child 0 ===
-    let result0 = append_proof_verification(&mut builder, child0_proof);
+    let result0 = append_proof_verification(&mut builder, child0_proof, child_type.clone());
     
     // === Phase 2: Verify child 1 ===
-    let result1 = append_proof_verification(&mut builder, child1_proof);
+    let result1 = append_proof_verification(&mut builder, child1_proof, child_type);
     
     // === Phase 3: Bind both statement hashes ===
     // Absorb both statement hashes to create combined binding
@@ -797,6 +818,14 @@ pub fn generate_verifying_aggregator_proof(
     let combined_hash = compute_combined_statement_hash(&result0, &result1);
     
     // Create public inputs
+    // Note: checkpoint count accounts for BOTH child proofs being verified
+    let single_child_checkpoints = VerifierPublicInputs::compute_expected_checkpoints(
+        child0_proof.num_queries, 
+        child0_proof.num_fri_layers,
+    );
+    // We verify 2 child proofs, so double the checkpoints
+    let total_checkpoints = single_child_checkpoints * 2;
+    
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
         trace_commitment: result0.trace_commitment,  // From first child
@@ -806,6 +835,7 @@ pub fn generate_verifying_aggregator_proof(
         proof_trace_len: trace.length(),
         g_trace: child0_proof.g_trace,
         pub_result: child0_proof.pub_result,
+        expected_checkpoint_count: total_checkpoints,
     };
     
     // Generate proof using VerifierProver

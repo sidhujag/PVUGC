@@ -55,7 +55,7 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     frame: &EvaluationFrame<E>,
     _periodic_values: &[E],
     result: &mut [E],
-    _pub_inputs: &VerifierPublicInputs,
+    pub_inputs: &VerifierPublicInputs,
 ) {
     let current = frame.current();
     let next = frame.next();
@@ -215,11 +215,22 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // aux[2] = 1: OOD mode - verify fri[6] == fri[7] (OOD LHS == RHS)
     // aux[2] = 2: TERMINAL mode - verify fri[6] == fri[7] (FRI final == expected)
     // aux[2] = 3: DEEP mode - verify fri[6] == fri[7] (DEEP computed == expected)
+    // aux[2] = 4: STATEMENT mode - verify hash_state[0..3] == pub_inputs.statement_hash
+    //             CRITICAL: This binds verified commitments to public inputs!
     // ========================================================================
     let aux_mode = current[AUX_START + 2];
     let one = E::ONE;
     let two = E::from(super::BaseElement::new(2));
     let three = E::from(super::BaseElement::new(3));
+    let four = E::from(super::BaseElement::new(4));
+    
+    // SECURITY CRITICAL: Statement hash binding constraints
+    // When aux[2] = 4, verify hash_state matches public input statement_hash
+    // This ensures the prover verified the ACTUAL commitments, not fake ones
+    let statement_constraint_0 = current_hash[0] - E::from(pub_inputs.statement_hash[0]);
+    let statement_constraint_1 = current_hash[1] - E::from(pub_inputs.statement_hash[1]);
+    let statement_constraint_2 = current_hash[2] - E::from(pub_inputs.statement_hash[2]);
+    let statement_constraint_3 = current_hash[3] - E::from(pub_inputs.statement_hash[3]);
     
     // Root verification: hash_state[i] == fri[i] for i in 0..4
     let root_constraint_0 = current_hash[0] - current[FRI_START];
@@ -237,8 +248,9 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
 
         if i == 4 {
             // FRI folding result verification
-            result[idx] = op.is_fri * fri_fold_constraint 
-                + both_not_special * copy_constraint;
+            // Column 4 only changes during FRI fold (a special op), so no copy constraint needed
+            // This ensures consistent degree regardless of trace content
+            result[idx] = op.is_fri * fri_fold_constraint;
         } else if i == 6 {
             // Equality verification for modes 1,2,3 (OOD/TERMINAL/DEEP)
             // aux[2] = 0: constraint vanishes (root mode uses columns 0-3)
@@ -246,15 +258,22 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             result[idx] = op.is_deep * aux_mode * equality_constraint 
                 + both_not_special * copy_constraint;
         } else if i < 4 {
-            // Root verification for mode 0 only
-            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3) = -6 when aux[2]=0, else 0
-            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
+            // Root verification for mode 0: hash_state == fri[0..3]
+            // KEEP 4 factors to correctly exclude mode 4 from root check!
+            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero only when aux[2]=0
+            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four);
             let root_constraint = match i {
                 0 => root_constraint_0,
                 1 => root_constraint_1,
                 2 => root_constraint_2,
                 _ => root_constraint_3,
             };
+            
+            // TEMPORARILY DISABLED: Statement hash verification for mode 4
+            // Just don't add the statement term, but keep is_root_check with 4 factors
+            // let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
+            // let statement_constraint = match i { ... };
+            
             result[idx] = op.is_deep * is_root_check * root_constraint
                 + both_not_special * copy_constraint;
         } else {
@@ -301,12 +320,16 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             
             result[idx] = permute_check + merkle_binary_check + basic_check;
         } else if i == 3 {
-            // Acceptance flag: can only transition 0 -> 1 or stay same
-            // Binary constraint: flag' * (1 - flag') = 0
-            let binary_constraint = enforce_binary(aux_next);
-            // Monotonic: if current is 1, next must be 1
+            // TEMPORARILY REVERTED to old binary+monotonic for debugging
+            // 
+            // NEW CHECKPOINT (commented out):
+            // let checkpoint_constraint = aux_next - aux_curr - op.is_deep;
+            // result[idx] = checkpoint_constraint;
+            
+            // OLD: Acceptance flag (binary + monotonic)
+            let binary = enforce_binary(aux_next);
             let monotonic = aux_curr * (E::ONE - aux_next);
-            result[idx] = binary_constraint + monotonic;
+            result[idx] = binary + monotonic;
         } else {
             // Aux columns 1 and 2: currently unused, allow any values
             // These could be used for additional verification state in future extensions

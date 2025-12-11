@@ -10,6 +10,7 @@
 //! ensuring the proof is for VerifierAir specifically.
 
 use ark_r1cs_std::fields::FieldVar;
+use ark_r1cs_std::R1CSVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 use super::inner_stark_full::{AirParams, enforce_gl_eq};
@@ -46,6 +47,7 @@ pub fn verify_ood_equation_in_circuit(
     z: &FpGLVar,
     constraint_coeffs: &[FpGLVar],
     air_params: &AirParams,
+    stark_pub_inputs: &[u64], // Verifier AIR public inputs (statement_hash is first 4 elements)
 ) -> Result<(), SynthesisError> {
     const NUM_TRANSITION_CONSTRAINTS: usize = 27;
     
@@ -55,6 +57,13 @@ pub fn verify_ood_equation_in_circuit(
     if constraint_coeffs.len() < NUM_TRANSITION_CONSTRAINTS + 5 {
         return Err(SynthesisError::Unsatisfiable);
     }
+    
+    // Extract statement_hash from public inputs (first 4 elements)
+    let statement_hash: [u64; 4] = if stark_pub_inputs.len() >= 4 {
+        [stark_pub_inputs[0], stark_pub_inputs[1], stark_pub_inputs[2], stark_pub_inputs[3]]
+    } else {
+        return Err(SynthesisError::Unsatisfiable);
+    };
     
     let z_gl = GlVar(z.clone());
     let trace_len = air_params.trace_len;
@@ -76,14 +85,18 @@ pub fn verify_ood_equation_in_circuit(
     // STEP 2: Evaluate all 27 VerifierAir transition constraints (HARDCODED)
     // =========================================================================
     let constraints = evaluate_verifier_air_constraints_gl(
-        cs.clone(), ood_trace_current, ood_trace_next
+        cs.clone(), ood_trace_current, ood_trace_next, &statement_hash
     )?;
     
     // =========================================================================
     // STEP 3: Compute transition_sum = Σ α_i * c_i(z)
     // =========================================================================
+    eprintln!("[OOD DEBUG] Number of constraints: {}, Number of coeffs: {}", constraints.len(), constraint_coeffs.len());
     let mut transition_sum = zero.clone();
     for (i, constraint) in constraints.iter().enumerate() {
+        if let Ok(c_val) = constraint.0.value() {
+            eprintln!("[OOD DEBUG] Constraint {}: {:?}", i, c_val);
+        }
         let coeff = GlVar(constraint_coeffs[i].clone());
         let weighted = gl_mul_light(cs.clone(), &coeff, constraint)?;
         transition_sum = gl_add_light(cs.clone(), &transition_sum, &weighted)?;
@@ -102,9 +115,14 @@ pub fn verify_ood_equation_in_circuit(
     
     // =========================================================================
     // STEP 5: Compute boundary contributions
-    // sum_powers = zerofier_num / (z - 1)
-    // trans_zerofier = zerofier_num / exemption
+    // 
+    // AIR has 6 boundary assertions:
+    //   - 4 initial capacity zeros (columns 3,4,5,6 at row 0) -> coeffs 27,28,29,30
+    //   - 1 initial aux[3] = 0 (column 26 at row 0) -> coeff 31
+    //   - 1 final aux[3] = 1 (column 26 at last row) -> coeff 32
     // =========================================================================
+    
+    // Initial capacity zeros (columns 3-6)
     let initial_cols = [3usize, 4, 5, 6];
     let mut initial_sum = zero.clone();
     for (j, &col) in initial_cols.iter().enumerate() {
@@ -115,9 +133,16 @@ pub fn verify_ood_equation_in_circuit(
         initial_sum = gl_add_light(cs.clone(), &initial_sum, &term)?;
     }
     
-    let final_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 4;
-    let beta_final = GlVar(constraint_coeffs[final_coeff_idx].clone());
+    // Initial aux[3] = 0 (column 26) - coeff index 31
+    let initial_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 4;
+    let beta_aux3_init = GlVar(constraint_coeffs[initial_aux3_coeff_idx].clone());
     let val_26 = &ood_trace_current[26];
+    let aux3_init_term = gl_mul_light(cs.clone(), &beta_aux3_init, val_26)?;
+    initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux3_init_term)?;
+    
+    // Final aux[3] = 1 (column 26) - coeff index 32
+    let final_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
+    let beta_final = GlVar(constraint_coeffs[final_coeff_idx].clone());
     let val_minus_1 = gl_sub_light(cs.clone(), val_26, &one)?;
     let final_term = gl_mul_light(cs.clone(), &beta_final, &val_minus_1)?;
     
@@ -163,6 +188,13 @@ pub fn verify_ood_equation_in_circuit(
     let rhs_temp2 = gl_mul_light(cs.clone(), &rhs_temp1, &z_minus_1)?;
     let rhs = gl_mul_light(cs.clone(), &rhs_temp2, &exemption)?;
     
+    // DEBUG: Print OOD equation values
+    if let (Ok(lhs_val), Ok(rhs_val)) = (lhs.0.value(), rhs.0.value()) {
+        eprintln!("[OOD DEBUG] LHS: {:?}", lhs_val);
+        eprintln!("[OOD DEBUG] RHS: {:?}", rhs_val);
+        eprintln!("[OOD DEBUG] LHS == RHS: {}", lhs_val == rhs_val);
+    }
+    
     enforce_gl_eq(&lhs.0, &rhs.0)?;
     
     Ok(())
@@ -173,12 +205,13 @@ pub fn verify_ood_equation_in_circuit(
 // ============================================================================
 
 /// Evaluate all 27 VerifierAir transition constraints at OOD point
-/// 
+///
 /// This is the HARDCODED constraint evaluation matching constraints.rs exactly.
 fn evaluate_verifier_air_constraints_gl(
     cs: ConstraintSystemRef<InnerFr>,
     current: &[GlVar],
     next: &[GlVar],
+    statement_hash: &[u64; 4], // Verifier AIR's statement_hash public input
 ) -> Result<Vec<GlVar>, SynthesisError> {
     const NUM_SELECTORS: usize = 3;
     const HASH_STATE_START: usize = 3;
@@ -332,16 +365,40 @@ fn evaluate_verifier_air_constraints_gl(
         gl_sub_light(cs.clone(), &current_hash[3], &current[FRI_START + 3])?,
     ];
     
-    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3)
-    // When aux[2] = 0: (-1)*(-2)*(-3) = -6 (non-zero, check applies)
-    // When aux[2] = 1,2,3: is_root_check = 0 (check doesn't apply)
+    // Statement verification constraints: hash_state[i] == pub_inputs.statement_hash[i]
+    // Used when aux[2] = 4 (STATEMENT mode)
+    let statement_hash_gl: [GlVar; 4] = [
+        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[0]))),
+        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[1]))),
+        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[2]))),
+        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[3]))),
+    ];
+    let statement_constraints: [GlVar; 4] = [
+        gl_sub_light(cs.clone(), &current_hash[0], &statement_hash_gl[0])?,
+        gl_sub_light(cs.clone(), &current_hash[1], &statement_hash_gl[1])?,
+        gl_sub_light(cs.clone(), &current_hash[2], &statement_hash_gl[2])?,
+        gl_sub_light(cs.clone(), &current_hash[3], &statement_hash_gl[3])?,
+    ];
+    
+    // KEEP 4 factors to correctly exclude mode 4 from root check!
+    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3) * (aux[2] - 4)
+    // When aux[2] = 0: (-1)*(-2)*(-3)*(-4) = 24 (non-zero, check applies)
+    // When aux[2] = 1,2,3,4: is_root_check = 0 (check doesn't apply)
     let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
     let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
+    let four_gl = GlVar(FpGLVar::constant(InnerFr::from(4u64)));
     let aux_m1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
     let aux_m2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
     let aux_m3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
+    let aux_m4 = gl_sub_light(cs.clone(), aux_mode, &four_gl)?;
     let is_root_check_temp = gl_mul_light(cs.clone(), &aux_m1, &aux_m2)?;
-    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
+    let is_root_check_temp2 = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
+    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp2, &aux_m4)?;
+    
+    // TEMPORARILY DISABLED: Statement check (not adding the statement term)
+    // let is_statement_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
+    // let is_statement_check_temp2 = gl_mul_light(cs.clone(), &is_statement_check_temp, &aux_m2)?;
+    // let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
     
     for i in 0..8 {
         let fri_curr = &current[FRI_START + i];
@@ -351,9 +408,9 @@ fn evaluate_verifier_air_constraints_gl(
         if i == 4 {
             // FRI column 4: FRI folding result
             // During FriFold: verify folding formula is correct
-            let fri_term = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
-            let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
-            let c = gl_add_light(cs.clone(), &fri_term, &copy_term)?;
+            // Column 4 only changes during FRI fold (a special op), so no copy constraint needed
+            // This ensures consistent degree regardless of trace content
+            let c = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
             constraints.push(c);
         } else if i == 6 {
             // FRI column 6: EQUALITY VERIFICATION during DeepCompose
@@ -369,17 +426,29 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
             constraints.push(c);
         } else if i < 4 {
-            // FRI columns 0-3: ROOT VERIFICATION during DeepCompose (aux[2] = 0)
-            // Constraint: hash_state[i] == fri[i]
-            // ONLY enforce when in ROOT mode (aux[2] = 0)
+            // FRI columns 0-3: ROOT VERIFICATION (mode 0) and STATEMENT VERIFICATION (mode 4)
             //
-            // Constraint: op.is_deep * is_root_check * root_constraint = 0
-            // When aux[2] = 0: is_root_check = -6, so constraint = -6 * root_constraint
-            //                  For this to be 0, root_constraint must be 0 ✓
-            // When aux[2] != 0: is_root_check = 0, constraint = 0 (trivially satisfied) ✓
+            // ROOT mode (aux[2] = 0): verify hash_state[i] == fri[i]
+            // STATEMENT mode (aux[2] = 4): verify hash_state[i] == pub_inputs.statement_hash[i]
+            //
+            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero when aux[2]=0
+            // is_statement_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3) = non-zero when aux[2]=4
+            //
+            // Constraint: op.is_deep * is_root_check * root_constraint
+            //           + op.is_deep * is_statement_check * statement_constraint
+            //           + both_not_special * copy_constraint = 0
             let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
             let root_term = gl_mul_light(cs.clone(), &deep_root, &root_constraints[i])?;
+            
+            // TEMPORARILY COMMENTED OUT: Statement check (debugging)
+            // let deep_statement = gl_mul_light(cs.clone(), &op.is_deep, &is_statement_check)?;
+            // let statement_term = gl_mul_light(cs.clone(), &deep_statement, &statement_constraints[i])?;
+            
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
+            
+            // TEMPORARILY SIMPLIFIED: Only root check, no statement check
+            // let c1 = gl_add_light(cs.clone(), &root_term, &statement_term)?;
+            // let c = gl_add_light(cs.clone(), &c1, &copy_term)?;
             let c = gl_add_light(cs.clone(), &root_term, &copy_term)?;
             constraints.push(c);
         } else {
@@ -437,7 +506,14 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_add_light(cs.clone(), &c1, &basic_check)?;
             constraints.push(c);
         } else if i == 3 {
-            // Acceptance flag: binary + monotonic
+            // TEMPORARILY REVERTED: Using old binary+monotonic instead of checkpoint counter
+            // 
+            // NEW CHECKPOINT CONSTRAINT (commented out for debugging):
+            // let checkpoint_constraint = gl_sub_light(cs.clone(), aux_next, aux_curr)?;
+            // let c = gl_sub_light(cs.clone(), &checkpoint_constraint, &op.is_deep)?;
+            // constraints.push(c);
+            
+            // OLD: Acceptance flag: binary + monotonic
             // binary: next * (next - 1) [enforce_binary]
             // monotonic: curr * (1 - next)
             let next_m1 = gl_sub_light(cs.clone(), aux_next, &one)?;

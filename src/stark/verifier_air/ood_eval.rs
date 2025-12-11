@@ -38,6 +38,315 @@
 use winterfell::math::{fields::f64::BaseElement, FieldElement};
 
 // ============================================================================
+// FORMULA-AS-WITNESS: Generic Constraint Encoding
+// ============================================================================
+//
+// This encoding allows a single VerifierAir to verify proofs from ANY app AIR
+// by interpreting constraint formulas provided as witness data.
+//
+// ## Security Model
+//
+// The formula is hashed and bound to the public input (circuit_hash).
+// The verifier checks: hash(formula_witness) == public_input.circuit_hash
+// This ensures the prover cannot substitute a different formula.
+//
+// ## Encoding Format
+//
+// Each constraint is a polynomial equation of the form:
+//   c(current, next) = Σ (coeff * Π vars^powers) = 0
+//
+// Example: VDF constraint `next[0] - curr[0]^3 - curr[1] = 0`
+// Encodes as 3 monomials:
+//   1. coeff=+1, vars=[(Next, 0, 1)]         → next[0]
+//   2. coeff=-1, vars=[(Current, 0, 3)]      → -curr[0]³
+//   3. coeff=-1, vars=[(Current, 1, 1)]      → -curr[1]
+
+/// Column type for formula encoding
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ColType {
+    /// Current row: trace_current[index]
+    Current = 0,
+    /// Next row: trace_next[index]
+    Next = 1,
+}
+
+/// A variable reference within a monomial
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VarRef {
+    /// Column type (current or next row)
+    pub col_type: ColType,
+    /// Column index
+    pub col_idx: usize,
+    /// Exponent (power)
+    pub power: u32,
+}
+
+/// A monomial: coefficient * product of variables
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Monomial {
+    /// Coefficient (field element, stored as u64 for encoding)
+    pub coeff: u64,
+    /// Whether coefficient is negative (subtraction)
+    pub coeff_neg: bool,
+    /// Variables in this monomial (product of vars^power)
+    pub vars: Vec<VarRef>,
+}
+
+/// A single constraint: sum of monomials that should equal zero
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedConstraint {
+    /// Monomials that sum to zero
+    pub monomials: Vec<Monomial>,
+}
+
+/// Complete encoded formula for an AIR
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedFormula {
+    /// Number of trace columns this AIR uses
+    pub trace_width: usize,
+    /// All transition constraints
+    pub constraints: Vec<EncodedConstraint>,
+}
+
+impl EncodedFormula {
+    /// Compute a hash of the formula for binding to public input
+    /// Uses a simple algebraic hash for in-circuit efficiency
+    pub fn compute_hash(&self) -> [BaseElement; 4] {
+        // Simple deterministic hash: mix all encoding values
+        // In production, use RPO or similar algebraic hash
+        let mut h0 = BaseElement::new(self.trace_width as u64);
+        let mut h1 = BaseElement::new(self.constraints.len() as u64);
+        let mut h2 = BaseElement::ZERO;
+        let mut h3 = BaseElement::ZERO;
+        
+        let mix = BaseElement::new(0x9e3779b97f4a7c15u64); // golden ratio
+        
+        for (ci, constraint) in self.constraints.iter().enumerate() {
+            for (mi, mono) in constraint.monomials.iter().enumerate() {
+                // Mix in coefficient
+                let coeff_val = if mono.coeff_neg {
+                    BaseElement::ZERO - BaseElement::new(mono.coeff)
+                } else {
+                    BaseElement::new(mono.coeff)
+                };
+                h0 = h0 + coeff_val * mix;
+                h1 = h1 * mix + BaseElement::new((ci * 1000 + mi) as u64);
+                
+                // Mix in variables
+                for var in &mono.vars {
+                    h2 = h2 + BaseElement::new(var.col_type as u64) * mix;
+                    h2 = h2 + BaseElement::new(var.col_idx as u64);
+                    h3 = h3 + BaseElement::new(var.power as u64) * mix;
+                }
+            }
+        }
+        
+        [h0, h1, h2, h3]
+    }
+    
+    /// Total number of monomials in all constraints
+    pub fn monomial_count(&self) -> usize {
+        self.constraints.iter().map(|c| c.monomials.len()).sum()
+    }
+}
+
+/// Evaluate a monomial at given trace values
+fn evaluate_monomial(
+    mono: &Monomial,
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> BaseElement {
+    let mut result = if mono.coeff_neg {
+        BaseElement::ZERO - BaseElement::new(mono.coeff)
+    } else {
+        BaseElement::new(mono.coeff)
+    };
+    
+    for var in &mono.vars {
+        let val = match var.col_type {
+            ColType::Current => trace_current.get(var.col_idx).copied().unwrap_or(BaseElement::ZERO),
+            ColType::Next => trace_next.get(var.col_idx).copied().unwrap_or(BaseElement::ZERO),
+        };
+        // Compute val^power
+        let powered = val.exp((var.power as u64).into());
+        result = result * powered;
+    }
+    
+    result
+}
+
+/// Evaluate a constraint at given trace values
+fn evaluate_constraint(
+    constraint: &EncodedConstraint,
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> BaseElement {
+    let mut sum = BaseElement::ZERO;
+    for mono in &constraint.monomials {
+        sum = sum + evaluate_monomial(mono, trace_current, trace_next);
+    }
+    sum
+}
+
+/// Evaluate all constraints from an encoded formula
+/// Returns a vector of constraint evaluations (should all be zero for valid trace)
+pub fn evaluate_formula(
+    formula: &EncodedFormula,
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+) -> Vec<BaseElement> {
+    formula.constraints.iter()
+        .map(|c| evaluate_constraint(c, trace_current, trace_next))
+        .collect()
+}
+
+/// Verify that formula hash matches expected circuit hash
+pub fn verify_formula_hash(
+    formula: &EncodedFormula,
+    expected_hash: &[BaseElement; 4],
+) -> bool {
+    let computed = formula.compute_hash();
+    computed == *expected_hash
+}
+
+// ============================================================================
+// PRE-ENCODED FORMULAS FOR COMMON AIRs
+// ============================================================================
+
+/// Encode simple VDF constraints (matches simple_vdf.rs VdfAir)
+/// 
+/// This matches the actual VdfAir from tests/helpers/simple_vdf.rs:
+/// - 2 columns (col0 = state, col1 = auxiliary for result)
+/// - 1 constraint: next[0] - curr[0]^3 - 1 = 0
+/// 
+/// NOTE: The VdfAir only has 1 transition constraint, but the trace has 2 columns.
+/// Column 1 stores the result for the boundary assertion.
+pub fn encode_vdf_formula() -> EncodedFormula {
+    EncodedFormula {
+        trace_width: 2,
+        constraints: vec![
+            // Single constraint: next[0] - curr[0]^3 - 1 = 0
+            // i.e., next[0] = curr[0]^3 + 1
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 3 }],
+                    },
+                    // Constant term: -1
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![], // Empty vars = constant
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// Encode 2-column VDF-like constraints (legacy Aggregator style)
+/// - c0: next[0] - curr[0]^3 - curr[1] = 0
+/// - c1: next[1] - curr[0] = 0
+/// 
+/// NOTE: This is different from simple_vdf.rs! Use encode_vdf_formula() for VdfAir.
+pub fn encode_aggregator_vdf_formula() -> EncodedFormula {
+    EncodedFormula {
+        trace_width: 2,
+        constraints: vec![
+            // Constraint 0: next[0] - curr[0]^3 - curr[1] = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 3 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 1 }],
+                    },
+                ],
+            },
+            // Constraint 1: next[1] - curr[0] = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 1, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 1 }],
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// Encode simple Fibonacci-like constraints (2 columns)
+/// - c0: next[0] - curr[1] = 0
+/// - c1: next[1] - curr[0] - curr[1] = 0
+pub fn encode_fib_formula() -> EncodedFormula {
+    EncodedFormula {
+        trace_width: 2,
+        constraints: vec![
+            // Constraint 0: next[0] - curr[1] = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 1 }],
+                    },
+                ],
+            },
+            // Constraint 1: next[1] - curr[0] - curr[1] = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 1, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 1 }],
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+// ============================================================================
 // OOD FRAME
 // ============================================================================
 
@@ -88,38 +397,86 @@ impl OodFrame {
 /// 
 /// When verifying a child proof, we need to evaluate the correct AIR constraints
 /// at the OOD point. Different child types have different constraints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 
+/// ## Architecture
+/// 
+/// - **VerifierAir**: Used for Level 2+ aggregators (verifying other VerifierAir proofs)
+/// - **Generic**: Used for Level 1 leaf aggregators (verifying app proofs)
+/// 
+/// ## Generic Mode (Formula-as-Witness)
+/// 
+/// The `Generic` variant enables formula-as-witness: instead of hardcoding
+/// app-specific constraints, the formula is provided as witness data and
+/// interpreted at verification time. The formula hash must match the
+/// `circuit_hash` in public inputs to prevent formula substitution attacks.
+/// 
+/// This allows a single VerifierAir to verify proofs from ANY app AIR
+/// (VDF, Fib, Bitcoin light client, etc.) without hardcoding their constraints.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildAirType {
-    /// 2-column VDF/Aggregator AIR (old style)
-    /// Constraints: col0' = col0³ + col1, col1' = col0
-    VdfLike,
-    
-    /// 3-column VDF AIR
-    /// Constraints: similar cubic VDF but 3 columns
-    Vdf3Col,
-    
     /// 27-column Verifier/Aggregator AIR
     /// Full STARK verification constraints (hash, Merkle, FRI, OOD)
+    /// Used for recursive verification (VerifierAir verifying VerifierAir)
     VerifierAir,
+    
+    /// Generic mode: formula provided as witness
+    /// Contains (formula, expected_circuit_hash)
+    /// The formula is interpreted at runtime; hash is verified for security
+    /// Used for leaf aggregators verifying app proofs
+    Generic {
+        formula: EncodedFormula,
+        circuit_hash: [BaseElement; 4],
+    },
 }
 
 impl ChildAirType {
     /// Number of columns for this AIR type
     pub fn trace_width(&self) -> usize {
         match self {
-            ChildAirType::VdfLike => 2,
-            ChildAirType::Vdf3Col => 3,
             ChildAirType::VerifierAir => 27,
+            ChildAirType::Generic { formula, .. } => formula.trace_width,
         }
     }
     
     /// Number of transition constraints for this AIR type
     pub fn num_constraints(&self) -> usize {
         match self {
-            ChildAirType::VdfLike => 2,
-            ChildAirType::Vdf3Col => 2,
             ChildAirType::VerifierAir => 27,
+            ChildAirType::Generic { formula, .. } => formula.constraints.len(),
         }
+    }
+    
+    /// Create a generic child type from a formula
+    /// The circuit_hash should come from the child proof's public inputs
+    pub fn from_formula(formula: EncodedFormula, circuit_hash: [BaseElement; 4]) -> Self {
+        ChildAirType::Generic { formula, circuit_hash }
+    }
+    
+    /// Create a generic VDF type using pre-encoded formula
+    /// Convenience constructor for VDF app proofs
+    pub fn generic_vdf() -> Self {
+        let formula = encode_vdf_formula();
+        let circuit_hash = formula.compute_hash();
+        ChildAirType::Generic { formula, circuit_hash }
+    }
+    
+    /// Create a generic Fib type using pre-encoded formula
+    /// Convenience constructor for Fibonacci app proofs
+    pub fn generic_fib() -> Self {
+        let formula = encode_fib_formula();
+        let circuit_hash = formula.compute_hash();
+        ChildAirType::Generic { formula, circuit_hash }
+    }
+    
+    /// Create a generic Aggregator VDF type using pre-encoded formula
+    /// Convenience constructor for AggregatorAir proofs (2 constraints)
+    /// 
+    /// NOTE: This is different from `generic_vdf()` which is for VdfAir.
+    /// AggregatorAir has constraints: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
+    pub fn generic_aggregator_vdf() -> Self {
+        let formula = encode_aggregator_vdf_formula();
+        let circuit_hash = formula.compute_hash();
+        ChildAirType::Generic { formula, circuit_hash }
     }
 }
 
@@ -131,74 +488,65 @@ impl ChildAirType {
 /// 
 /// This function dispatches to the appropriate constraint evaluator based on
 /// the child AIR type. Returns a vector of constraint evaluations.
+/// 
+/// ## Generic Mode
+/// 
+/// When `child_type` is `Generic`, the formula is interpreted to evaluate
+/// constraints. The formula hash is verified against the expected circuit_hash
+/// to prevent formula substitution attacks.
+/// 
+/// ## Security
+/// 
+/// For `Generic` mode, the caller MUST ensure that `circuit_hash` comes from
+/// the child proof's public inputs (which are themselves bound to the proof).
 pub fn evaluate_child_constraints(
     trace_current: &[BaseElement],
     trace_next: &[BaseElement],
-    child_type: ChildAirType,
+    child_type: &ChildAirType,
 ) -> Vec<BaseElement> {
     match child_type {
-        ChildAirType::VdfLike => evaluate_vdf_like_constraints(trace_current, trace_next),
-        ChildAirType::Vdf3Col => evaluate_vdf_3col_constraints(trace_current, trace_next),
         ChildAirType::VerifierAir => evaluate_verifier_constraints(trace_current, trace_next),
+        ChildAirType::Generic { formula, circuit_hash } => {
+            // Verify formula hash matches expected (SECURITY CRITICAL)
+            if !verify_formula_hash(formula, circuit_hash) {
+                // Hash mismatch - return non-zero constraints to cause verification failure
+                eprintln!("[SECURITY] Formula hash mismatch! Expected {:?}, got {:?}", 
+                    circuit_hash, formula.compute_hash());
+                return vec![BaseElement::ONE; formula.constraints.len()];
+            }
+            // Evaluate using generic interpreter
+            evaluate_formula(formula, trace_current, trace_next)
+        }
     }
 }
 
-/// VDF-like constraints (2 columns)
+/// VDF constraints (matches simple_vdf.rs VdfAir)
 ///
-/// The Aggregator STARK has two columns with VDF-like transitions:
-/// - col0[i+1] = col0[i]^3 + col1[i]
-/// - col1[i+1] = col0[i]
-///
-/// At OOD point z:
-/// - constraint0: trace_next[0] - (trace_current[0]^3 + trace_current[1]) = 0
-/// - constraint1: trace_next[1] - trace_current[0] = 0
+/// Single constraint: next[0] = curr[0]^3 + 1
+/// 
+/// NOTE: This is the VdfAir from simple_vdf.rs, NOT the AggregatorAir.
+/// Use `evaluate_aggregator_constraints` for AggregatorAir (2 constraints).
 pub fn evaluate_vdf_like_constraints(
     trace_current: &[BaseElement],
     trace_next: &[BaseElement],
 ) -> Vec<BaseElement> {
-    assert!(trace_current.len() >= 2);
-    assert!(trace_next.len() >= 2);
-
-    let col0 = trace_current[0];
-    let col1 = trace_current[1];
-    let next0 = trace_next[0];
-    let next1 = trace_next[1];
-
-    // VDF-like constraints
-    let c0 = next0 - (col0 * col0 * col0 + col1);
-    let c1 = next1 - col0;
-
-    vec![c0, c1]
+    let formula = encode_vdf_formula();
+    evaluate_formula(&formula, trace_current, trace_next)
 }
 
-/// Legacy function for backward compatibility
+/// Evaluate AggregatorAir constraints using formula-as-witness
+/// 
+/// Two constraints:
+/// - constraint0: next[0] = curr[0]^3 + curr[1]
+/// - constraint1: next[1] = curr[0]
+/// 
+/// NOTE: This matches AggregatorAir from aggregator_air.rs, NOT VdfAir.
 pub fn evaluate_aggregator_constraints(
     trace_current: &[BaseElement],
     trace_next: &[BaseElement],
 ) -> Vec<BaseElement> {
-    evaluate_vdf_like_constraints(trace_current, trace_next)
-}
-
-/// VDF constraints (3 columns)
-/// 
-/// Similar to 2-column but with an extra state column
-fn evaluate_vdf_3col_constraints(
-    trace_current: &[BaseElement],
-    trace_next: &[BaseElement],
-) -> Vec<BaseElement> {
-    assert!(trace_current.len() >= 3);
-    assert!(trace_next.len() >= 3);
-
-    let col0 = trace_current[0];
-    let col1 = trace_current[1];
-    let next0 = trace_next[0];
-    let next1 = trace_next[1];
-
-    // Same constraints as 2-column (col2 is auxiliary)
-    let c0 = next0 - (col0 * col0 * col0 + col1);
-    let c1 = next1 - col0;
-
-    vec![c0, c1]
+    let formula = encode_aggregator_vdf_formula();
+    evaluate_formula(&formula, trace_current, trace_next)
 }
 
 /// Verifier AIR constraints (27 columns)
@@ -231,6 +579,7 @@ fn evaluate_verifier_constraints(
         proof_trace_len: 0,
         g_trace: BaseElement::ZERO,
         pub_result: BaseElement::ZERO,
+        expected_checkpoint_count: 0,
     };
     
     let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
@@ -285,12 +634,12 @@ pub struct OodParams {
 /// - exemption = z - g^{n-1}
 /// - C(z) = C_0(z) + C_1(z) * z^n (composition polynomial split into columns)
 /// 
-/// This version uses VdfLike (2-column) constraints for backward compatibility.
+/// This version uses Generic VDF (2-column) constraints via formula-as-witness.
 pub fn verify_ood_constraint_equation(
     ood_frame: &OodFrame,
     params: &OodParams,
 ) -> Result<(), OodVerificationError> {
-    verify_ood_constraint_equation_typed(ood_frame, params, ChildAirType::VdfLike)
+    verify_ood_constraint_equation_typed(ood_frame, params, &ChildAirType::generic_vdf())
 }
 
 /// Verify the full OOD constraint equation with explicit child AIR type
@@ -299,13 +648,12 @@ pub fn verify_ood_constraint_equation(
 /// 
 /// # Child Types
 /// 
-/// - `VdfLike`: 2-column VDF constraints (legacy Aggregator)
-/// - `Vdf3Col`: 3-column VDF constraints
 /// - `VerifierAir`: 27-column Verifier/Aggregator constraints (recursive verification)
+/// - `Generic`: Formula-as-witness for truly generic verification (apps like VDF, Fib, etc.)
 pub fn verify_ood_constraint_equation_typed(
     ood_frame: &OodFrame,
     params: &OodParams,
-    child_type: ChildAirType,
+    child_type: &ChildAirType,
 ) -> Result<(), OodVerificationError> {
     let expected_width = child_type.trace_width();
     if ood_frame.trace_width() < expected_width {
@@ -364,7 +712,7 @@ pub fn verify_ood_constraint_equation_typed(
     // BOUNDARY CONSTRAINT
     // Assertion: column 1, step (trace_len - 1), equals pub_result
     // ==============================================================
-    let boundary_col = if child_type == ChildAirType::VerifierAir { 26 } else { 1 };
+    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) { 26 } else { 1 };
     let boundary_value = ood_frame.trace_current.get(boundary_col)
         .copied()
         .unwrap_or(BaseElement::ZERO) - params.pub_result;
@@ -648,6 +996,7 @@ mod tests {
             proof_trace_len: 8,
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
+            expected_checkpoint_count: 0,
         };
         let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
         
@@ -672,5 +1021,204 @@ mod tests {
             assert_eq!(result[i], BaseElement::ZERO, "hash[{}] should copy for Nop", i - 3);
         }
     
+    }
+    
+    // ========================================================================
+    // FORMULA-AS-WITNESS TESTS
+    // ========================================================================
+    
+    #[test]
+    fn test_encode_vdf_formula() {
+        // Test that encode_vdf_formula creates a valid formula
+        // VDF formula (simple_vdf.rs): next[0] = curr[0]^3 + 1
+        let formula = encode_vdf_formula();
+        
+        assert_eq!(formula.trace_width, 2, "VDF has 2 columns");
+        assert_eq!(formula.constraints.len(), 1, "VDF has 1 constraint");
+        
+        // Constraint: 3 monomials (next[0], -curr[0]^3, -1)
+        assert_eq!(formula.constraints[0].monomials.len(), 3);
+        
+        println!("VDF formula monomial count: {}", formula.monomial_count());
+        assert_eq!(formula.monomial_count(), 3);
+    }
+    
+    #[test]
+    fn test_encode_aggregator_vdf_formula() {
+        // Test that encode_aggregator_vdf_formula creates a valid formula
+        // AggregatorAir formula: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
+        let formula = encode_aggregator_vdf_formula();
+        
+        assert_eq!(formula.trace_width, 2, "AggregatorAir has 2 columns");
+        assert_eq!(formula.constraints.len(), 2, "AggregatorAir has 2 constraints");
+        
+        // First constraint: 3 monomials (next[0], -curr[0]^3, -curr[1])
+        assert_eq!(formula.constraints[0].monomials.len(), 3);
+        
+        // Second constraint: 2 monomials (next[1], -curr[0])
+        assert_eq!(formula.constraints[1].monomials.len(), 2);
+        
+        println!("Aggregator VDF formula monomial count: {}", formula.monomial_count());
+        assert_eq!(formula.monomial_count(), 5);
+    }
+    
+    #[test]
+    fn test_formula_hash_consistency() {
+        // Test that formula hash is deterministic
+        let formula1 = encode_vdf_formula();
+        let formula2 = encode_vdf_formula();
+        
+        let hash1 = formula1.compute_hash();
+        let hash2 = formula2.compute_hash();
+        
+        assert_eq!(hash1, hash2, "Same formula should have same hash");
+        
+        // Different formula should have different hash
+        let fib_formula = encode_fib_formula();
+        let fib_hash = fib_formula.compute_hash();
+        
+        assert_ne!(hash1, fib_hash, "Different formulas should have different hashes");
+        
+        // VDF and Aggregator VDF should have different hashes
+        let agg_formula = encode_aggregator_vdf_formula();
+        let agg_hash = agg_formula.compute_hash();
+        
+        assert_ne!(hash1, agg_hash, "VDF and AggregatorVDF should have different hashes");
+    }
+    
+    #[test]
+    fn test_generic_vdf_matches_hardcoded() {
+        // Test that generic formula evaluation matches VDF AIR
+        // VDF constraint: next[0] = curr[0]^3 + 1
+        
+        let curr0 = BaseElement::new(7);
+        let curr1 = BaseElement::new(0); // Unused in VDF formula
+        let next0 = curr0 * curr0 * curr0 + BaseElement::ONE; // Valid VDF transition
+        let next1 = BaseElement::ZERO;
+        
+        let trace_current = vec![curr0, curr1];
+        let trace_next = vec![next0, next1];
+        
+        // Evaluate using generic formula
+        let formula = encode_vdf_formula();
+        let result = evaluate_formula(&formula, &trace_current, &trace_next);
+        
+        // Should have 1 constraint
+        assert_eq!(result.len(), 1, "VDF has 1 constraint");
+        
+        // For a valid transition, constraint should be zero
+        assert_eq!(result[0], BaseElement::ZERO, "c0 should be zero for valid transition");
+    }
+    
+    #[test]
+    fn test_generic_vdf_detects_invalid() {
+        // Test that generic formula correctly rejects invalid transitions
+        
+        let curr0 = BaseElement::new(7);
+        let curr1 = BaseElement::new(0);
+        let next0 = BaseElement::new(999); // INVALID - wrong value
+        let next1 = BaseElement::ZERO;
+        
+        let trace_current = vec![curr0, curr1];
+        let trace_next = vec![next0, next1];
+        
+        let formula = encode_vdf_formula();
+        let result = evaluate_formula(&formula, &trace_current, &trace_next);
+        
+        // c0 should be non-zero for invalid transition
+        assert_ne!(result[0], BaseElement::ZERO, "c0 should be non-zero for invalid");
+    }
+    
+    #[test]
+    fn test_child_air_type_generic() {
+        // Test the ChildAirType::Generic variant with VDF
+        // VDF constraint: next[0] = curr[0]^3 + 1
+        
+        let curr0 = BaseElement::new(5);
+        let curr1 = BaseElement::new(0);
+        let next0 = curr0 * curr0 * curr0 + BaseElement::ONE;
+        let next1 = BaseElement::ZERO;
+        
+        let trace_current = vec![curr0, curr1];
+        let trace_next = vec![next0, next1];
+        
+        // Create generic VDF child type
+        let generic_vdf = ChildAirType::generic_vdf();
+        
+        // Verify properties
+        assert_eq!(generic_vdf.trace_width(), 2);
+        assert_eq!(generic_vdf.num_constraints(), 1);
+        
+        // Evaluate using the generic type
+        let result = evaluate_child_constraints(&trace_current, &trace_next, &generic_vdf);
+        
+        // Should be zero for valid transition
+        assert_eq!(result[0], BaseElement::ZERO, "c0 should be zero");
+    }
+    
+    #[test]
+    fn test_child_air_type_generic_aggregator() {
+        // Test the ChildAirType::Generic variant with AggregatorVDF
+        // AggregatorAir: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
+        
+        let curr0 = BaseElement::new(5);
+        let curr1 = BaseElement::new(3);
+        let next0 = curr0 * curr0 * curr0 + curr1;
+        let next1 = curr0;
+        
+        let trace_current = vec![curr0, curr1];
+        let trace_next = vec![next0, next1];
+        
+        // Create generic AggregatorVDF child type
+        let generic_agg = ChildAirType::generic_aggregator_vdf();
+        
+        // Verify properties
+        assert_eq!(generic_agg.trace_width(), 2);
+        assert_eq!(generic_agg.num_constraints(), 2);
+        
+        // Evaluate using the generic type
+        let result = evaluate_child_constraints(&trace_current, &trace_next, &generic_agg);
+        
+        // Should be zero for valid transition
+        assert_eq!(result[0], BaseElement::ZERO, "c0 should be zero");
+        assert_eq!(result[1], BaseElement::ZERO, "c1 should be zero");
+    }
+    
+    #[test]
+    fn test_formula_hash_verification() {
+        // Test that formula hash verification works
+        let formula = encode_vdf_formula();
+        let correct_hash = formula.compute_hash();
+        
+        // Correct hash should pass
+        assert!(verify_formula_hash(&formula, &correct_hash));
+        
+        // Wrong hash should fail
+        let wrong_hash = [BaseElement::ONE; 4];
+        assert!(!verify_formula_hash(&formula, &wrong_hash));
+    }
+    
+    #[test]
+    fn test_fib_formula_evaluation() {
+        // Test Fibonacci formula encoding and evaluation
+        let formula = encode_fib_formula();
+        
+        assert_eq!(formula.trace_width, 2);
+        assert_eq!(formula.constraints.len(), 2);
+        
+        // Create valid Fib transition: next[0] = curr[1], next[1] = curr[0] + curr[1]
+        let curr0 = BaseElement::new(3);
+        let curr1 = BaseElement::new(5);
+        let next0 = curr1;                // 5
+        let next1 = curr0 + curr1;        // 8
+        
+        let trace_current = vec![curr0, curr1];
+        let trace_next = vec![next0, next1];
+        
+        let result = evaluate_formula(&formula, &trace_current, &trace_next);
+        
+        // Should be zero for valid Fib transition
+        assert_eq!(result[0], BaseElement::ZERO, "Fib c0 should be zero");
+        assert_eq!(result[1], BaseElement::ZERO, "Fib c1 should be zero");
     }
 }

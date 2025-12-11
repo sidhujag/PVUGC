@@ -396,6 +396,15 @@ pub fn build_vdf_recursive_stark_instance_production(start_value: u64, steps: us
     build_vdf_recursive_stark_instance_with_config(start_value, steps, RecursiveConfig::production_128bit())
 }
 
+/// Build a VDF instance with meaningful FRI layers for testing FRI verification
+/// 
+/// Uses larger trace (256 rows) to generate actual FRI folding rounds.
+/// This tests the complete FRI verification path in VerifierAir.
+pub fn build_vdf_recursive_stark_instance_with_fri(start_value: u64, steps: usize) -> VdfStarkInstance {
+    use super::verifier_air::aggregator_integration::RecursiveConfig;
+    build_vdf_recursive_stark_instance_with_config(start_value, steps, RecursiveConfig::test_with_fri())
+}
+
 /// Build a VDF instance with custom RecursiveConfig
 fn build_vdf_recursive_stark_instance_with_config(
     start_value: u64, 
@@ -520,8 +529,9 @@ pub fn build_verifying_aggregator_instance(
     
     // Step 4: Generate Verifying Aggregator proof
     // This proof uses VerifierAir constraints (27 columns)
+    // NOTE: VerifierAir has degree-7 constraints (RPO S-box), so needs blowup >= 64
     let agg_options = ProofOptions::new(
-        2, 8, 0,
+        2, 64, 0,  // blowup=64 for degree-7 constraints
         winterfell::FieldExtension::None,
         2, 31,
         winterfell::BatchingMethod::Linear,

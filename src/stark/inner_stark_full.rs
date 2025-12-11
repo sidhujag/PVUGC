@@ -449,6 +449,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &z,
             &constraint_coeffs,
             &self.air_params,
+            &self.stark_pub_inputs, // Pass Verifier AIR public inputs for statement_hash
         )?;
         
 

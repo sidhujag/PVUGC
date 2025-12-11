@@ -119,7 +119,7 @@ fn load_or_build_outer_recursive_crs<C: RecursionCycle>(
     if Path::new(&cache_path).exists() {
         let file = File::open(&cache_path).expect("failed to open cached outer CRS");
         let reader = BufReader::new(file);
-        return CanonicalDeserialize::deserialize_uncompressed(reader)
+        return CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
             .expect("failed to deserialize outer CRS");
     }
 
