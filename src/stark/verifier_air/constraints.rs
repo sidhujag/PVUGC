@@ -213,20 +213,30 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // aux[2] = 2: TERMINAL mode - verify fri[6] == fri[7] (FRI final == expected)
     // aux[2] = 3: DEEP mode - verify fri[6] == fri[7] (DEEP computed == expected)
     // aux[2] = 4: STATEMENT mode - verify hash_state[0..3] == pub_inputs.statement_hash
+    // aux[2] = 5: INTERPRETER mode - verify hash_state[0..3] == pub_inputs.interpreter_hash
     // ========================================================================
     let aux_mode = current[AUX_START + 2];
     let one = E::ONE;
     let two = E::from(super::BaseElement::new(2));
     let three = E::from(super::BaseElement::new(3));
     let four = E::from(super::BaseElement::new(4));
+    let five = E::from(super::BaseElement::new(5));
     
-    // Statement hash binding constraints
+    // Statement hash binding constraints (mode 4)
     // When aux[2] = 4, verify hash_state matches public input statement_hash
     // This ensures the prover verified the ACTUAL commitments, not fake ones
     let statement_constraint_0 = current_hash[0] - E::from(pub_inputs.statement_hash[0]);
     let statement_constraint_1 = current_hash[1] - E::from(pub_inputs.statement_hash[1]);
     let statement_constraint_2 = current_hash[2] - E::from(pub_inputs.statement_hash[2]);
     let statement_constraint_3 = current_hash[3] - E::from(pub_inputs.statement_hash[3]);
+    
+    // Interpreter hash binding constraints (mode 5)
+    // When aux[2] = 5, verify hash_state matches public input interpreter_hash
+    // This binds the constraint formula
+    let interpreter_constraint_0 = current_hash[0] - E::from(pub_inputs.interpreter_hash[0]);
+    let interpreter_constraint_1 = current_hash[1] - E::from(pub_inputs.interpreter_hash[1]);
+    let interpreter_constraint_2 = current_hash[2] - E::from(pub_inputs.interpreter_hash[2]);
+    let interpreter_constraint_3 = current_hash[3] - E::from(pub_inputs.interpreter_hash[3]);
     
     // Root verification: hash_state[i] == fri[i] for i in 0..4
     let root_constraint_0 = current_hash[0] - current[FRI_START];
@@ -255,9 +265,9 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 + both_not_special * copy_constraint;
         } else if i < 4 {
             // Root verification for mode 0: hash_state == fri[0..3]
-            // KEEP 4 factors to correctly exclude mode 4 from root check!
-            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero only when aux[2]=0
-            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four);
+            // Use 5 factors to exclude modes 4 and 5 from root check
+            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4)(aux[2]-5) = non-zero only when aux[2]=0
+            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four) * (aux_mode - five);
             let root_constraint = match i {
                 0 => root_constraint_0,
                 1 => root_constraint_1,
@@ -266,9 +276,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             };
             
             // Statement hash verification for mode 4
-            // When aux[2] = 4, bind hash_state to public input statement_hash
-            // is_statement_check = non-zero when aux[2] = 4 (uses product (aux[2])*(aux[2]-1)*(aux[2]-2)*(aux[2]-3))
-            let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
+            // is_statement_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-5) = non-zero only when aux[2]=4
+            let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - five);
             let statement_constraint = match i {
                 0 => statement_constraint_0,
                 1 => statement_constraint_1,
@@ -276,8 +285,19 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 _ => statement_constraint_3,
             };
             
+            // Interpreter hash verification for mode 5
+            // is_interpreter_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-4) = non-zero only when aux[2]=5
+            let is_interpreter_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four);
+            let interpreter_constraint = match i {
+                0 => interpreter_constraint_0,
+                1 => interpreter_constraint_1,
+                2 => interpreter_constraint_2,
+                _ => interpreter_constraint_3,
+            };
+            
             result[idx] = op.is_deep * is_root_check * root_constraint
                 + op.is_deep * is_statement_check * statement_constraint
+                + op.is_deep * is_interpreter_check * interpreter_constraint
                 + both_not_special * copy_constraint;
         } else {
             // Columns 5, 7: copy constraint only

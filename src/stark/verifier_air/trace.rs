@@ -315,6 +315,36 @@ impl VerifierTraceBuilder {
         local_ok
     }
 
+    /// Verify interpreter/formula hash binding
+    /// 
+    /// This verifies that the constraint formula hash matches the expected
+    /// interpreter hash from public inputs.
+    /// 
+    /// Parameters:
+    /// - formula_hash: The hash of the EncodedFormula being used
+    /// 
+    /// Returns true if current hash_state[0..3] equals the formula hash.
+    /// 
+    /// Must be called AFTER computing the formula hash in the sponge.
+    /// The AIR constraint will verify hash_state[0..3] == pub_inputs.interpreter_hash.
+    pub fn verify_interpreter_hash(&mut self, formula_hash: [BaseElement; 4]) -> bool {
+        // Store the formula hash in hash_state for constraint verification
+        self.hash_state[0] = formula_hash[0];
+        self.hash_state[1] = formula_hash[1];
+        self.hash_state[2] = formula_hash[2];
+        self.hash_state[3] = formula_hash[3];
+        
+        // Set mode = INTERPRETER VERIFICATION (aux[2] = 5)
+        // The AIR constraint will enforce: hash_state[0..3] == pub_inputs.interpreter_hash
+        self.aux_state[2] = BaseElement::new(5u64);
+        
+        // Emit DeepCompose row - checkpoint counter increments
+        self.emit_row(VerifierOp::DeepCompose);
+        
+        // Return true (actual check is done by AIR constraint)
+        true
+    }
+
     /// Verify DEEP composition value
     /// 
     /// This verifies that the DEEP evaluation at a query position is correctly
@@ -684,6 +714,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64), // 2^61 in Goldilocks
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
+            interpreter_hash: [BaseElement::ZERO; 4],
         };
 
         // We don't have a real Proof here, but we can test the trace building logic

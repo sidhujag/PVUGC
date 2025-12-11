@@ -149,11 +149,14 @@ pub struct VerifierPublicInputs {
     /// - num_fri_layers FRI Merkle verifications per query
     /// - terminal_checks: 1 per query for FRI terminal
     pub expected_checkpoint_count: usize,
+    /// Interpreter/formula hash - binds the constraint formula to public input
+    /// For Generic children, this is the hash of the EncodedFormula.
+    pub interpreter_hash: [BaseElement; 4],
 }
 
 impl ToElements<BaseElement> for VerifierPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut elements = Vec::with_capacity(19 + self.fri_commitments.len() * 4);
+        let mut elements = Vec::with_capacity(23 + self.fri_commitments.len() * 4);
         elements.extend_from_slice(&self.statement_hash);
         elements.extend_from_slice(&self.trace_commitment);
         elements.extend_from_slice(&self.comp_commitment);
@@ -165,6 +168,7 @@ impl ToElements<BaseElement> for VerifierPublicInputs {
         elements.push(self.g_trace);
         elements.push(self.pub_result);
         elements.push(BaseElement::new(self.expected_checkpoint_count as u64));
+        elements.extend_from_slice(&self.interpreter_hash);
         elements
     }
 }
@@ -175,18 +179,18 @@ impl VerifierPublicInputs {
     /// Formula: 1 (statement hash) + 1 (OOD) + num_queries * (2 + 1 + num_fri_layers + 1)
     /// - 1 statement hash verification (binds commitments to public inputs)
     /// - 1 OOD verification
+    /// - 1 interpreter hash verification (binds formula to public inputs)
     /// - 2 Merkle roots per query (trace + comp)
-    /// - 1 DEEP verification per query
-    /// - num_fri_layers FRI Merkle verifications per query (if FRI layers exist)
     /// - 1 DEEP verification per query (if FRI layers exist)
+    /// - num_fri_layers FRI Merkle verifications per query (if FRI layers exist)
     /// - 1 FRI terminal verification per query (if FRI layers exist)
     pub fn compute_expected_checkpoints(num_queries: usize, num_fri_layers: usize) -> usize {
         if num_fri_layers == 0 {
-            // No FRI: statement hash + OOD + (trace + comp) Merkle per query
-            2 + num_queries * 2
+            // No FRI: statement hash + OOD + interpreter hash + (trace + comp) Merkle per query
+            3 + num_queries * 2
         } else {
-            // With FRI: statement hash + OOD + (trace + comp + DEEP + FRI layers + terminal) per query
-            2 + num_queries * (2 + 1 + num_fri_layers + 1)
+            // With FRI: statement hash + OOD + interpreter hash + (trace + comp + DEEP + FRI layers + terminal) per query
+            3 + num_queries * (2 + 1 + num_fri_layers + 1)
         }
     }
 }
@@ -266,11 +270,13 @@ impl Air for VerifierAir {
                 // both_not_special(6) * copy(1) = degree 7
                 degrees.push(TransitionConstraintDegree::new(7));
             } else {
-                // Columns 0-3: root/copy constraints (statement temporarily disabled)
-                // Root: op.is_deep(3) * is_root_check(4) * root(1) = degree 8
+                // Columns 0-3: root/statement/interpreter check constraints
+                // Root: op.is_deep(3) * is_root_check(5) * root(1) = degree 9
+                // Statement: op.is_deep(3) * is_statement_check(5) * statement(1) = degree 9
+                // Interpreter: op.is_deep(3) * is_interpreter_check(5) * interpreter(1) = degree 9
                 // Copy: both_not_special(6) * copy(1) = degree 7
-                // Max = 8
-                degrees.push(TransitionConstraintDegree::new(8));
+                // Max = 9
+                degrees.push(TransitionConstraintDegree::new(9));
             }
         }
 
@@ -376,6 +382,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
+            interpreter_hash: [BaseElement::ZERO; 4],
         };
 
         let trace_info = TraceInfo::new(VERIFIER_TRACE_WIDTH, 64);
@@ -403,30 +410,32 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
+            interpreter_hash: [BaseElement::ZERO; 4],
         };
 
         let elements = pub_inputs.to_elements();
-        // 4 + 4 + 4 + 8 + 2 + 2 + 1 = 25 elements (added expected_checkpoint_count)
-        assert_eq!(elements.len(), 25);
+        // 4 + 4 + 4 + 8 + 4 + 1 + 1 + 1 + 1 + 4 = 29 elements (added interpreter_hash)
+        assert_eq!(elements.len(), 29);
     }
     
     #[test]
     fn test_compute_expected_checkpoints() {
         // With 2 queries and 3 FRI layers:
-        // - 1 statement hash verification (binds commitments to public inputs)
-        // - 1 OOD verification
+        // - 1 statement hash verification
+        // - 1 OOD verification  
+        // - 1 interpreter hash verification
         // - 2 queries * (2 Merkle roots + 1 DEEP + 3 FRI Merkle + 1 terminal) = 2 * 7 = 14
-        // Total: 2 + 14 = 16
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 16);
+        // Total: 3 + 14 = 17
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 17);
 
         // With 4 queries and 0 FRI layers:
-        // - 1 statement hash + 1 OOD = 2
+        // - 1 statement hash + 1 OOD + 1 interpreter hash = 3
         // - 4 queries * 2 (trace + comp Merkle only, no DEEP/terminal) = 8
-        // Total: 10
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 10);
+        // Total: 11
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 11);
         
         // With 2 queries and 0 FRI layers:
-        // - 2 + 2 * 2 = 6
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 0), 6);
+        // - 3 + 2 * 2 = 7
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 0), 7);
     }
 }

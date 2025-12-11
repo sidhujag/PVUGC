@@ -838,6 +838,11 @@ pub fn generate_verifying_aggregator_proof(
     // Total = (single - 1) * 2 + 1 = single * 2 - 1
     let total_checkpoints = single_child_checkpoints * 2 - 1;
     
+    // Compute interpreter hash for the child proofs (VDF formula)
+    use super::verifier_air::ood_eval::ChildAirType;
+    let child_type = ChildAirType::generic_vdf();
+    let interpreter_hash = child_type.compute_formula_hash();
+    
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
         trace_commitment: result0.trace_commitment,  // From first child
@@ -848,6 +853,7 @@ pub fn generate_verifying_aggregator_proof(
         g_trace: child0_proof.g_trace,
         pub_result: child0_proof.pub_result,
         expected_checkpoint_count: total_checkpoints,
+        interpreter_hash,
     };
     
     // Generate proof using VerifierProver

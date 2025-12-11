@@ -81,11 +81,32 @@ pub fn verify_ood_equation_in_circuit(
     let exemption = gl_sub_light(cs.clone(), &z_gl, &g_pow_n_minus_1_gl)?;
     let z_minus_1 = gl_sub_light(cs.clone(), &z_gl, &one)?;
     
+    // Extract interpreter_hash from public inputs (last 4 elements)
+    // Minimum layout: statement_hash(4) + trace_commit(4) + comp_commit(4) + 
+    //                 num_queries(1) + trace_len(1) + g_trace(1) + pub_result(1) + 
+    //                 expected_checkpoints(1) + interpreter_hash(4) = 21 minimum
+    // 
+    // SECURITY: Must require minimum length to ensure interpreter_hash doesn't
+    // overlap with statement_hash (indices 0..4). Failing to check this would
+    // allow an attacker to omit interpreter_hash or have it read from statement_hash.
+    let pub_len = stark_pub_inputs.len();
+    let interpreter_hash: [u64; 4] = if pub_len >= 21 {
+        [
+            stark_pub_inputs[pub_len - 4],
+            stark_pub_inputs[pub_len - 3],
+            stark_pub_inputs[pub_len - 2],
+            stark_pub_inputs[pub_len - 1],
+        ]
+    } else {
+        // Malformed public inputs - interpreter_hash is required
+        return Err(SynthesisError::Unsatisfiable);
+    };
+    
     // =========================================================================
     // STEP 2: Evaluate all 27 VerifierAir transition constraints (HARDCODED)
     // =========================================================================
     let constraints = evaluate_verifier_air_constraints_gl(
-        cs.clone(), ood_trace_current, ood_trace_next, &statement_hash
+        cs.clone(), ood_trace_current, ood_trace_next, &statement_hash, &interpreter_hash
     )?;
     
     // =========================================================================
@@ -137,9 +158,11 @@ pub fn verify_ood_equation_in_circuit(
     initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux3_init_term)?;
     
     // Final aux[3] = expected_checkpoint_count (column 26) - coeff index 32
-    // Get expected checkpoint count from public inputs (last element)
-    // This is correct even for Verifying Aggregators that verify multiple child proofs
-    let expected_checkpoints = stark_pub_inputs.last().copied().unwrap_or(0);
+    // Get expected checkpoint count from public inputs
+    // Layout: [..., expected_checkpoint_count, interpreter_hash[0..4]]
+    // So expected_checkpoint_count is at position pub_len - 5
+    // (Safe: we already validated pub_len >= 21 above)
+    let expected_checkpoints = stark_pub_inputs[pub_len - 5];
     let expected_checkpoints_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_checkpoints)));
     
     let final_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
@@ -206,6 +229,7 @@ fn evaluate_verifier_air_constraints_gl(
     current: &[GlVar],
     next: &[GlVar],
     statement_hash: &[u64; 4], // Verifier AIR's statement_hash public input
+    interpreter_hash: &[u64; 4], // Verifier AIR's interpreter_hash public input
 ) -> Result<Vec<GlVar>, SynthesisError> {
     const NUM_SELECTORS: usize = 3;
     const HASH_STATE_START: usize = 3;
@@ -374,28 +398,55 @@ fn evaluate_verifier_air_constraints_gl(
         gl_sub_light(cs.clone(), &current_hash[3], &statement_hash_gl[3])?,
     ];
     
-    // KEEP 4 factors to correctly exclude mode 4 from root check!
-    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3) * (aux[2] - 4)
-    // When aux[2] = 0: (-1)*(-2)*(-3)*(-4) = 24 (non-zero, check applies)
-    // When aux[2] = 1,2,3,4: is_root_check = 0 (check doesn't apply)
+    // Interpreter hash binding constraints (mode 5)
+    let interpreter_hash_gl: [GlVar; 4] = [
+        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[0]))),
+        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[1]))),
+        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[2]))),
+        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[3]))),
+    ];
+    let interpreter_constraints: [GlVar; 4] = [
+        gl_sub_light(cs.clone(), &current_hash[0], &interpreter_hash_gl[0])?,
+        gl_sub_light(cs.clone(), &current_hash[1], &interpreter_hash_gl[1])?,
+        gl_sub_light(cs.clone(), &current_hash[2], &interpreter_hash_gl[2])?,
+        gl_sub_light(cs.clone(), &current_hash[3], &interpreter_hash_gl[3])?,
+    ];
+    
+    // Use 5 factors to exclude modes 4 and 5 from root check
+    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3) * (aux[2] - 4) * (aux[2] - 5)
+    // When aux[2] = 0: (-1)*(-2)*(-3)*(-4)*(-5) = -120 (non-zero, check applies)
+    // When aux[2] = 1,2,3,4,5: is_root_check = 0 (check doesn't apply)
     let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
     let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
     let four_gl = GlVar(FpGLVar::constant(InnerFr::from(4u64)));
+    let five_gl = GlVar(FpGLVar::constant(InnerFr::from(5u64)));
     let aux_m1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
     let aux_m2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
     let aux_m3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
     let aux_m4 = gl_sub_light(cs.clone(), aux_mode, &four_gl)?;
+    let aux_m5 = gl_sub_light(cs.clone(), aux_mode, &five_gl)?;
     let is_root_check_temp = gl_mul_light(cs.clone(), &aux_m1, &aux_m2)?;
     let is_root_check_temp2 = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
-    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp2, &aux_m4)?;
+    let is_root_check_temp3 = gl_mul_light(cs.clone(), &is_root_check_temp2, &aux_m4)?;
+    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp3, &aux_m5)?;
     
     // Statement check for mode 4
-    // is_statement_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3)
-    // When aux[2] = 4: 4*3*2*1 = 24 (non-zero, check applies)
-    // When aux[2] = 0,1,2,3: is_statement_check = 0 (check doesn't apply)
+    // is_statement_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-5)
+    // When aux[2] = 4: 4*3*2*1*(-1) = -24 (non-zero, check applies)
+    // When aux[2] = 0,1,2,3,5: is_statement_check = 0 (check doesn't apply)
     let is_statement_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
     let is_statement_check_temp2 = gl_mul_light(cs.clone(), &is_statement_check_temp, &aux_m2)?;
-    let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
+    let is_statement_check_temp3 = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
+    let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp3, &aux_m5)?;
+    
+    // Interpreter check for mode 5
+    // is_interpreter_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-4)
+    // When aux[2] = 5: 5*4*3*2*1 = 120 (non-zero, check applies)
+    // When aux[2] = 0,1,2,3,4: is_interpreter_check = 0 (check doesn't apply)
+    let is_interpreter_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
+    let is_interpreter_check_temp2 = gl_mul_light(cs.clone(), &is_interpreter_check_temp, &aux_m2)?;
+    let is_interpreter_check_temp3 = gl_mul_light(cs.clone(), &is_interpreter_check_temp2, &aux_m3)?;
+    let is_interpreter_check = gl_mul_light(cs.clone(), &is_interpreter_check_temp3, &aux_m4)?;
     
     for i in 0..8 {
         let fri_curr = &current[FRI_START + i];
@@ -423,16 +474,19 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
             constraints.push(c);
         } else if i < 4 {
-            // FRI columns 0-3: ROOT VERIFICATION (mode 0) and STATEMENT VERIFICATION (mode 4)
+            // FRI columns 0-3: ROOT/STATEMENT/INTERPRETER VERIFICATION
             //
             // ROOT mode (aux[2] = 0): verify hash_state[i] == fri[i]
             // STATEMENT mode (aux[2] = 4): verify hash_state[i] == pub_inputs.statement_hash[i]
+            // INTERPRETER mode (aux[2] = 5): verify hash_state[i] == pub_inputs.interpreter_hash[i]
             //
-            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero when aux[2]=0
-            // is_statement_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3) = non-zero when aux[2]=4
+            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4)(aux[2]-5) = non-zero when aux[2]=0
+            // is_statement_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-5) = non-zero when aux[2]=4
+            // is_interpreter_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero when aux[2]=5
             //
             // Constraint: op.is_deep * is_root_check * root_constraint
             //           + op.is_deep * is_statement_check * statement_constraint
+            //           + op.is_deep * is_interpreter_check * interpreter_constraint
             //           + both_not_special * copy_constraint = 0
             let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
             let root_term = gl_mul_light(cs.clone(), &deep_root, &root_constraints[i])?;
@@ -441,11 +495,16 @@ fn evaluate_verifier_air_constraints_gl(
             let deep_statement = gl_mul_light(cs.clone(), &op.is_deep, &is_statement_check)?;
             let statement_term = gl_mul_light(cs.clone(), &deep_statement, &statement_constraints[i])?;
             
+            // Interpreter hash verification for mode 5
+            let deep_interpreter = gl_mul_light(cs.clone(), &op.is_deep, &is_interpreter_check)?;
+            let interpreter_term = gl_mul_light(cs.clone(), &deep_interpreter, &interpreter_constraints[i])?;
+            
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             
-            // Full constraint: root term + statement term + copy term
+            // Full constraint: root term + statement term + interpreter term + copy term
             let c1 = gl_add_light(cs.clone(), &root_term, &statement_term)?;
-            let c = gl_add_light(cs.clone(), &c1, &copy_term)?;
+            let c2 = gl_add_light(cs.clone(), &c1, &interpreter_term)?;
+            let c = gl_add_light(cs.clone(), &c2, &copy_term)?;
             constraints.push(c);
         } else {
             // FRI columns 5, 7: copy constraint only

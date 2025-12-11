@@ -478,6 +478,23 @@ impl ChildAirType {
         let circuit_hash = formula.compute_hash();
         ChildAirType::Generic { formula, circuit_hash }
     }
+    
+    /// Compute the formula hash for binding to public input
+    /// 
+    /// For VerifierAir: Returns zeros (constraints are hardcoded, not witness-based)
+    /// For Generic: Returns the formula's hash
+    /// 
+    /// This hash is used to bind the constraint formula to the public input,
+    /// preventing attackers from using a simpler formula that trivially satisfies.
+    pub fn compute_formula_hash(&self) -> [BaseElement; 4] {
+        match self {
+            // VerifierAir has hardcoded constraints, no witness formula
+            // We use zeros to indicate "no formula binding needed"
+            ChildAirType::VerifierAir => [BaseElement::ZERO; 4],
+            // Generic mode: return the formula's hash
+            ChildAirType::Generic { formula, circuit_hash: _ } => formula.compute_hash(),
+        }
+    }
 }
 
 // ============================================================================
@@ -578,6 +595,7 @@ fn evaluate_verifier_constraints(
         g_trace: BaseElement::ZERO,
         pub_result: BaseElement::ZERO,
         expected_checkpoint_count: 0,
+        interpreter_hash: [BaseElement::ZERO; 4],
     };
     
     let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
@@ -995,6 +1013,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: 0,
+            interpreter_hash: [BaseElement::ZERO; 4],
         };
         let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
         

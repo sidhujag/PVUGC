@@ -142,6 +142,7 @@ impl Prover for VerifierProver {
                 g_trace: BaseElement::new(18446744069414584320u64),
                 pub_result: BaseElement::ZERO,
                 expected_checkpoint_count: 0, // Will fail boundary assertion if used
+                interpreter_hash: [BaseElement::ZERO; 4],
             }
         })
     }
@@ -372,6 +373,15 @@ pub fn append_proof_verification_with_options(
         );
         
         if !ood_valid {
+            all_valid = false;
+        }
+        
+        // === Interpreter/Formula Hash Binding ===
+        // Verify that the constraint formula used matches the public input interpreter_hash
+        // This prevents attackers from using a simpler formula that trivially satisfies
+        let formula_hash = child_type.compute_formula_hash();
+        let interpreter_ok = builder.verify_interpreter_hash(formula_hash);
+        if !interpreter_ok {
             all_valid = false;
         }
     }

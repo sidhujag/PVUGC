@@ -155,6 +155,11 @@ impl RecursiveVerifier {
             parsed.num_fri_layers,
         );
 
+        // Compute interpreter hash for the Aggregator proof (2-constraint VDF formula)
+        use super::ood_eval::ChildAirType;
+        let child_type = ChildAirType::generic_aggregator_vdf();
+        let interpreter_hash = child_type.compute_formula_hash();
+        
         VerifierPublicInputs {
             statement_hash: compute_statement_hash_from_parsed(&parsed),
             trace_commitment: parsed.trace_commitment,
@@ -165,6 +170,7 @@ impl RecursiveVerifier {
             g_trace,
             pub_result: aggregator_pub_inputs.result,
             expected_checkpoint_count: expected_checkpoints,
+            interpreter_hash,
         }
     }
 
