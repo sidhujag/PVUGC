@@ -77,7 +77,7 @@ impl VerifierProver {
         // Use common verification function with specified child type
         let result = append_proof_verification(&mut builder, proof_data, child_type);
 
-        // CRITICAL: Only accept if all verification checks passed
+        // Only accept if all verification checks passed
         // Boundary assertion enforces acceptance_flag = 1, so invalid proofs fail
         builder.accept(result.valid);
 
@@ -107,7 +107,7 @@ impl VerifierProver {
         // Use common verification function with specified child type
         let result = append_proof_verification(&mut builder, proof_data, child_type);
 
-        // CRITICAL: Only accept if all verification checks passed
+        // Only accept if all verification checks passed
         builder.accept(result.valid);
 
         (builder.finalize(), result)
@@ -230,6 +230,20 @@ pub fn append_proof_verification(
     proof_data: &ParsedProof,
     child_type: super::ood_eval::ChildAirType,
 ) -> VerificationResult {
+    append_proof_verification_with_options(builder, proof_data, child_type, true)
+}
+
+/// Append proof verification trace with options
+/// 
+/// Same as `append_proof_verification` but with option to skip statement hash verification.
+/// Use `skip_statement_hash = true` when verifying multiple child proofs and you want
+/// to do ONE combined statement hash verification at the end.
+pub fn append_proof_verification_with_options(
+    builder: &mut VerifierTraceBuilder,
+    proof_data: &ParsedProof,
+    child_type: super::ood_eval::ChildAirType,
+    verify_statement_hash: bool,
+) -> VerificationResult {
     // Track verification results - ALL checks must pass for acceptance
     let mut all_valid = true;
     
@@ -237,28 +251,23 @@ pub fn append_proof_verification(
     // Check required data is present
 
     if proof_data.trace_queries.is_empty() { 
-        eprintln!("[VERIFIER AIR] FAIL: trace_queries is empty");
         all_valid = false; 
     }
     if proof_data.comp_queries.is_empty() { 
-        eprintln!("[VERIFIER AIR] FAIL: comp_queries is empty");
         all_valid = false; 
     }
     if proof_data.trace_queries.len() != proof_data.comp_queries.len() { 
-        eprintln!("[VERIFIER AIR] FAIL: trace_queries.len() != comp_queries.len()");
         all_valid = false; 
     }
     
     // FRI layers: 0 is valid for small proofs (num_fri_layers determines expected count)
     if proof_data.fri_layers.len() != proof_data.num_fri_layers { 
-        eprintln!("[VERIFIER AIR] FAIL: fri_layers.len() != num_fri_layers");
         all_valid = false; 
     }
     
     if !proof_data.ood_trace_current.is_empty() 
         && proof_data.ood_trace_current.len() != proof_data.trace_width 
     { 
-        eprintln!("[VERIFIER AIR] FAIL: ood_trace_current.len() != trace_width");
         all_valid = false; 
     }
     
@@ -266,15 +275,11 @@ pub fn append_proof_verification(
     // Coefficients: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
     let expected_deep_coeffs = proof_data.trace_width + proof_data.comp_width;
     if proof_data.deep_coeffs.len() < expected_deep_coeffs { 
-        eprintln!("[VERIFIER AIR] FAIL: deep_coeffs.len()={} < expected={}", 
-            proof_data.deep_coeffs.len(), expected_deep_coeffs);
         all_valid = false; 
     }
     
-    for (i, layer) in proof_data.fri_layers.iter().enumerate() {
+    for layer in proof_data.fri_layers.iter() {
         if layer.queries.len() != proof_data.num_queries { 
-            eprintln!("[VERIFIER AIR] FAIL: fri_layer[{}].queries.len()={} != num_queries={}", 
-                i, layer.queries.len(), proof_data.num_queries);
             all_valid = false; 
         }
     }
@@ -313,7 +318,7 @@ pub fn append_proof_verification(
         builder.permute();
     }
 
-    // === SECURITY CRITICAL: Statement Hash Verification ===
+    // === Statement Hash Verification ===
     // The statement hash binds all commitments to the public inputs.
     // The AIR constraint verifies: hash_state[0..3] == pub_inputs.statement_hash
     // This prevents an attacker from verifying a DIFFERENT proof than what's claimed.
@@ -321,15 +326,16 @@ pub fn append_proof_verification(
     // After absorbing all commitments, the hash_state[0..3] contains the computed hash.
     // We emit a DeepCompose row with mode=4 (STATEMENT), and the AIR enforces it
     // equals pub_inputs.statement_hash.
-    {
-        // Squeeze to get the computed statement hash
-        let computed_hash = builder.squeeze();
-        
+    //
+    // NOTE: For Verifying Aggregators with multiple children, we skip per-child
+    // statement hash verification and do ONE combined verification at the end.
+    // This is because pub_inputs.statement_hash is the COMBINED hash, not per-child.
+    let computed_hash = builder.squeeze();
+    if verify_statement_hash {
         // Verify statement hash - the real check is the AIR constraint
         // which compares hash_state to pub_inputs.statement_hash
         let statement_ok = builder.verify_statement_hash(computed_hash);
         if !statement_ok {
-            eprintln!("[VERIFIER AIR] FAIL: Statement hash verification failed");
             all_valid = false;
         }
     }
@@ -366,7 +372,6 @@ pub fn append_proof_verification(
         );
         
         if !ood_valid {
-            eprintln!("[VERIFIER AIR] FAIL: OOD verification failed");
             all_valid = false;
         }
     }
@@ -384,11 +389,10 @@ pub fn append_proof_verification(
             builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
         }
         
-        // CRITICAL: Verify computed root matches trace commitment
+        // Verify computed root matches trace commitment
         // AIR constraint enforces hash_state[0..3] == fri[0..3] (expected root)
         let root_ok = builder.verify_root(proof_data.trace_commitment);
         if !root_ok {
-            eprintln!("[VERIFIER AIR] FAIL: Trace Merkle root verification failed");
             all_valid = false;
         }
     }
@@ -403,15 +407,14 @@ pub fn append_proof_verification(
             builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
         }
         
-        // CRITICAL: Verify computed root matches composition commitment
+        // Verify computed root matches composition commitment
         let root_ok = builder.verify_root(proof_data.comp_commitment);
         if !root_ok {
-            eprintln!("[VERIFIER AIR] FAIL: Composition Merkle root verification failed");
             all_valid = false;
         }
     }
 
-    // === Phase 6: DEEP Composition Verification (CRITICAL!) ===
+    // === Phase 6: DEEP Composition Verification ===
     // 
     // R1CS computes DEEP and passes it as FRI starting values.
     // AIR verifies: prover's claimed DEEP values (in layer 0) match our computation.
@@ -463,8 +466,6 @@ pub fn append_proof_verification(
             // This ensures the DEEP composition polynomial was computed correctly
             let deep_ok = builder.verify_deep_value(prover_deep, expected_deep);
             if !deep_ok {
-                eprintln!("[DEEP FAIL] q_idx={}, prover_deep={}, expected_deep={}", 
-                    q_idx, prover_deep.as_int(), expected_deep.as_int());
                 all_valid = false;
             }
         }
@@ -482,13 +483,6 @@ pub fn append_proof_verification(
     let mut folded_positions: Vec<usize> = proof_data.query_positions.clone();
     let mut current_domain_size = lde_domain_size;
     
-    eprintln!("[FRI LAYERS] proof_data.fri_layers.len()={}, num_fri_layers={}, num_queries={}, fri_commitments.len()={}", 
-        proof_data.fri_layers.len(), proof_data.num_fri_layers, proof_data.num_queries, proof_data.fri_commitments.len());
-    eprintln!("[FRI LAYERS] Initial query_positions: {:?}", proof_data.query_positions);
-    eprintln!("[FRI LAYERS] domain_offset={}, g_lde={}, trace_len={}, lde_blowup={}", 
-        proof_data.domain_offset.as_int(), proof_data.g_lde.as_int(), 
-        proof_data.trace_len, proof_data.lde_blowup);
-    
     // NOTE: Length checks here are defense-in-depth. The REAL security is:
     //   - AIR constraints verify Merkle roots match commitments
     //   - AIR constraints verify FRI folding formula
@@ -504,10 +498,7 @@ pub fn append_proof_verification(
         // If missing, use zeros - AIR constraints will reject (hash won't match zeros)
         let layer_commitment = proof_data.fri_commitments.get(layer_idx)
             .copied()
-            .unwrap_or_else(|| {
-                eprintln!("[VERIFIER AIR] Missing commitment for layer {} - will fail verification", layer_idx);
-                [BaseElement::ZERO; 4]  // Merkle verify_root will fail against zeros
-            });
+            .unwrap_or([BaseElement::ZERO; 4]);  // Merkle verify_root will fail against zeros
             
         for (q_idx, query) in layer.queries.iter().enumerate() {
             // Initialize hash state with the FRI layer values being committed
@@ -519,10 +510,9 @@ pub fn append_proof_verification(
                 builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
             }
             
-            // CRITICAL: Verify computed root matches FRI layer commitment
+            // Verify computed root matches FRI layer commitment
             let root_ok = builder.verify_root(layer_commitment);
             if !root_ok {
-                eprintln!("[FRI ROOT FAIL] layer_idx={}", layer_idx);
                 all_valid = false;
             }
             
@@ -530,7 +520,7 @@ pub fn append_proof_verification(
             // NOTE: This is done AFTER root verification because the folded value
             // feeds into the NEXT layer, not this layer's commitment
             //
-            // CRITICAL: For upper-half positions (>= domain_size/2), the query is at
+            // For upper-half positions (>= domain_size/2), the query is at
             // the HIGH position, so actual f(x) = f_neg_x and f(-x) = f_x
             // We must swap the arguments to fri_fold accordingly
             let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
@@ -552,9 +542,6 @@ pub fn append_proof_verification(
                 final_folded_values.push(folded);
                 // Store the x value from this layer
                 final_layer_x_values.push(query.x);
-                eprintln!("[LAST LAYER QUERY {}] x={}, f_x={}, f_neg_x={}, folded={}",
-                    final_folded_values.len() - 1, query.x.as_int(), 
-                    query.f_x.as_int(), query.f_neg_x.as_int(), folded.as_int());
             }
         }
         
@@ -566,19 +553,16 @@ pub fn append_proof_verification(
             .collect();
     }
 
-    // === Phase 8: FRI Terminal Verification (CRITICAL!) ===
+    // === Phase 8: FRI Terminal Verification ===
     // Verify that the final folded values are consistent.
     // For Constant terminal: all final values must be equal
     // For Poly terminal: final values must match remainder polynomial evaluation
-    eprintln!("[FRI TERMINAL] final_folded_values.len()={}, is_constant={}, remainder_coeffs.len()={}", 
-        final_folded_values.len(), proof_data.fri_terminal_is_constant, proof_data.fri_remainder_coeffs.len());
     
     if !final_folded_values.is_empty() {
         if proof_data.fri_terminal_is_constant {
             // Constant terminal: all values should equal the first value
             let first_val = final_folded_values[0];
-            for (i, &final_val) in final_folded_values[1..].iter().enumerate() {
-                eprintln!("[FRI TERMINAL] Constant check {}", i);
+            for &final_val in final_folded_values[1..].iter() {
                 let terminal_ok = builder.verify_fri_terminal(final_val, first_val);
                 if !terminal_ok {
                     all_valid = false;
@@ -600,36 +584,6 @@ pub fn append_proof_verification(
                 g_terminal = g_terminal * g_terminal;
             }
             
-            eprintln!("[FRI TERMINAL] g_terminal={}, domain_offset={}", 
-                g_terminal.as_int(), proof_data.domain_offset.as_int());
-            eprintln!("[FRI TERMINAL] folded_positions={:?}", folded_positions);
-            eprintln!("[FRI TERMINAL] remainder_coeffs ({}): {:?}", 
-                proof_data.fri_remainder_coeffs.len(),
-                proof_data.fri_remainder_coeffs.iter().map(|c| c.as_int()).collect::<Vec<_>>());
-            
-            // Compute offset^(2^num_layers) for the terminal domain
-            // After k folds, the coset offset becomes offset^(2^k)
-            let mut offset_power = proof_data.domain_offset;
-            for _ in 0..num_layers {
-                offset_power = offset_power * offset_power;
-            }
-            eprintln!("[FRI TERMINAL] offset^(2^{})={} (orig offset={})", 
-                num_layers, offset_power.as_int(), proof_data.domain_offset.as_int());
-            
-            // Debug: try with REVERSED coefficients (low->high with Horner)
-            // If coeffs are [c0, c1, c2, ...] in low-to-high order, 
-            // Horner expects high-to-low, so we should reverse
-            let reversed_coeffs: Vec<BaseElement> = proof_data.fri_remainder_coeffs.iter().rev().copied().collect();
-            eprintln!("[FRI TERMINAL] Trying REVERSED coeffs with offset * g^pos:");
-            for (i, &final_val) in final_folded_values.iter().enumerate() {
-                let pos = folded_positions.get(i).copied().unwrap_or(0);
-                let x = proof_data.domain_offset * g_terminal.exp(pos as u64);
-                let eval = evaluate_polynomial(&reversed_coeffs, x);
-                eprintln!("  Query {}: pos={}, x={}, final={}, P(x)={}, match={}", 
-                    i, pos, x.as_int(), 
-                    final_val.as_int(), eval.as_int(), final_val == eval);
-            }
-            
             for (i, &final_val) in final_folded_values.iter().enumerate() {
                 // Use the position tracked through all FRI layer folds
                 let terminal_pos = folded_positions.get(i).copied().unwrap_or(0);
@@ -637,31 +591,11 @@ pub fn append_proof_verification(
                 // Compute x_terminal = offset * g_terminal^terminal_pos
                 let x_terminal = proof_data.domain_offset * g_terminal.exp(terminal_pos as u64);
                 
-                
                 // Evaluate remainder polynomial at x_terminal
-                // Try both orderings to debug
-                let expected_high_to_low = evaluate_polynomial(&proof_data.fri_remainder_coeffs, x_terminal);
-                
-                // Also try low-to-high order: P(x) = c[0] + c[1]*x + c[2]*x^2 + ...
-                let mut expected_low_to_high = BaseElement::ZERO;
-                let mut x_power = BaseElement::ONE;
-                for &coeff in &proof_data.fri_remainder_coeffs {
-                    expected_low_to_high = expected_low_to_high + coeff * x_power;
-                    x_power = x_power * x_terminal;
-                }
-                
-                let expected = expected_high_to_low;
-                
-                let diff = final_val - expected;
-                eprintln!("[FRI TERMINAL] Query {}: pos={}, x_terminal={}", i, terminal_pos, x_terminal.as_int());
-                eprintln!("  final={}, exp_h2l={}, exp_l2h={}", 
-                    final_val.as_int(), expected_high_to_low.as_int(), expected_low_to_high.as_int());
-                eprintln!("  match_h2l={}, match_l2h={}", 
-                    final_val == expected_high_to_low, final_val == expected_low_to_high);
+                let expected = evaluate_polynomial(&proof_data.fri_remainder_coeffs, x_terminal);
                 
                 let terminal_ok = builder.verify_fri_terminal(final_val, expected);
                 if !terminal_ok {
-                    eprintln!("[FRI TERMINAL] FAIL: Query {} diff={}", i, diff.as_int());
                     all_valid = false;
                 }
             }
@@ -676,8 +610,6 @@ pub fn append_proof_verification(
         &proof_data.fri_commitments,
     );
 
-    eprintln!("[VERIFICATION] Final all_valid={}", all_valid);
-    
     VerificationResult {
         valid: all_valid,
         statement_hash,
@@ -735,7 +667,7 @@ fn compute_statement_hash(
 /// - t1_num = Σ(T(x)-T(z))*γ for trace + Σ(C(x)-C(z))*γ for comp
 /// - t2_num = Σ(T(x)-T(z*g))*γ for trace + Σ(C(x)-C(z*g))*γ for comp
 /// 
-/// CRITICAL: Same gamma is used for BOTH z and z*g terms for each column!
+/// Same gamma is used for BOTH z and z*g terms for each column!
 /// Coefficient layout: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
 fn compute_deep_value(
     x: BaseElement,
@@ -860,7 +792,7 @@ pub struct ParsedProof {
     pub ood_comp_current: Vec<BaseElement>,  // C(z)
     pub ood_comp_next: Vec<BaseElement>,     // C(z*g) - needed for DEEP composition!
 
-    // OOD verification parameters (CRITICAL for security!)
+    // OOD verification parameters
     /// OOD challenge point z (derived from Fiat-Shamir)
     pub z: BaseElement,
     /// Trace domain generator g
@@ -875,7 +807,7 @@ pub struct ParsedProof {
     pub comp_queries: Vec<QueryData>,
     pub fri_layers: Vec<FriLayerData>,
 
-    // FRI verification data (CRITICAL for faithful verification!)
+    // FRI verification data
     /// FRI remainder polynomial coefficients (empty for Constant terminal)
     pub fri_remainder_coeffs: Vec<BaseElement>,
     /// Whether FRI uses constant terminal (all values equal) vs polynomial

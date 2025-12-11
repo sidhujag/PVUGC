@@ -154,9 +154,7 @@ impl RecursiveVerifier {
             parsed.num_queries, 
             parsed.num_fri_layers,
         );
-        eprintln!("[PUB_INPUTS] num_queries={}, num_fri_layers={}, expected_checkpoints={}",
-            parsed.num_queries, parsed.num_fri_layers, expected_checkpoints);
-        
+
         VerifierPublicInputs {
             statement_hash: compute_statement_hash_from_parsed(&parsed),
             trace_commitment: parsed.trace_commitment,

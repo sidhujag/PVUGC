@@ -507,11 +507,9 @@ pub fn evaluate_child_constraints(
     match child_type {
         ChildAirType::VerifierAir => evaluate_verifier_constraints(trace_current, trace_next),
         ChildAirType::Generic { formula, circuit_hash } => {
-            // Verify formula hash matches expected (SECURITY CRITICAL)
+            // Verify formula hash matches expected
             if !verify_formula_hash(formula, circuit_hash) {
                 // Hash mismatch - return non-zero constraints to cause verification failure
-                eprintln!("[SECURITY] Formula hash mismatch! Expected {:?}, got {:?}", 
-                    circuit_hash, formula.compute_hash());
                 return vec![BaseElement::ONE; formula.constraints.len()];
             }
             // Evaluate using generic interpreter

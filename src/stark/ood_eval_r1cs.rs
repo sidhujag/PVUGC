@@ -91,12 +91,8 @@ pub fn verify_ood_equation_in_circuit(
     // =========================================================================
     // STEP 3: Compute transition_sum = Σ α_i * c_i(z)
     // =========================================================================
-    eprintln!("[OOD DEBUG] Number of constraints: {}, Number of coeffs: {}", constraints.len(), constraint_coeffs.len());
     let mut transition_sum = zero.clone();
     for (i, constraint) in constraints.iter().enumerate() {
-        if let Ok(c_val) = constraint.0.value() {
-            eprintln!("[OOD DEBUG] Constraint {}: {:?}", i, c_val);
-        }
         let coeff = GlVar(constraint_coeffs[i].clone());
         let weighted = gl_mul_light(cs.clone(), &coeff, constraint)?;
         transition_sum = gl_add_light(cs.clone(), &transition_sum, &weighted)?;
@@ -140,11 +136,16 @@ pub fn verify_ood_equation_in_circuit(
     let aux3_init_term = gl_mul_light(cs.clone(), &beta_aux3_init, val_26)?;
     initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux3_init_term)?;
     
-    // Final aux[3] = 1 (column 26) - coeff index 32
+    // Final aux[3] = expected_checkpoint_count (column 26) - coeff index 32
+    // Get expected checkpoint count from public inputs (last element)
+    // This is correct even for Verifying Aggregators that verify multiple child proofs
+    let expected_checkpoints = stark_pub_inputs.last().copied().unwrap_or(0);
+    let expected_checkpoints_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_checkpoints)));
+    
     let final_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
     let beta_final = GlVar(constraint_coeffs[final_coeff_idx].clone());
-    let val_minus_1 = gl_sub_light(cs.clone(), val_26, &one)?;
-    let final_term = gl_mul_light(cs.clone(), &beta_final, &val_minus_1)?;
+    let val_minus_expected = gl_sub_light(cs.clone(), val_26, &expected_checkpoints_gl)?;
+    let final_term = gl_mul_light(cs.clone(), &beta_final, &val_minus_expected)?;
     
     // =========================================================================
     // STEP 6: Verify OOD equation (avoiding division by multiplying through)
@@ -187,13 +188,6 @@ pub fn verify_ood_equation_in_circuit(
     let rhs_temp1 = gl_mul_light(cs.clone(), &c_combined, &zerofier_num)?;
     let rhs_temp2 = gl_mul_light(cs.clone(), &rhs_temp1, &z_minus_1)?;
     let rhs = gl_mul_light(cs.clone(), &rhs_temp2, &exemption)?;
-    
-    // DEBUG: Print OOD equation values
-    if let (Ok(lhs_val), Ok(rhs_val)) = (lhs.0.value(), rhs.0.value()) {
-        eprintln!("[OOD DEBUG] LHS: {:?}", lhs_val);
-        eprintln!("[OOD DEBUG] RHS: {:?}", rhs_val);
-        eprintln!("[OOD DEBUG] LHS == RHS: {}", lhs_val == rhs_val);
-    }
     
     enforce_gl_eq(&lhs.0, &rhs.0)?;
     
@@ -395,10 +389,13 @@ fn evaluate_verifier_air_constraints_gl(
     let is_root_check_temp2 = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
     let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp2, &aux_m4)?;
     
-    // TEMPORARILY DISABLED: Statement check (not adding the statement term)
-    // let is_statement_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
-    // let is_statement_check_temp2 = gl_mul_light(cs.clone(), &is_statement_check_temp, &aux_m2)?;
-    // let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
+    // Statement check for mode 4
+    // is_statement_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3)
+    // When aux[2] = 4: 4*3*2*1 = 24 (non-zero, check applies)
+    // When aux[2] = 0,1,2,3: is_statement_check = 0 (check doesn't apply)
+    let is_statement_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
+    let is_statement_check_temp2 = gl_mul_light(cs.clone(), &is_statement_check_temp, &aux_m2)?;
+    let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
     
     for i in 0..8 {
         let fri_curr = &current[FRI_START + i];
@@ -440,16 +437,15 @@ fn evaluate_verifier_air_constraints_gl(
             let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
             let root_term = gl_mul_light(cs.clone(), &deep_root, &root_constraints[i])?;
             
-            // TEMPORARILY COMMENTED OUT: Statement check (debugging)
-            // let deep_statement = gl_mul_light(cs.clone(), &op.is_deep, &is_statement_check)?;
-            // let statement_term = gl_mul_light(cs.clone(), &deep_statement, &statement_constraints[i])?;
+            // Statement hash verification for mode 4
+            let deep_statement = gl_mul_light(cs.clone(), &op.is_deep, &is_statement_check)?;
+            let statement_term = gl_mul_light(cs.clone(), &deep_statement, &statement_constraints[i])?;
             
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             
-            // TEMPORARILY SIMPLIFIED: Only root check, no statement check
-            // let c1 = gl_add_light(cs.clone(), &root_term, &statement_term)?;
-            // let c = gl_add_light(cs.clone(), &c1, &copy_term)?;
-            let c = gl_add_light(cs.clone(), &root_term, &copy_term)?;
+            // Full constraint: root term + statement term + copy term
+            let c1 = gl_add_light(cs.clone(), &root_term, &statement_term)?;
+            let c = gl_add_light(cs.clone(), &c1, &copy_term)?;
             constraints.push(c);
         } else {
             // FRI columns 5, 7: copy constraint only
@@ -506,21 +502,15 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_add_light(cs.clone(), &c1, &basic_check)?;
             constraints.push(c);
         } else if i == 3 {
-            // TEMPORARILY REVERTED: Using old binary+monotonic instead of checkpoint counter
+            // Checkpoint counter
             // 
-            // NEW CHECKPOINT CONSTRAINT (commented out for debugging):
-            // let checkpoint_constraint = gl_sub_light(cs.clone(), aux_next, aux_curr)?;
-            // let c = gl_sub_light(cs.clone(), &checkpoint_constraint, &op.is_deep)?;
-            // constraints.push(c);
-            
-            // OLD: Acceptance flag: binary + monotonic
-            // binary: next * (next - 1) [enforce_binary]
-            // monotonic: curr * (1 - next)
-            let next_m1 = gl_sub_light(cs.clone(), aux_next, &one)?;
-            let binary = gl_mul_light(cs.clone(), aux_next, &next_m1)?;
-            let one_minus_next = gl_sub_light(cs.clone(), &one, aux_next)?;
-            let monotonic = gl_mul_light(cs.clone(), aux_curr, &one_minus_next)?;
-            let c = gl_add_light(cs.clone(), &binary, &monotonic)?;
+            // This counter MUST increment by exactly 1 on each DeepCompose operation.
+            // The boundary constraint then ensures the final count equals expected.
+            // This prevents attackers from skipping verification steps.
+            //
+            // Constraint: aux_next - aux_curr - is_deep = 0
+            let checkpoint_constraint = gl_sub_light(cs.clone(), aux_next, aux_curr)?;
+            let c = gl_sub_light(cs.clone(), &checkpoint_constraint, &op.is_deep)?;
             constraints.push(c);
         } else {
             // Allow any for aux[1,2]

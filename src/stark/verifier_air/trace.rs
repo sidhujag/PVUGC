@@ -82,15 +82,12 @@ impl VerifierTraceBuilder {
 
         self.row += 1;
         
-        // SECURITY: Increment checkpoint counter after DeepCompose operations
-        // TEMPORARILY DISABLED: Checkpoint counter
-        // Now using old acceptance flag behavior for debugging
-        // if op == VerifierOp::DeepCompose {
-        //     let old_count = self.aux_state[3];
-        //     self.aux_state[3] = self.aux_state[3] + BaseElement::ONE;
-        //     eprintln!("[CHECKPOINT] DeepCompose at row {}, checkpoint {} -> {}",
-        //         self.row - 1, old_count, self.aux_state[3]);
-        // }
+        // Increment checkpoint counter after DeepCompose operations.
+        // DeepCompose = 6, which means verification occurred at this step.
+        // The transition constraint will enforce: next[aux[3]] = current[aux[3]] + 1
+        if op == VerifierOp::DeepCompose {
+            self.aux_state[3] = self.aux_state[3] + BaseElement::ONE;
+        }
     }
 
     /// Initialize the sponge state
@@ -242,7 +239,7 @@ impl VerifierTraceBuilder {
         g
     }
 
-    /// Verify FRI terminal condition (CRITICAL FOR SECURITY!)
+    /// Verify FRI terminal condition
     /// 
     /// This verifies that the final folded value matches the remainder polynomial
     /// or is constant (depending on terminal mode).
@@ -281,7 +278,7 @@ impl VerifierTraceBuilder {
         diff == BaseElement::ZERO
     }
 
-    /// SECURITY CRITICAL: Verify statement hash binding
+    /// Verify statement hash binding
     /// 
     /// This verifies that the statement hash computed from the proof data
     /// matches the expected statement hash from public inputs.
@@ -295,13 +292,12 @@ impl VerifierTraceBuilder {
     /// 
     /// Returns true if current hash_state[0..3] equals expected_hash.
     /// 
-    /// IMPORTANT: Must be called AFTER absorbing all commitments into the sponge.
+    /// Must be called AFTER absorbing all commitments into the sponge.
     /// The AIR constraint will verify hash_state[0..3] == pub_inputs.statement_hash.
     pub fn verify_statement_hash(&mut self, expected_hash: [BaseElement; 4]) -> bool {
         // The current hash_state[0..3] should contain the computed statement hash
         // (result of absorbing context + all commitments + permuting)
         
-        // Check locally (for debug)
         let local_ok = self.hash_state[0] == expected_hash[0]
             && self.hash_state[1] == expected_hash[1]
             && self.hash_state[2] == expected_hash[2]
@@ -316,21 +312,10 @@ impl VerifierTraceBuilder {
         // Emit DeepCompose row - checkpoint counter increments
         self.emit_row(VerifierOp::DeepCompose);
         
-        // Debug: Always print hashes for debugging
-        eprintln!("[STATEMENT HASH] Computed: {:?}", 
-            self.hash_state[0..4].iter().map(|x| x.as_int()).collect::<Vec<_>>());
-        eprintln!("[STATEMENT HASH] Expected: {:?}", 
-            expected_hash.iter().map(|x| x.as_int()).collect::<Vec<_>>());
-        eprintln!("[STATEMENT HASH] Match: {}", local_ok);
-        
-        if !local_ok {
-            eprintln!("[TRACE] Statement hash mismatch!");
-        }
-        
         local_ok
     }
 
-    /// Verify DEEP composition value (CRITICAL FOR SECURITY!)
+    /// Verify DEEP composition value
     /// 
     /// This verifies that the DEEP evaluation at a query position is correctly
     /// computed from the trace and composition queries at that position.
@@ -493,16 +478,7 @@ impl VerifierTraceBuilder {
             pub_result,
         };
 
-        match verify_ood_constraint_equation_typed(ood_frame, &params, &child_type) {
-            Ok(()) => {
-                true
-            }
-            Err(e) => {
-                eprintln!("[TRACE] OOD verification FAILED for {:?}: {:?}", child_type, e);
-                eprintln!("[TRACE] LHS={:?}, RHS={:?}, diff={:?}", lhs, rhs, lhs - rhs);
-                false
-            }
-        }
+        verify_ood_constraint_equation_typed(ood_frame, &params, &child_type).is_ok()
     }
 
     /// Check that computed Merkle root matches expected commitment (local check only)
@@ -517,8 +493,8 @@ impl VerifierTraceBuilder {
     
     /// Verify Merkle root in AIR (enforced by transition constraints)
     /// 
-    /// CRITICAL FOR SECURITY! This emits a DeepCompose row that the AIR
-    /// constraint verifies: hash_state[0..3] == fri_state[0..3]
+    /// This emits a DeepCompose row that the AIR constraint verifies:
+    /// hash_state[0..3] == fri_state[0..3]
     /// 
     /// The expected root is stored in fri_state, computed root is in hash_state.
     /// Mode aux[2]=0 tells the AIR to check root verification.
@@ -540,7 +516,7 @@ impl VerifierTraceBuilder {
         self.check_root(&expected_root)
     }
     
-    /// Get current hash state (for debugging)
+    /// Get current hash state
     pub fn get_hash_state(&self) -> &[BaseElement; HASH_STATE_WIDTH] {
         &self.hash_state
     }
@@ -561,7 +537,7 @@ impl VerifierTraceBuilder {
             self.hash_state[i] = BaseElement::ZERO;
         }
         
-        // CRITICAL: Set state[0] = input length for domain separation
+        // Set state[0] = input length for domain separation
         // This matches Winterfell's hash_elements behavior
         self.hash_state[0] = BaseElement::new(leaf_data.len() as u64);
         
@@ -598,7 +574,7 @@ impl VerifierTraceBuilder {
             self.permute();
         }
         
-        // CRITICAL: For hash_elements, output is from RATE portion (indices 4-7)
+        // For hash_elements, output is from RATE portion (indices 4-7)
         // Copy to capacity (0-3) so merkle_step can use it as the current digest
         // This matches Winterfell's Rp64_256::hash_elements output location
         for i in 0..4 {
@@ -607,23 +583,16 @@ impl VerifierTraceBuilder {
     }
 
     /// Set the final acceptance flag
-    pub fn accept(&mut self, accepted: bool) {
-        // CRITICAL: Reset aux[0] to 7 before Accept row
+    pub fn accept(&mut self, _accepted: bool) {
+        // Reset aux[0] to 7 before Accept row
         // Accept encodes the same as Nop (111), and Nop constraints require aux[0] = 7
         // After Merkle steps or other ops, aux[0] may be a direction bit (0 or 1)
         self.aux_state[0] = BaseElement::new(7);
         
-        // TEMPORARILY RESTORED: Set aux[3] = 1 for accepted (acceptance flag behavior)
-        // This was disabled for checkpoint counter, but reverting for debugging
-        if accepted {
-            self.aux_state[3] = BaseElement::ONE;
-        }
-        
-        if !accepted {
-            // If verification failed, we could emit an error message
-            // but the proof generation will fail due to unsatisfied constraints
-            eprintln!("[ACCEPT] Verification FAILED - proof generation will fail");
-        }
+        // NOTE: We no longer set aux_state[3] here.
+        // aux_state[3] is now the checkpoint counter, NOT the acceptance flag.
+        // The acceptance is implicit: if checkpoint count reaches expected AND
+        // all verification constraints passed, the proof is valid.
         
         self.emit_row(VerifierOp::Accept);
     }
@@ -634,11 +603,7 @@ impl VerifierTraceBuilder {
         let current_len = self.row;
         let target_len = current_len.next_power_of_two().max(8);
 
-        // DEBUG: Print checkpoint count before padding
-        eprintln!("[TRACE FINALIZE] Checkpoint count before padding: {:?}", self.aux_state[3]);
-        eprintln!("[TRACE FINALIZE] Current rows: {}, Target: {}", current_len, target_len);
-
-        // CRITICAL: Reset aux[0] to 7 for Nop padding
+        // Reset aux[0] to 7 for Nop padding
         // Nop constraints require aux[0] = 7, but previous ops may have set it differently
         self.aux_state[0] = BaseElement::new(7);
 
@@ -646,9 +611,6 @@ impl VerifierTraceBuilder {
         while self.row < target_len {
             self.emit_row(VerifierOp::Nop);
         }
-
-        // DEBUG: Print checkpoint count after padding
-        eprintln!("[TRACE FINALIZE] Checkpoint count after padding: {:?}", self.aux_state[3]);
 
         // Convert to TraceTable
         TraceTable::init(self.trace)

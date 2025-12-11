@@ -107,7 +107,7 @@ where
     let ood_trace_current: Vec<BaseElement> = trace_ood_frame.current_row().to_vec();
     let ood_trace_next: Vec<BaseElement> = trace_ood_frame.next_row().to_vec();
     let ood_comp_current: Vec<BaseElement> = comp_ood_frame.current_row().to_vec();
-    // CRITICAL: Winterfell uses ood_quotient_frame.next_row() for DEEP composition!
+    // Winterfell uses ood_quotient_frame.next_row() for DEEP composition!
     let ood_comp_next: Vec<BaseElement> = comp_ood_frame.next_row().to_vec();
 
     // ========================================================================
@@ -166,8 +166,8 @@ where
     // ========================================================================
     
     let fri_layers = parse_fri_layers_real(
-        proof,
-        num_fri_layers,
+        proof, 
+        num_fri_layers, 
         actual_num_queries,
         folding_factor,
         lde_domain_size,
@@ -209,7 +209,7 @@ where
         ood_trace_next,
         ood_comp_current,
         ood_comp_next,
-        // OOD verification parameters (CRITICAL for security!)
+        // OOD verification parameters
         z,
         g_trace,
         constraint_coeffs,
@@ -218,7 +218,7 @@ where
         trace_queries,
         comp_queries,
         fri_layers,
-        // FRI verification data (CRITICAL for faithful verification!)
+        // FRI verification data
         fri_remainder_coeffs,
         fri_terminal_is_constant,
         query_positions,
@@ -304,7 +304,7 @@ where
         public_coin.reseed(*trace_root);
     }
     
-    // Draw constraint composition coefficients (CRITICAL: these are used for OOD verification!)
+    // Draw constraint composition coefficients (these are used for OOD verification!)
     let mut constraint_coeffs = Vec::with_capacity(num_constraints + 1);
     for _ in 0..num_constraints {
         constraint_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw constraint coeff"));
@@ -320,7 +320,7 @@ where
     let ood_evals = merge_ood_evaluations(trace_ood, quotient_ood);
     public_coin.reseed(Hasher::hash_elements(&ood_evals));
 
-    // Draw DEEP composition coefficients (CRITICAL: collect these for verification!)
+    // Draw DEEP composition coefficients (collect these for verification!)
     // For LINEAR batching (Winterfell's default): one coefficient per column
     // Same coefficient is used for both z and z*g terms in DEEP composition
     // Layout: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
@@ -516,10 +516,7 @@ fn extract_all_merkle_paths_from_batch<H: ElementHasher>(
     
     // Use Winterfell's into_openings to decompress the batch proof
     let openings = batch_proof.into_openings(leaves, query_positions)
-        .unwrap_or_else(|e| {
-            eprintln!("DEBUG: into_openings failed: {:?}", e);
-            vec![]
-        });
+        .unwrap_or_else(|_| vec![]);
     
     let mut paths = Vec::with_capacity(openings.len());
     
@@ -582,7 +579,7 @@ fn parse_fri_layers_real(
     //   - Missing query_vals → f_x=0, f_neg_x=0 → Merkle verification fails
     // 
     // We still check lengths here to fail fast with clear errors rather than panicking later.
-    
+
     for layer_idx in 0..num_layers {
         // Note: commitments are accessed via ParsedProof.fri_commitments[layer_idx]
         // to avoid duplication (matches R1CS pattern)
@@ -590,19 +587,13 @@ fn parse_fri_layers_real(
         // FRI beta for this layer from Fiat-Shamir
         // If missing, use placeholder - AIR constraints will reject invalid folding
         let beta = fri_betas.get(layer_idx).copied()
-            .unwrap_or_else(|| {
-                eprintln!("[PARSER WARNING] Missing fri_beta for layer {} - proof will fail verification", layer_idx);
-                BaseElement::ZERO
-            });
+            .unwrap_or(BaseElement::ZERO);
 
         // Get the query values for this layer
         // If missing, empty vec leads to zero values - AIR Merkle constraints will reject
         let empty_vec = Vec::new();
         let query_vals: &Vec<BaseElement> = layer_queries.get(layer_idx)
-            .unwrap_or_else(|| {
-                eprintln!("[PARSER WARNING] Missing layer_queries for layer {} - proof will fail verification", layer_idx);
-                &empty_vec
-            });
+            .unwrap_or(&empty_vec);
 
         // Fold positions for this layer (Merkle tree is built on folded domain)
         let folded_domain_size = current_domain_size / folding_factor;
@@ -610,7 +601,7 @@ fn parse_fri_layers_real(
             .iter()
             .map(|&p| p % folded_domain_size)
             .collect();
-        
+
         // Deduplicate folded positions for Merkle path extraction
         // NOTE: Do NOT sort! Must preserve insertion order to match query_vals from Winterfell.
         // Use HashSet to deduplicate while preserving order.
@@ -646,7 +637,7 @@ fn parse_fri_layers_real(
         } else {
             vec![MerklePath::new(); unique_folded.len()]
         };
-        
+
         // Build per-query FRI data
         // For layer i, positions and x values are in current_domain_size BEFORE folding
         let mut layer_query_data = Vec::with_capacity(current_positions.len());
@@ -667,7 +658,7 @@ fn parse_fri_layers_real(
             } else {
                 (BaseElement::ZERO, BaseElement::ZERO)
             };
-            
+
             // Domain element x for this position - use CURRENT domain size (before folding)
             let x = compute_domain_element(pos, current_domain_size);
             

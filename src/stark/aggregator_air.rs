@@ -311,7 +311,7 @@ impl ChildStatementHash {
         let mut h2 = BaseElement::ZERO;
         let mut h3 = BaseElement::ZERO;
         
-        // CRITICAL: Include program_hash FIRST to bind circuit identity
+        // Include program_hash FIRST to bind circuit identity
         // This prevents an attacker from substituting a trivial AIR
         for (i, &elem) in self.program_hash.iter().enumerate() {
             match i % 4 {
@@ -448,7 +448,7 @@ impl Air for AggregatorAir {
 
     /// Evaluate transition constraints
     ///
-    /// CRITICAL: These constraints MUST match what Groth16 expects!
+    /// These constraints MUST match what Groth16 expects!
     /// Two constraints:
     ///   constraint[0] = next[0] - (current[0]^3 + current[1])
     ///   constraint[1] = next[1] - current[0]
@@ -690,7 +690,7 @@ pub fn generate_aggregator_proof_multi(
 // ============================================================================
 
 use super::verifier_air::{
-    append_proof_verification, VerificationResult,
+    append_proof_verification, append_proof_verification_with_options, VerificationResult,
     prover::ParsedProof,
     trace::VerifierTraceBuilder,
 };
@@ -708,7 +708,7 @@ use super::verifier_air::{
 pub fn build_verifying_aggregator_trace(
     child0_proof: &ParsedProof,
     child1_proof: &ParsedProof,
-) -> (TraceTable<BaseElement>, VerificationResult, VerificationResult) {
+) -> (TraceTable<BaseElement>, VerificationResult, VerificationResult, [BaseElement; 4]) {
     // Estimate total trace length (2 proofs + binding rows)
     let child0_len = estimate_verification_trace_length(child0_proof);
     let child1_len = estimate_verification_trace_length(child1_proof);
@@ -722,25 +722,36 @@ pub fn build_verifying_aggregator_trace(
     use super::verifier_air::ood_eval::ChildAirType;
     let child_type = ChildAirType::generic_vdf();
     
-    // === Phase 1: Verify child 0 ===
-    let result0 = append_proof_verification(&mut builder, child0_proof, child_type.clone());
+    // === Phase 1: Verify child 0 (skip per-child statement hash verification) ===
+    // We skip the statement hash check here because pub_inputs.statement_hash
+    // will be the COMBINED hash, not child0's individual hash.
+    let result0 = append_proof_verification_with_options(
+        &mut builder, child0_proof, child_type.clone(), false
+    );
     
-    // === Phase 2: Verify child 1 ===
-    let result1 = append_proof_verification(&mut builder, child1_proof, child_type);
+    // === Phase 2: Verify child 1 (skip per-child statement hash verification) ===
+    let result1 = append_proof_verification_with_options(
+        &mut builder, child1_proof, child_type, false
+    );
     
     // === Phase 3: Bind both statement hashes ===
     // Absorb both statement hashes to create combined binding
+    // This is the ONLY statement hash verification for this aggregator
     let mut combined = [BaseElement::ZERO; 8];
     combined[0..4].copy_from_slice(&result0.statement_hash);
     combined[4..8].copy_from_slice(&result1.statement_hash);
     builder.absorb(&combined);
     builder.permute();
-    let _combined_hash = builder.squeeze();
+    let combined_hash = builder.squeeze();
+    
+    // Verify the combined statement hash (this is the binding to pub_inputs.statement_hash)
+    let _statement_ok = builder.verify_statement_hash(combined_hash);
     
     // Final acceptance
     builder.accept(true);
     
-    (builder.finalize(), result0, result1)
+    // Return the combined hash so the caller can use it for pub_inputs
+    (builder.finalize(), result0, result1, combined_hash)
 }
 
 /// Estimate trace length for verifying a single proof
@@ -807,24 +818,25 @@ pub fn generate_verifying_aggregator_proof(
     options: ProofOptions,
 ) -> Result<(Proof, VerifierPublicInputs, TraceTable<BaseElement>), ProverError> {
     // Build the verification trace (27 columns)
-    let (trace, result0, result1) = build_verifying_aggregator_trace(child0_proof, child1_proof);
+    let (trace, result0, result1, combined_hash) = build_verifying_aggregator_trace(child0_proof, child1_proof);
     
     // Check both children verified successfully
     // If verification failed, the trace won't satisfy the acceptance flag boundary assertion
     assert!(result0.valid, "Child 0 verification failed");
     assert!(result1.valid, "Child 1 verification failed");
     
-    // Compute combined statement hash
-    let combined_hash = compute_combined_statement_hash(&result0, &result1);
-    
     // Create public inputs
     // Note: checkpoint count accounts for BOTH child proofs being verified
+    // BUT with skipped per-child statement hash verification
     let single_child_checkpoints = VerifierPublicInputs::compute_expected_checkpoints(
         child0_proof.num_queries, 
         child0_proof.num_fri_layers,
     );
-    // We verify 2 child proofs, so double the checkpoints
-    let total_checkpoints = single_child_checkpoints * 2;
+    // For 2 children with SKIPPED per-child statement hash:
+    // - Each child contributes (single_child_checkpoints - 1) checkpoints (OOD + Merkle, no statement)
+    // - Plus 1 final combined statement hash verification
+    // Total = (single - 1) * 2 + 1 = single * 2 - 1
+    let total_checkpoints = single_child_checkpoints * 2 - 1;
     
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
@@ -848,17 +860,26 @@ pub fn generate_verifying_aggregator_proof(
 /// Compute combined statement hash from two verification results
 /// 
 /// This creates a unique hash that binds both child proofs together.
+/// Uses RPO sponge to match what the trace builder computes.
 fn compute_combined_statement_hash(
     result0: &VerificationResult,
     result1: &VerificationResult,
 ) -> [BaseElement; 4] {
-    // Simple combination (in production, use proper Poseidon)
-    [
-        result0.statement_hash[0] + result1.statement_hash[0] * BaseElement::new(7),
-        result0.statement_hash[1] + result1.statement_hash[1] * BaseElement::new(11),
-        result0.statement_hash[2] + result1.statement_hash[2] * BaseElement::new(13),
-        result0.statement_hash[3] + result1.statement_hash[3] * BaseElement::new(17),
-    ]
+    use super::verifier_air::trace::VerifierTraceBuilder;
+    
+    // Use the same sponge logic as the trace builder
+    // This ensures the computed hash matches what verify_statement_hash checks
+    let mut builder = VerifierTraceBuilder::new(64);
+    
+    // Absorb both statement hashes (8 elements total)
+    let mut combined = [BaseElement::ZERO; 8];
+    combined[0..4].copy_from_slice(&result0.statement_hash);
+    combined[4..8].copy_from_slice(&result1.statement_hash);
+    builder.absorb(&combined);
+    builder.permute();
+    
+    // Squeeze to get the combined hash (matches what the trace will compute)
+    builder.squeeze()
 }
 
 // ============================================================================

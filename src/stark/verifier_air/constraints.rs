@@ -196,9 +196,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // - rhs = C(z) * zerofier_num * exemption
     //
     // These are stored in fri[6] and fri[7]. The AIR verifies: lhs = rhs
-    //
-    // This is the CRITICAL security check - without it, a malicious prover
-    // could provide arbitrary OOD evaluations that don't match the constraints.
     // ========================================================================
     
     let ood_lhs = current[FRI_START + 6]; // Pre-computed LHS
@@ -216,7 +213,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // aux[2] = 2: TERMINAL mode - verify fri[6] == fri[7] (FRI final == expected)
     // aux[2] = 3: DEEP mode - verify fri[6] == fri[7] (DEEP computed == expected)
     // aux[2] = 4: STATEMENT mode - verify hash_state[0..3] == pub_inputs.statement_hash
-    //             CRITICAL: This binds verified commitments to public inputs!
     // ========================================================================
     let aux_mode = current[AUX_START + 2];
     let one = E::ONE;
@@ -224,7 +220,7 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let three = E::from(super::BaseElement::new(3));
     let four = E::from(super::BaseElement::new(4));
     
-    // SECURITY CRITICAL: Statement hash binding constraints
+    // Statement hash binding constraints
     // When aux[2] = 4, verify hash_state matches public input statement_hash
     // This ensures the prover verified the ACTUAL commitments, not fake ones
     let statement_constraint_0 = current_hash[0] - E::from(pub_inputs.statement_hash[0]);
@@ -269,12 +265,19 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 _ => root_constraint_3,
             };
             
-            // TEMPORARILY DISABLED: Statement hash verification for mode 4
-            // Just don't add the statement term, but keep is_root_check with 4 factors
-            // let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
-            // let statement_constraint = match i { ... };
+            // Statement hash verification for mode 4
+            // When aux[2] = 4, bind hash_state to public input statement_hash
+            // is_statement_check = non-zero when aux[2] = 4 (uses product (aux[2])*(aux[2]-1)*(aux[2]-2)*(aux[2]-3))
+            let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three);
+            let statement_constraint = match i {
+                0 => statement_constraint_0,
+                1 => statement_constraint_1,
+                2 => statement_constraint_2,
+                _ => statement_constraint_3,
+            };
             
             result[idx] = op.is_deep * is_root_check * root_constraint
+                + op.is_deep * is_statement_check * statement_constraint
                 + both_not_special * copy_constraint;
         } else {
             // Columns 5, 7: copy constraint only
@@ -320,16 +323,16 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             
             result[idx] = permute_check + merkle_binary_check + basic_check;
         } else if i == 3 {
-            // TEMPORARILY REVERTED to old binary+monotonic for debugging
+            // Checkpoint counter (aux[3])
             // 
-            // NEW CHECKPOINT (commented out):
-            // let checkpoint_constraint = aux_next - aux_curr - op.is_deep;
-            // result[idx] = checkpoint_constraint;
-            
-            // OLD: Acceptance flag (binary + monotonic)
-            let binary = enforce_binary(aux_next);
-            let monotonic = aux_curr * (E::ONE - aux_next);
-            result[idx] = binary + monotonic;
+            // This counter MUST increment by exactly 1 on each DeepCompose operation.
+            // The boundary constraint then ensures the final count equals expected.
+            // This prevents attackers from skipping verification steps.
+            //
+            // Constraint: aux_next = aux_curr + is_deep
+            // Equivalently: aux_next - aux_curr - is_deep = 0
+            let checkpoint_constraint = aux_next - aux_curr - op.is_deep;
+            result[idx] = checkpoint_constraint;
         } else {
             // Aux columns 1 and 2: currently unused, allow any values
             // These could be used for additional verification state in future extensions
@@ -396,7 +399,7 @@ fn compute_round_constants_lagrange<E: FieldElement<BaseField = super::BaseEleme
 
 /// Compute the expected output of one RPO round
 /// 
-/// CRITICAL: This MUST match Winterfell's Rp64_256 exactly.
+/// This MUST match Winterfell's Rp64_256 exactly.
 /// - Forward S-box (x^7) for first 6 elements (indices 0-5)
 /// - Inverse S-box (x^{1/7}) for last 6 elements (indices 6-11)
 /// 

@@ -46,7 +46,7 @@ pub mod proof_parser;
 pub mod aggregator_integration;
 
 // Re-export common verification function for use by Aggregator
-pub use prover::{append_proof_verification, VerificationResult};
+pub use prover::{append_proof_verification, append_proof_verification_with_options, VerificationResult};
 
 #[cfg(test)]
 mod integration_test;
@@ -177,10 +177,17 @@ impl VerifierPublicInputs {
     /// - 1 OOD verification
     /// - 2 Merkle roots per query (trace + comp)
     /// - 1 DEEP verification per query
-    /// - num_fri_layers FRI Merkle verifications per query
-    /// - 1 FRI terminal verification per query
+    /// - num_fri_layers FRI Merkle verifications per query (if FRI layers exist)
+    /// - 1 DEEP verification per query (if FRI layers exist)
+    /// - 1 FRI terminal verification per query (if FRI layers exist)
     pub fn compute_expected_checkpoints(num_queries: usize, num_fri_layers: usize) -> usize {
-        2 + num_queries * (2 + 1 + num_fri_layers + 1)
+        if num_fri_layers == 0 {
+            // No FRI: statement hash + OOD + (trace + comp) Merkle per query
+            2 + num_queries * 2
+        } else {
+            // With FRI: statement hash + OOD + (trace + comp + DEEP + FRI layers + terminal) per query
+            2 + num_queries * (2 + 1 + num_fri_layers + 1)
+        }
     }
 }
 
@@ -279,9 +286,9 @@ impl Air for VerifierAir {
                 // = max(3+7, 3+1) = degree 10
                 degrees.push(TransitionConstraintDegree::new(10));
             } else if i == 3 {
-                // TEMPORARILY using old binary+monotonic: degree 2
-                // NEW checkpoint counter would be degree 3
-                degrees.push(TransitionConstraintDegree::new(2));
+                // Checkpoint counter: aux_next - aux_curr - op.is_deep
+                // op.is_deep = s2 * s1 * (1 - s0) = degree 3
+                degrees.push(TransitionConstraintDegree::new(3));
             } else {
                 // aux[1,2]: In practice these may always be 0 (no Nop→Nop transitions)
                 // Declare degree 1 to handle the zero case
@@ -289,7 +296,7 @@ impl Air for VerifierAir {
             }
         }
 
-        // 4 initial capacity zeros + 1 initial aux[3]=0 + 1 final aux[3]=1 (acceptance flag)
+        // 4 initial capacity zeros + 1 initial aux[3]=0 + 1 final aux[3]=expected_checkpoint_count
         let num_assertions = 6;
 
         let context = AirContext::new(trace_info, degrees, num_assertions, options);
@@ -322,14 +329,14 @@ impl Air for VerifierAir {
             BaseElement::ZERO, // Starts at 0
         ));
 
-        // TEMPORARILY using old acceptance flag (binary) instead of checkpoint counter
-        // Final aux[3] = 1 (accepted)
-        // NEW checkpoint counter would check: BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64)
+        // Final checkpoint count must equal expected value
+        // This ensures all verification steps were executed (not skipped).
+        // Without this, a malicious prover could skip verification and fake acceptance.
         let last_row = self.context.trace_len() - 1;
         assertions.push(Assertion::single(
-            VERIFIER_TRACE_WIDTH - 1, // aux[3] = acceptance flag (temporarily)
+            VERIFIER_TRACE_WIDTH - 1, // aux[3] = checkpoint counter
             last_row,
-            BaseElement::ONE, // Was: BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64)
+            BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64),
         ));
 
         assertions
@@ -411,11 +418,15 @@ mod tests {
         // - 2 queries * (2 Merkle roots + 1 DEEP + 3 FRI Merkle + 1 terminal) = 2 * 7 = 14
         // Total: 2 + 14 = 16
         assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 16);
-        
+
         // With 4 queries and 0 FRI layers:
         // - 1 statement hash + 1 OOD = 2
-        // - 4 queries * (2 + 1 + 0 + 1) = 4 * 4 = 16
-        // Total: 18
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 18);
+        // - 4 queries * 2 (trace + comp Merkle only, no DEEP/terminal) = 8
+        // Total: 10
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 10);
+        
+        // With 2 queries and 0 FRI layers:
+        // - 2 + 2 * 2 = 6
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 0), 6);
     }
 }
