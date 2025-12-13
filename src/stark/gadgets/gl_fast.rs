@@ -194,7 +194,8 @@ pub fn gl_mul(
 pub fn gl_inv(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
 
-    let inv_val = gl_inv(fr_to_gl_u64(v.0.value().unwrap_or_default()));
+    let v_fr = v.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+    let inv_val = gl_inv(fr_to_gl_u64(v_fr));
     let (inv_fp, _) = alloc_u64(cs.clone(), Some(inv_val))?;
     let inv = GlVar(inv_fp);
 
@@ -343,7 +344,8 @@ pub fn gl_inv_light(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
 
     // Witness the inverse
-    let inv_val = gl_inv(fr_to_gl_u64(v.0.value().unwrap_or_default()));
+    let v_fr = v.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+    let inv_val = gl_inv(fr_to_gl_u64(v_fr));
     let inv = GlVar(FpVar::new_witness(cs.clone(), || {
         Ok(InnerFr::from(inv_val as u128))
     })?);

@@ -110,7 +110,8 @@ fn apply_inv_sbox_light(
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv_sbox};
 
     // Witness the inverse
-    let y_val = fr_to_gl_u64(y.0.value().unwrap_or_default());
+    let y_fr = y.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+    let y_val = fr_to_gl_u64(y_fr);
     let x_val = gl_inv_sbox(y_val);
     let x = GlVar(FpVar::new_witness(cs.clone(), || {
         Ok(InnerFr::from(x_val as u128))
@@ -220,7 +221,8 @@ pub fn canonicalize_to_bytes(
     for gl_val in gl_values {
         // Witness the canonical u64 value
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
+        let fr = gl_val.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+        let canonical_u64 = fr_to_gl_u64(fr);
 
         // Allocate with range check to ensure < 2^64
         let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
@@ -246,7 +248,8 @@ pub fn canonicalize_gl_to_u64_light(
     use super::gl_range::gl_alloc_u64;
     use crate::stark::gl_u64::fr_to_gl_u64;
     use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
-    let canonical_u64 = fr_to_gl_u64(gl_val.0.value().unwrap_or_default());
+    let fr = gl_val.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+    let canonical_u64 = fr_to_gl_u64(fr);
     let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
     enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;
     Ok(u64_var)

@@ -681,8 +681,8 @@ pub fn enforce_gl_eq_with_bound(
 
     // Witness the true Euclidean quotient from concrete values (fits in 64 bits)
     let (q_plus_w, q_minus_w) = (|| -> Result<(u64, u64), SynthesisError> {
-        let l = lhs.value().unwrap_or_default();
-        let r = rhs.value().unwrap_or_default();
+        let l = lhs.value().map_err(|_| SynthesisError::AssignmentMissing)?;
+        let r = rhs.value().map_err(|_| SynthesisError::AssignmentMissing)?;
 
         let (qp, qm) = quotient_from_fr_difference(l, r);
         Ok((qp, qm))
