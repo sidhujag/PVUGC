@@ -37,27 +37,6 @@ fn fp_p() -> FpVar<InnerFr> {
     FpVar::constant(InnerFr::from(P_U64 as u128))
 }
 
-/// Allocate u32 as 4 bytes (enforces < 2^32)
-#[allow(dead_code)]
-fn alloc_u32(
-    cs: ConstraintSystemRef<InnerFr>,
-    hint: Option<u32>,
-) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>; 4]), SynthesisError> {
-    let w = hint.unwrap_or(0);
-    let bytes: [UInt8<InnerFr>; 4] = core::array::from_fn(|i| {
-        UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap()
-    });
-
-    // Manual pack
-    let mut v = FpVar::constant(InnerFr::from(0u64));
-    let mut pow = FpVar::constant(InnerFr::from(1u64));
-    for byte in &bytes {
-        v = &v + &(&byte.to_fp()? * &pow);
-        pow = &pow * &FpVar::constant(InnerFr::from(256u64));
-    }
-    Ok((v, bytes))
-}
-
 /// Allocate u64 as 8 bytes
 fn alloc_u64(
     cs: ConstraintSystemRef<InnerFr>,
@@ -78,35 +57,20 @@ fn alloc_u64(
     Ok((v, bytes))
 }
 
-/// Canonicalize: r = r64 - [r64>=p]*p
-#[allow(dead_code)]
-fn canon_u64(
-    cs: ConstraintSystemRef<InnerFr>,
-    r64: &FpVar<InnerFr>,
-) -> Result<FpVar<InnerFr>, SynthesisError> {
-    // Compute hints from r64's value - extract as u64 without GL reduction
-    // The Fr value represents a u64 that might be >= p
-    let val = {
-        let fr = r64.value()?;
-        // Extract the low 64 bits of the Fr value
-        // This gives us the wrapped u64 value, which might be >= p
-        let bytes = fr.into_bigint().to_bytes_le();
-        let mut val = 0u64;
-        for (i, &b) in bytes.iter().enumerate().take(8) {
-            val |= (b as u64) << (i * 8);
-        }
-        val
-    };
-    let (lo32, _) = alloc_u32(cs.clone(), Some((val & 0xFFFF_FFFF) as u32))?;
-    let (hi32, _) = alloc_u32(cs.clone(), Some((val >> 32) as u32))?;
-    let two32 = FpVar::constant(InnerFr::from(1u128 << 32));
-    (lo32.clone() + hi32.clone() * two32).enforce_equal(r64)?;
-    let max32 = FpVar::constant(InnerFr::from(u32::MAX as u128));
-    let hi_eq_max = hi32.is_eq(&max32)?;
-    let lo_is_zero = lo32.is_eq(&FpVar::zero())?;
-    let ge = &hi_eq_max & &(!lo_is_zero);
-    let p = FpVar::constant(InnerFr::from(P_U64 as u128));
-    Ok(r64.clone() - FpVar::conditionally_select(&ge, &p, &FpVar::zero())?)
+/// Pack a UInt64 gadget into an `FpVar` by bit decomposition.
+fn u64_var_to_fp(cs: ConstraintSystemRef<InnerFr>, u: &UInt64<InnerFr>) -> Result<FpVar<InnerFr>, SynthesisError> {
+    let bits = u.to_bits_le()?;
+    let one = FpVar::constant(InnerFr::from(1u64));
+    let zero = FpVar::constant(InnerFr::from(0u64));
+    if bits.is_empty() {
+        return Ok(FpVar::constant(InnerFr::from(0u64)));
+    }
+    let mut acc = FpVar::conditionally_select(&bits[0], &one, &zero)?;
+    for (i, b) in bits.iter().enumerate().skip(1) {
+        let bit_fp = FpVar::conditionally_select(b, &one, &zero)?;
+        acc += bit_fp * FpVar::constant(InnerFr::from(1u64 << i));
+    }
+    Ok(acc)
 }
 
 /// GL add: a + b = r + s*p, s ∈ {0,1}
@@ -118,8 +82,8 @@ pub fn gl_add(
     let sum = &a.0 + &b.0;
     let s = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok((av as u128 + bv as u128) >= P_U64 as u128)
     })?;
     let p = FpVar::constant(InnerFr::from(P_U64 as u128));
@@ -136,8 +100,8 @@ pub fn gl_sub(
     let diff = &a.0 - &b.0;
     let t = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(av < bv)
     })?;
     let p = FpVar::constant(InnerFr::from(P_U64 as u128));
@@ -151,40 +115,34 @@ pub fn gl_mul(
     a: &GlVar,
     b: &GlVar,
 ) -> Result<GlVar, SynthesisError> {
-    // Compute the correct GL multiplication result
-    let result_hint = {
-        use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
-        gl_mul(av, bv)
-    };
+    use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul as gl_mul_u64};
+    use super::gl_range::enforce_lt_p_gl;
 
-    // Allocate the result (already range-checked to 64 bits)
-    let (result_fp, _) = alloc_u64(cs.clone(), Some(result_hint))?;
-    let result = GlVar(result_fp);
+    // Witness canonical result in u64, computed inside the witness closure so CRS setup works.
+    let result_u = UInt64::new_witness(cs.clone(), || {
+        // During Groth16 CRS setup, witness values are not available; treat missing as 0.
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        Ok(gl_mul_u64(av, bv))
+    })?;
+    enforce_lt_p_gl(&result_u)?;
+    let result_fp = u64_var_to_fp(cs.clone(), &result_u)?;
+    let result = GlVar(result_fp.clone());
 
-    // The key insight: a * b = result + k * p for some integer k
-    // We need to find and witness k, then verify the equation
-
-    // Compute k from the witness values
-    let k_hint = {
-        use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+    // Witness k such that: a*b = result + k*p (in the outer field).
+    let k_u = UInt64::new_witness(cs.clone(), || {
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         let prod_u128 = (av as u128) * (bv as u128);
-        let result_u128 = result_hint as u128;
-        // k = (a*b - result) / p
-        let k_u128 = (prod_u128 - result_u128) / (P_U64 as u128);
-        k_u128 as u64
-    };
-
-    // Allocate k (for a,b < p, we have k < p)
-    let (k_fp, _) = alloc_u64(cs.clone(), Some(k_hint))?;
+        let res_u128 = gl_mul_u64(av, bv) as u128;
+        Ok(((prod_u128 - res_u128) / (P_U64 as u128)) as u64)
+    })?;
+    let k_fp = u64_var_to_fp(cs.clone(), &k_u)?;
 
     // Verify: a * b == result + k * p
     let p = FpVar::constant(InnerFr::from(P_U64 as u128));
     let prod_fr = &a.0 * &b.0;
-    let right = &result.0 + &(&k_fp * &p);
+    let right = &result_fp + &(&k_fp * &p);
     prod_fr.enforce_equal(&right)?;
 
     Ok(result)
@@ -193,10 +151,14 @@ pub fn gl_mul(
 /// GL inversion
 pub fn gl_inv(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
+    use super::gl_range::enforce_lt_p_gl;
 
-    let v_fr = v.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-    let inv_val = gl_inv(fr_to_gl_u64(v_fr));
-    let (inv_fp, _) = alloc_u64(cs.clone(), Some(inv_val))?;
+    let inv_u = UInt64::new_witness(cs.clone(), || {
+        let v_fr = v.0.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        Ok(gl_inv(fr_to_gl_u64(v_fr)))
+    })?;
+    enforce_lt_p_gl(&inv_u)?;
+    let inv_fp = u64_var_to_fp(cs.clone(), &inv_u)?;
     let inv = GlVar(inv_fp);
 
     // Enforce: v * inv = 1 (gl_mul returns canonical GL, so plain equality works)
@@ -222,16 +184,16 @@ pub fn gl_add_light(
     // Witness the result (may not be canonical)
     let r = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::{fr_to_gl_u64, gl_add};
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(InnerFr::from(gl_add(av, bv) as u128))
     })?;
 
     // Witness quotient s ∈ {0,1}
     let s = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok((av as u128 + bv as u128) >= P_U64 as u128)
     })?;
 
@@ -261,16 +223,16 @@ pub fn gl_sub_light(
     // Witness the result
     let r = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::{fr_to_gl_u64, gl_sub};
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(InnerFr::from(gl_sub(av, bv) as u128))
     })?;
 
     // Witness quotient t ∈ {0,1}
     let t = Boolean::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(av < bv)
     })?;
 
@@ -290,16 +252,16 @@ pub fn gl_mul_light(
     // Witness the GL-reduced result
     let r = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(InnerFr::from(gl_mul(av, bv) as u128))
     })?;
 
     // Witness quotient k
     let k = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
-        let bv = fr_to_gl_u64(b.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
+        let bv = fr_to_gl_u64(b.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         let prod = (av as u128) * (bv as u128);
         let res = crate::stark::gl_u64::gl_mul(av, bv) as u128;
         Ok(InnerFr::from((prod - res) / P_U64 as u128))
@@ -320,14 +282,14 @@ pub fn gl_mul_const_light(
     // Witness the GL-reduced result
     let r = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::{fr_to_gl_u64, gl_mul};
-        let av = fr_to_gl_u64(a.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         Ok(InnerFr::from(gl_mul(av, c) as u128))
     })?;
 
     // Witness quotient k for congruence check
     let k = FpVar::new_witness(cs.clone(), || {
         use crate::stark::gl_u64::fr_to_gl_u64;
-        let av = fr_to_gl_u64(a.0.value()?);
+        let av = fr_to_gl_u64(a.0.value().unwrap_or_else(|_| InnerFr::from(0u64)));
         let prod = (av as u128) * (c as u128);
         let res = crate::stark::gl_u64::gl_mul(av, c) as u128;
         Ok(InnerFr::from((prod - res) / P_U64 as u128))
@@ -343,10 +305,11 @@ pub fn gl_mul_const_light(
 pub fn gl_inv_light(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv};
 
-    // Witness the inverse
-    let v_fr = v.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-    let inv_val = gl_inv(fr_to_gl_u64(v_fr));
+    // Witness the inverse (compute inside witness closure so CRS setup works).
     let inv = GlVar(FpVar::new_witness(cs.clone(), || {
+        // During setup, treat missing values as 0.
+        let v_fr = v.0.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        let inv_val = gl_inv(fr_to_gl_u64(v_fr));
         Ok(InnerFr::from(inv_val as u128))
     })?);
 

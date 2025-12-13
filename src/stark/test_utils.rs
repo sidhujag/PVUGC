@@ -375,7 +375,7 @@ fn prove_verifier_air_over_child(
     verifier_options: ProofOptions,
 ) -> (Proof, VerifierPublicInputs) {
     // Build the verifier trace first, then derive the expected counters from its final row.
-    let trace = VerifierProver::new(verifier_options.clone()).build_verification_trace_typed(child, child_type);
+    let trace = VerifierProver::new(verifier_options.clone()).build_verification_trace(child, child_type);
     let last = trace.length() - 1;
     let expected_mode_counter = trace.get(24, last).as_int() as usize;
     let expected_checkpoint_count = trace.get(26, last).as_int() as usize;

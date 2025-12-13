@@ -23,6 +23,7 @@ use super::{
     merkle::MerkleDigest,
     prover::{ParsedProof, VerifierProver},
     proof_parser::parse_proof,
+    ood_eval::ChildAirType,
     VerifierPublicInputs,
 };
 
@@ -133,7 +134,8 @@ impl RecursiveVerifier {
         let parsed = parse_aggregator_proof(aggregator_proof, aggregator_pub_inputs);
 
         // Build the verification trace
-        self.verifier_prover.build_verification_trace(&parsed)
+        self.verifier_prover
+            .build_verification_trace(&parsed, ChildAirType::generic_aggregator_vdf())
     }
 
     /// Get the public inputs for the Verifier STARK

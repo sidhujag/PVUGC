@@ -679,14 +679,17 @@ pub fn enforce_gl_eq_with_bound(
     use ark_r1cs_std::uint64::UInt64;
     let cs = lhs.cs();
 
-    // Witness the true Euclidean quotient from concrete values (fits in 64 bits)
-    let (q_plus_w, q_minus_w) = (|| -> Result<(u64, u64), SynthesisError> {
-        let l = lhs.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-        let r = rhs.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-
-        let (qp, qm) = quotient_from_fr_difference(l, r);
-        Ok((qp, qm))
-    })()?;
+    // Witness the true Euclidean quotients from concrete values (fits in 64 bits).
+    //
+    // IMPORTANT: Groth16 CRS setup calls `generate_constraints` without witness assignments.
+    // So we must not *require* `lhs.value()` / `rhs.value()` to be present; when missing,
+    // we fall back to 0. This does not affect soundness because setup never checks
+    // satisfiability; the real witness values are used during proving.
+    let (q_plus_w, q_minus_w) = {
+        let l = lhs.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        let r = rhs.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        quotient_from_fr_difference(l, r)
+    };
 
     let q_plus = UInt64::new_witness(cs.clone(), || Ok(q_plus_w))?;
     let q_minus = UInt64::new_witness(cs.clone(), || Ok(q_minus_w))?;

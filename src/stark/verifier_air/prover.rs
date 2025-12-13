@@ -8,14 +8,14 @@ use winterfell::{
     crypto::{DefaultRandomCoin, MerkleTree},
     math::{fields::f64::BaseElement, FieldElement},
     matrix::ColMatrix,
-    Air, AuxRandElements, CompositionPoly, CompositionPolyTrace, ConstraintCompositionCoefficients,
+    AuxRandElements, CompositionPoly, CompositionPolyTrace, ConstraintCompositionCoefficients,
     DefaultConstraintCommitment, DefaultConstraintEvaluator, DefaultTraceLde, PartitionOptions,
-    Proof, ProofOptions, Prover, StarkDomain, TraceInfo, TracePolyTable, TraceTable,
+    ProofOptions, Prover, StarkDomain, TraceInfo, TracePolyTable, TraceTable,
 };
 use winter_crypto::hashers::Rp64_256;
 
 use super::{
-    merkle::{MerkleDigest, MerklePath, MerkleDirection},
+    merkle::{MerkleDigest, MerklePath},
     trace::VerifierTraceBuilder,
     VerifierAir, VerifierPublicInputs,
 };
@@ -47,26 +47,11 @@ impl VerifierProver {
         }
     }
 
-    /// Generate a verification trace for the given proof
+    /// Generate a verification trace with explicit child AIR type.
     ///
-    /// This is the core function that "runs" the verifier and records
-    /// every step as a row in the execution trace.
-    /// 
-    /// Uses the common `append_proof_verification` function which can be
-    /// reused by Aggregator AIR for verifying multiple proofs.
-    /// 
-    /// NOTE: This assumes the proof is an AggregatorAir proof (2 constraints).
-    /// For VdfAir proofs, use `build_verification_trace_typed` with the correct child type.
+    /// SECURITY: callers must specify the child AIR type being verified; we do not
+    /// "guess" or default, to avoid verifying the wrong statement with the right proof.
     pub fn build_verification_trace(
-        &self,
-        proof_data: &ParsedProof,
-    ) -> TraceTable<BaseElement> {
-        // Default to AggregatorAir (2 constraints) for backward compatibility
-        self.build_verification_trace_typed(proof_data, super::ood_eval::ChildAirType::generic_aggregator_vdf())
-    }
-    
-    /// Generate a verification trace with explicit child AIR type
-    pub fn build_verification_trace_typed(
         &self,
         proof_data: &ParsedProof,
         child_type: super::ood_eval::ChildAirType,
@@ -84,19 +69,10 @@ impl VerifierProver {
         builder.finalize()
     }
     
-    /// Generate a verification trace and return the statement hash
-    /// 
-    /// This variant returns the verification result for use in aggregation.
-    /// NOTE: This assumes the proof is an AggregatorAir proof (2 constraints).
+    /// Generate a verification trace and return the verification result with explicit child type.
+    ///
+    /// SECURITY: callers must specify the child AIR type being verified.
     pub fn build_verification_trace_with_result(
-        &self,
-        proof_data: &ParsedProof,
-    ) -> (TraceTable<BaseElement>, VerificationResult) {
-        self.build_verification_trace_with_result_typed(proof_data, super::ood_eval::ChildAirType::generic_aggregator_vdf())
-    }
-    
-    /// Generate a verification trace and return the statement hash with explicit child type
-    pub fn build_verification_trace_with_result_typed(
         &self,
         proof_data: &ParsedProof,
         child_type: super::ood_eval::ChildAirType,
@@ -454,10 +430,12 @@ pub fn append_proof_verification_with_options(
     for query in &proof_data.trace_queries {
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
-        
+        // Bind Merkle directions to the leaf index.
+        builder.set_merkle_index(query.position);
+
         // Process Merkle authentication path
         for step in &query.merkle_path.steps {
-            builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
+            builder.merkle_step_from_index(step.sibling);
         }
         
         // Verify computed root matches trace commitment
@@ -474,10 +452,11 @@ pub fn append_proof_verification_with_options(
     for query in &proof_data.comp_queries {
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
+        builder.set_merkle_index(query.position);
         
         // Process Merkle authentication path
         for step in &query.merkle_path.steps {
-            builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
+            builder.merkle_step_from_index(step.sibling);
         }
         
         // Verify computed root matches composition commitment
@@ -581,10 +560,19 @@ pub fn append_proof_verification_with_options(
             // Initialize hash state with the FRI layer values being committed
             // For folding factor 2: the leaf is (val_low, val_high) pair = (f_x, f_neg_x)
             builder.init_leaf(&[query.f_x, query.f_neg_x]);
+
+            // Merkle tree for this layer uses index u_j = pos % (domain_size/2).
+            let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
+            let u_j = if pos >= current_domain_size / 2 {
+                pos - (current_domain_size / 2)
+            } else {
+                pos
+            };
+            builder.set_merkle_index(u_j);
             
             // Verify Merkle path for this FRI layer
             for step in &query.merkle_path.steps {
-                builder.merkle_step(step.sibling, step.direction == MerkleDirection::Right);
+                builder.merkle_step_from_index(step.sibling);
             }
             
             // Verify computed root matches FRI layer commitment
@@ -1078,7 +1066,10 @@ mod tests {
         ));
 
         let proof = make_test_proof();
-        let trace = prover.build_verification_trace(&proof);
+        let trace = prover.build_verification_trace(
+            &proof,
+            crate::stark::verifier_air::ood_eval::ChildAirType::generic_aggregator_vdf(),
+        );
 
         use winterfell::Trace;
         assert!(trace.length().is_power_of_two());

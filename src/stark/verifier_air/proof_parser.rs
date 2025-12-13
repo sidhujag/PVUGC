@@ -14,7 +14,7 @@
 //! This enables true recursive STARK verification where the Verifier STARK
 //! cryptographically verifies the inner proof.
 
-use winter_crypto::{Digest, ElementHasher, Hasher as HasherTrait, RandomCoin};
+use winter_crypto::{Digest, ElementHasher, RandomCoin};
 use winterfell::{
     math::{fields::f64::BaseElement, FieldElement, StarkField, ToElements},
     Air, Proof,

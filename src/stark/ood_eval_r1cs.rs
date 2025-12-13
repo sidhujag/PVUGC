@@ -314,6 +314,8 @@ fn evaluate_verifier_air_constraints_gl(
     let candidate = apply_inv_mds_gl(cs.clone(), &next_minus_ark2)?;
     
     // --- 6. Hash state constraints (12) ---
+    //
+    // Must match `src/stark/verifier_air/constraints.rs` exactly.
     for i in 0..HASH_STATE_WIDTH {
         // For Permute: verify sbox(candidate) = mid
         // This proves that candidate = inv_sbox(mid), validating the round
@@ -323,31 +325,127 @@ fn evaluate_verifier_air_constraints_gl(
         // For Nop/Squeeze: next should equal current (copy)
         let copy_constraint = gl_sub_light(cs.clone(), &next_hash[i], &current_hash[i])?;
         
-        // For Absorb: capacity preserved, rate can change
+        // For Absorb: next_hash[0..3] == current_hash[0..3] and
+        // next_hash[4+i] == current_hash[4+i] + fri[i] for i in 0..8.
         let absorb_constraint = if i < 4 {
-            // Capacity (first 4 elements): must be preserved
             gl_sub_light(cs.clone(), &next_hash[i], &current_hash[i])?
         } else {
-            // Rate (elements 4-11): can change (allow any = 0)
-            zero.clone()
+            let j = i - 4;
+            let absorbed = &current[FRI_START + j];
+            let expected = gl_add_light(cs.clone(), &current_hash[i], absorbed)?;
+            gl_sub_light(cs.clone(), &next_hash[i], &expected)?
         };
-        
+
+        // For Init: semantics depend on aux[0] init kind in {8,9,10,11}.
+        // See `verifier_air/constraints.rs` for the exact polynomial selectors.
+        let rc = &current[AUX_START]; // aux[0]
+        let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+        let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+        let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+        let k11 = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
+
+        // init_kind_in_range = (rc-8)(rc-9)(rc-10)(rc-11)
+        let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
+        let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
+        let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+        let rc_m11 = gl_sub_light(cs.clone(), rc, &k11)?;
+        let t_range = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t_range2 = gl_mul_light(cs.clone(), &t_range, &rc_m10)?;
+        let init_kind_in_range = gl_mul_light(cs.clone(), &t_range2, &rc_m11)?;
+
+        // Lagrange basis over {8,9,10,11}:
+        // denom8  = -6, denom9 = 2, denom10 = -2, denom11 = 6
+        let inv2 = GlVar(FpGLVar::constant(InnerFr::from(9223372034707292161u64)));
+        let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
+        let neg_inv6 = GlVar(FpGLVar::constant(InnerFr::from(3074457344902430720u64))); // (-6)^(-1)
+
+        // l8 = (rc-9)(rc-10)(rc-11)/(-6)
+        let t_l8a = gl_mul_light(cs.clone(), &rc_m9, &rc_m10)?;
+        let t_l8b = gl_mul_light(cs.clone(), &t_l8a, &rc_m11)?;
+        let l8 = gl_mul_light(cs.clone(), &t_l8b, &neg_inv6)?;
+
+        // l9 = (rc-8)(rc-10)(rc-11)/2
+        let t_l9a = gl_mul_light(cs.clone(), &rc_m8, &rc_m10)?;
+        let t_l9b = gl_mul_light(cs.clone(), &t_l9a, &rc_m11)?;
+        let l9 = gl_mul_light(cs.clone(), &t_l9b, &inv2)?;
+
+        // l10 = -(rc-8)(rc-9)(rc-11)/2
+        let t_l10a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t_l10b = gl_mul_light(cs.clone(), &t_l10a, &rc_m11)?;
+        let t_l10c = gl_mul_light(cs.clone(), &t_l10b, &inv2)?;
+        let l10 = gl_sub_light(cs.clone(), &zero, &t_l10c)?;
+
+        // l11 = (rc-8)(rc-9)(rc-10)/6
+        let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
+        let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+
+        // Kind 8: reset to zeros with state[0] = fri[0].
+        let expected_reset = if i == 0 { current[FRI_START].clone() } else { zero.clone() };
+        let init_reset_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_reset)?;
+
+        // Kind 9: load capacity[0..3] from fri[0..3], zero rest.
+        let expected_load = if i < 4 { current[FRI_START + i].clone() } else { zero.clone() };
+        let init_load_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_load)?;
+
+        // Kind 10: copy digest from rate[0..3] (hash_state[4..7]) into capacity[0..3], zero rest.
+        let expected_copy = if i < 4 { current_hash[4 + i].clone() } else { zero.clone() };
+        let init_copy_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_copy)?;
+
+        // Kind 11: Merkle merge prep with len=8.
+        // dir bit is in fri[5] (0 => current left, 1 => current right).
+        let dir = current[FRI_START + 5].clone();
+        let one_minus_dir = gl_sub_light(cs.clone(), &one, &dir)?;
+        let expected_merkle = if i == 0 {
+            GlVar(FpGLVar::constant(InnerFr::from(8u64)))
+        } else if i < 4 {
+            zero.clone()
+        } else if i < 8 {
+            let j = i - 4;
+            let digest_j = current_hash[j].clone();
+            let sibling_j = current[FRI_START + j].clone();
+            let t1 = gl_mul_light(cs.clone(), &one_minus_dir, &digest_j)?;
+            let t2 = gl_mul_light(cs.clone(), &dir, &sibling_j)?;
+            gl_add_light(cs.clone(), &t1, &t2)?
+        } else {
+            let j = i - 8;
+            let digest_j = current_hash[j].clone();
+            let sibling_j = current[FRI_START + j].clone();
+            let t1 = gl_mul_light(cs.clone(), &one_minus_dir, &sibling_j)?;
+            let t2 = gl_mul_light(cs.clone(), &dir, &digest_j)?;
+            gl_add_light(cs.clone(), &t1, &t2)?
+        };
+        let init_merkle_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_merkle)?;
+
+        // init_constraint = L8*reset + L9*load + L10*copy + L11*merkle + (i==0 ? init_kind_in_range : 0)
+        let c8 = gl_mul_light(cs.clone(), &l8, &init_reset_constraint)?;
+        let c9 = gl_mul_light(cs.clone(), &l9, &init_load_constraint)?;
+        let c10 = gl_mul_light(cs.clone(), &l10, &init_copy_constraint)?;
+        let c11 = gl_mul_light(cs.clone(), &l11, &init_merkle_constraint)?;
+        let c89 = gl_add_light(cs.clone(), &c8, &c9)?;
+        let c8910 = gl_add_light(cs.clone(), &c89, &c10)?;
+        let mut init_constraint = gl_add_light(cs.clone(), &c8910, &c11)?;
+        if i == 0 {
+            init_constraint = gl_add_light(cs.clone(), &init_constraint, &init_kind_in_range)?;
+        }
+
         // Combine constraints based on operation:
-        // NOTE: Nop is padding after permute(), state may be modified after it,
-        // so we allow any transition from Nop (like Init/Merkle/etc.)
-        // constraint = is_permute * permute_constraint 
-        //            + is_squeeze * copy_constraint
-        //            + is_absorb * absorb_constraint
-        //            + (is_init + is_merkle + is_fri + is_deep + is_nop) * 0
-        let term1 = gl_mul_light(cs.clone(), &op.is_permute, &permute_constraint)?;
-        
-        // Only squeeze enforces copy (nop moved to allow_any)
-        let term2 = gl_mul_light(cs.clone(), &op.is_squeeze, &copy_constraint)?;
-        
-        let term3 = gl_mul_light(cs.clone(), &op.is_absorb, &absorb_constraint)?;
-        
-        let sum12 = gl_add_light(cs.clone(), &term1, &term2)?;
-        let constraint = gl_add_light(cs.clone(), &sum12, &term3)?;
+        // - Init: constrained by init_constraint
+        // - Merkle/Fri/Deep/Nop: copy (state preserved)
+        let term_perm = gl_mul_light(cs.clone(), &op.is_permute, &permute_constraint)?;
+        let term_sq = gl_mul_light(cs.clone(), &op.is_squeeze, &copy_constraint)?;
+        let term_abs = gl_mul_light(cs.clone(), &op.is_absorb, &absorb_constraint)?;
+        let term_init = gl_mul_light(cs.clone(), &op.is_init, &init_constraint)?;
+
+        let t_m1 = gl_add_light(cs.clone(), &op.is_merkle, &op.is_fri)?;
+        let t_m2 = gl_add_light(cs.clone(), &t_m1, &op.is_deep)?;
+        let preserve_flags = gl_add_light(cs.clone(), &t_m2, &op.is_nop)?;
+        let term_preserve = gl_mul_light(cs.clone(), &preserve_flags, &copy_constraint)?;
+
+        let s1 = gl_add_light(cs.clone(), &term_perm, &term_sq)?;
+        let s2 = gl_add_light(cs.clone(), &s1, &term_abs)?;
+        let s3 = gl_add_light(cs.clone(), &s2, &term_init)?;
+        let constraint = gl_add_light(cs.clone(), &s3, &term_preserve)?;
         
         constraints.push(constraint);
     }
@@ -362,7 +460,8 @@ fn evaluate_verifier_air_constraints_gl(
     let next_special = {
         let t1 = gl_add_light(cs.clone(), &next_op.is_merkle, &next_op.is_fri)?;
         let t2 = gl_add_light(cs.clone(), &t1, &next_op.is_deep)?;
-        gl_add_light(cs.clone(), &t2, &next_op.is_init)?
+        let t3 = gl_add_light(cs.clone(), &t2, &next_op.is_init)?;
+        gl_add_light(cs.clone(), &t3, &next_op.is_absorb)?
     };
     let one_minus_op_special = gl_sub_light(cs.clone(), &one, &op_special)?;
     let one_minus_next_special = gl_sub_light(cs.clone(), &one, &next_special)?;
@@ -483,23 +582,75 @@ fn evaluate_verifier_air_constraints_gl(
         if i == 4 {
             // FRI column 4: FRI folding result
             // During FriFold: verify folding formula is correct
-            // Column 4 only changes during FRI fold (a special op), so no copy constraint needed
-            // This ensures consistent degree regardless of trace content
-            let c = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
-            constraints.push(c);
-        } else if i == 6 {
-            // FRI column 6: EQUALITY VERIFICATION during DeepCompose
-            // When aux[2] != 0: verify fri[6] == fri[7]
-            // This covers OOD (mode 1), TERMINAL (mode 2), and DEEP (mode 3)
-            // 
-            // Constraint: op.is_deep * aux[2] * equality_constraint = 0
-            // When aux[2] = 0, constraint is 0 (satisfied, root mode uses columns 0-3)
-            // When aux[2] != 0, constraint requires equality_constraint = 0
-            let deep_aux = gl_mul_light(cs.clone(), &op.is_deep, aux_mode)?;
-            let ood_term = gl_mul_light(cs.clone(), &deep_aux, &equality_constraint)?;
+            // Also enforce copy on non-special transitions (column 4 is used as scratch elsewhere).
+            let fold_term = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
-            let c = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
-            constraints.push(c);
+            // Additionally, on Nop rows with aux_mode == 7 we bind: fri[4] == hash_state[0].
+            // is_capture = Π_{k=0..6}(aux_mode - k)
+            let a0 = aux_mode.clone();
+            let a1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
+            let a2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
+            let a3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
+            let a4 = gl_sub_light(cs.clone(), aux_mode, &four_gl)?;
+            let a5 = gl_sub_light(cs.clone(), aux_mode, &five_gl)?;
+            let a6 = gl_sub_light(cs.clone(), aux_mode, &six_gl)?;
+            let t01 = gl_mul_light(cs.clone(), &a0, &a1)?;
+            let t23 = gl_mul_light(cs.clone(), &a2, &a3)?;
+            let t45 = gl_mul_light(cs.clone(), &a4, &a5)?;
+            let t0123 = gl_mul_light(cs.clone(), &t01, &t23)?;
+            let t456 = gl_mul_light(cs.clone(), &t45, &a6)?;
+            let is_capture = gl_mul_light(cs.clone(), &t0123, &t456)?;
+
+            let capture_constraint = gl_sub_light(cs.clone(), fri_curr, &current_hash[0])?;
+            let nop_capture = gl_mul_light(cs.clone(), &op.is_nop, &is_capture)?;
+            let capture_term = gl_mul_light(cs.clone(), &nop_capture, &capture_constraint)?;
+
+            // Merkle idx update on Init kind 11: idx_cur = 2*idx_next + dir, where dir = fri[5].
+            // l11 over points {8,9,10,11} = (rc-8)(rc-9)(rc-10)/6.
+            let rc = &current[AUX_START]; // aux[0]
+            let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+            let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+            let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+            let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
+            let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
+            let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
+            let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+            let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+            let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
+            let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+
+            let dir = current[FRI_START + 5].clone();
+            let two_idx_next = gl_mul_light(cs.clone(), &two_gl, fri_next)?;
+            let rhs = gl_add_light(cs.clone(), &two_idx_next, &dir)?;
+            let idx_update_constraint = gl_sub_light(cs.clone(), fri_curr, &rhs)?;
+            let init_l11 = gl_mul_light(cs.clone(), &op.is_init, &l11)?;
+            let idx_update_term = gl_mul_light(cs.clone(), &init_l11, &idx_update_constraint)?;
+
+            // Root-mode index must be fully consumed: idx == 0 after all Merkle steps.
+            // is_root_check = Π_{k=1..6}(aux[2]-k)
+            let aux_m1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
+            let aux_m2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
+            let aux_m3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
+            let aux_m4 = gl_sub_light(cs.clone(), aux_mode, &four_gl)?;
+            let aux_m5 = gl_sub_light(cs.clone(), aux_mode, &five_gl)?;
+            let aux_m6 = gl_sub_light(cs.clone(), aux_mode, &six_gl)?;
+            let t12 = gl_mul_light(cs.clone(), &aux_m1, &aux_m2)?;
+            let t34 = gl_mul_light(cs.clone(), &aux_m3, &aux_m4)?;
+            let t56 = gl_mul_light(cs.clone(), &aux_m5, &aux_m6)?;
+            let t1234 = gl_mul_light(cs.clone(), &t12, &t34)?;
+            let is_root_check = gl_mul_light(cs.clone(), &t1234, &t56)?;
+            let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
+            let root_idx_zero = gl_mul_light(cs.clone(), &deep_root, fri_curr)?;
+
+            let fc = gl_add_light(cs.clone(), &fold_term, &copy_term)?;
+            let fcc = gl_add_light(cs.clone(), &fc, &capture_term)?;
+            let fcci = gl_add_light(cs.clone(), &fcc, &idx_update_term)?;
+            constraints.push(gl_add_light(cs.clone(), &fcci, &root_idx_zero)?);
+        } else if i == 6 {
+            // FRI column 6: equality verification on ALL DeepCompose rows.
+            let ood_term = gl_mul_light(cs.clone(), &op.is_deep, &equality_constraint)?;
+            let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
+            constraints.push(gl_add_light(cs.clone(), &ood_term, &copy_term)?);
         } else if i < 4 {
             // FRI columns 0-3: ROOT/STATEMENT/PARAMS VERIFICATION
             //
@@ -534,8 +685,33 @@ fn evaluate_verifier_air_constraints_gl(
             constraints.push(c);
         } else {
             // FRI columns 5, 7: copy constraint only
-            let c = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
-            constraints.push(c);
+            if i == 5 {
+                // For Init kind 11, enforce dir bit in fri[5] is binary.
+                let rc = &current[AUX_START];
+                let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+                let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+                let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+                let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
+                let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
+                let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
+                let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+                let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+                let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
+                let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+
+                let dir = fri_curr;
+                // enforce_binary: dir * (dir - 1)
+                let dir_m1 = gl_sub_light(cs.clone(), dir, &one)?;
+                let bin = gl_mul_light(cs.clone(), dir, &dir_m1)?;
+                let init_l11 = gl_mul_light(cs.clone(), &op.is_init, &l11)?;
+                let bin_term = gl_mul_light(cs.clone(), &init_l11, &bin)?;
+
+                let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
+                constraints.push(gl_add_light(cs.clone(), &copy_term, &bin_term)?);
+            } else {
+                let c = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
+                constraints.push(c);
+            }
         }
     }
     

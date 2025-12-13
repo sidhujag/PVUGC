@@ -11,12 +11,12 @@
 //! - Permute: RPO round transition (verified using round counter in aux[0])
 //! - Squeeze: State preserved (just reading)
 //! - Nop: State preserved (padding)
-//! - MerklePath/FriFold/DeepCompose: Special operations (allow transitions)
+//! - MerklePath/FriFold/DeepCompose: Special operations (state preserved)
 
 use winterfell::{math::FieldElement, EvaluationFrame};
 
 use super::{
-    hash_chiplet, VerifierPublicInputs, HASH_STATE_WIDTH, NUM_SELECTORS, VERIFIER_TRACE_WIDTH,
+    VerifierPublicInputs, HASH_STATE_WIDTH, NUM_SELECTORS, VERIFIER_TRACE_WIDTH,
 };
 
 // ============================================================================
@@ -42,6 +42,18 @@ pub const AUX_END: usize = VERIFIER_TRACE_WIDTH;
 
 /// Round counter index within auxiliary columns
 pub const ROUND_COUNTER: usize = AUX_START; // aux[0]
+
+// ============================================================================
+// INIT KINDS (encoded via aux[0] on Init rows)
+// ============================================================================
+//
+// NOTE: aux[0] is unconstrained on Init rows by the "round counter" constraints,
+// so we re-purpose it to disambiguate Init semantics. This avoids any "allow_any"
+// transitions and makes the hash transcript/Merkle computations sound.
+pub const INIT_KIND_RESET_WITH_LEN: u64 = 8;
+pub const INIT_KIND_LOAD_CAPACITY4: u64 = 9;
+pub const INIT_KIND_COPY_DIGEST_FROM_RATE: u64 = 10;
+pub const INIT_KIND_MERKLE_PREP_MERGE8: u64 = 11;
 
 // ============================================================================
 // CONSTRAINT EVALUATION
@@ -112,6 +124,9 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     apply_inv_mds(&next_minus_ark2, &mut candidate);
 
     // --- 6. Hash state constraints (12) ---
+    //
+    // IMPORTANT: We do NOT allow unconstrained ("allow_any") state transitions.
+    // Every op must have explicit semantics enforced by constraints.
     for i in 0..HASH_STATE_WIDTH {
         // For Permute: verify sbox(candidate) = mid
         // This proves that candidate = inv_sbox(mid), validating the round
@@ -121,24 +136,109 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         let copy_constraint = next_hash[i] - current_hash[i];
 
         // For Absorb: capacity preserved, rate can change
+        // Semantics: next_hash[0..3] == current_hash[0..3] and
+        // next_hash[4+i] == current_hash[4+i] + fri[i] for i in 0..8.
         let absorb_constraint = if i < 4 {
-            // Capacity (first 4 elements): must be preserved
             next_hash[i] - current_hash[i]
         } else {
-            // Rate (elements 4-11): can change (absorption adds input)
-            E::ZERO
+            let j = i - 4;
+            let absorbed = current[FRI_START + j];
+            next_hash[i] - (current_hash[i] + absorbed)
         };
 
-        // For Init/Merkle/FRI/Deep: allow any transition
-        let allow_any = E::ZERO;
+        // For Init: semantics depend on aux[0] "init kind".
+        // We use 4 kinds (8,9,10,11) with degree-3 Lagrange basis polynomials.
+        let rc = current[ROUND_COUNTER];
+        let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
+        let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
+        let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
+        let k11 = E::from(super::BaseElement::new(INIT_KIND_MERKLE_PREP_MERGE8));
 
-        // Combine constraints based on operation
-        // NOTE: Nop is padding after permute(), state may be modified after it
-        // so we allow any transition from Nop (like Init/Merkle/etc.)
+        // Ensure init kind is in {8,9,10,11} on Init rows:
+        // (rc-8)(rc-9)(rc-10)(rc-11) = 0
+        let init_kind_in_range = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11);
+
+        // Lagrange basis over points {8,9,10,11}:
+        // denom8  = (8-9)(8-10)(8-11)   = -6
+        // denom9  = (9-8)(9-10)(9-11)   =  2
+        // denom10 = (10-8)(10-9)(10-11) = -2
+        // denom11 = (11-8)(11-9)(11-10) =  6
+        //
+        // inv2 = (p+1)/2 for Goldilocks prime.
+        // inv6 = 6^{-1} mod p.
+        let inv2 = E::from(super::BaseElement::new(9223372034707292161u64));
+        let inv6 = E::from(super::BaseElement::new(15372286724512153601u64));
+        let neg_inv6 = E::from(super::BaseElement::new(3074457344902430720u64)); // = (-6)^{-1}
+
+        let l8 = (rc - k9) * (rc - k10) * (rc - k11) * neg_inv6;
+        let l9 = (rc - k8) * (rc - k10) * (rc - k11) * inv2;
+        let l10 = -((rc - k8) * (rc - k9) * (rc - k11) * inv2);
+        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * inv6;
+
+        // Kind 8: reset to all-zeros with state[0] = fri[0] (length/domain-sep).
+        let expected_reset = if i == 0 { current[FRI_START] } else { E::ZERO };
+        let init_reset_constraint = next_hash[i] - expected_reset;
+
+        // Kind 9: load capacity[0..3] from fri[0..3], zero out the rest.
+        let expected_load = if i < 4 { current[FRI_START + i] } else { E::ZERO };
+        let init_load_constraint = next_hash[i] - expected_load;
+
+        // Kind 10: copy digest from rate[0..3] (hash_state[4..7]) into capacity[0..3], zero out rest.
+        let expected_copy = if i < 4 { current_hash[4 + i] } else { E::ZERO };
+        let init_copy_constraint = next_hash[i] - expected_copy;
+
+        // Kind 11: prepare a Merkle merge hash_elements([left||right]) with len=8.
+        // Inputs live in the CURRENT row:
+        // - digest in current_hash[0..3]
+        // - sibling in fri[0..3]
+        // - direction bit in fri[5] (0 => current is left child; 1 => current is right child)
+        //
+        // Output (NEXT row hash state):
+        // - next_hash[0] = 8
+        // - next_hash[1..3] = 0
+        // - next_hash[4..7] = left
+        // - next_hash[8..11] = right
+        let dir = current[FRI_START + 5];
+        let one_minus_dir = E::ONE - dir;
+        let expected_merkle = if i == 0 {
+            // len = 8
+            E::from(super::BaseElement::new(8))
+        } else if i < 4 {
+            // capacity cleared
+            E::ZERO
+        } else if i < 8 {
+            // left[j] where j = i-4
+            let j = i - 4;
+            let digest_j = current_hash[j];
+            let sibling_j = current[FRI_START + j];
+            one_minus_dir * digest_j + dir * sibling_j
+        } else {
+            // right[j] where j = i-8
+            let j = i - 8;
+            let digest_j = current_hash[j];
+            let sibling_j = current[FRI_START + j];
+            one_minus_dir * sibling_j + dir * digest_j
+        };
+        let init_merkle_constraint = next_hash[i] - expected_merkle;
+
+        // Combine init constraints by kind selector.
+        // Also enforce init kind range on ALL init rows by adding the cubic constraint once (i==0).
+        let init_constraint =
+            l8 * init_reset_constraint
+                + l9 * init_load_constraint
+                + l10 * init_copy_constraint
+                + l11 * init_merkle_constraint
+                + if i == 0 { init_kind_in_range } else { E::ZERO };
+
+        // Combine constraints based on operation.
+        //
+        // - Init: explicit semantics (no unconstrained jumps)
+        // - MerklePath/FriFold/DeepCompose/Nop: state preserved (copy)
         let constraint = op.is_permute * permute_constraint
             + op.is_squeeze * copy_constraint
             + op.is_absorb * absorb_constraint
-            + (op.is_init + op.is_merkle + op.is_fri + op.is_deep + op.is_nop) * allow_any;
+            + op.is_init * init_constraint
+            + (op.is_merkle + op.is_fri + op.is_deep + op.is_nop) * copy_constraint;
 
         result[idx] = constraint;
         idx += 1;
@@ -150,7 +250,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     
     // Compute "is special" flags (each is 0 or 1 due to mutually exclusive flags)
     let op_special = op.is_merkle + op.is_fri + op.is_deep + op.is_init + op.is_absorb;
-    let next_special = next_op.is_merkle + next_op.is_fri + next_op.is_deep + next_op.is_init;
+    // IMPORTANT: include Absorb in "next special" as Absorb rows legitimately mutate fri columns.
+    let next_special = next_op.is_merkle + next_op.is_fri + next_op.is_deep + next_op.is_init + next_op.is_absorb;
     
     // Constraint should only apply when BOTH current AND next are non-special
     let both_not_special = (E::ONE - op_special) * (E::ONE - next_special);
@@ -253,17 +354,63 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         let fri_next = next[FRI_START + i];
         let copy_constraint = fri_next - fri_curr;
 
+        // Selector for Init-kind 11 (Merkle merge prep): l11 over {8,9,10,11}.
+        // We recompute it here because we need it for fri-column semantics.
+        let rc = current[ROUND_COUNTER];
+        let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
+        let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
+        let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
+        let inv6 = E::from(super::BaseElement::new(15372286724512153601u64));
+        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * inv6;
+
         if i == 4 {
             // FRI folding result verification
-            // Column 4 only changes during FRI fold (a special op), so no copy constraint needed
-            // This ensures consistent degree regardless of trace content
-            result[idx] = op.is_fri * fri_fold_constraint;
+            // Column 4 is used as scratch in multiple phases (incl. Absorb blocks),
+            // so we MUST enforce copy on non-special transitions.
+            //
+            // Additionally, on Nop rows with aux_mode == 7 we bind:
+            //   fri[4] == hash_state[0]
+            //
+            // is_capture = Π_{k=0..6}(aux_mode - k) = non-zero only when aux_mode==7
+            let is_capture = aux_mode
+                * (aux_mode - one)
+                * (aux_mode - two)
+                * (aux_mode - three)
+                * (aux_mode - four)
+                * (aux_mode - five)
+                * (aux_mode - six);
+            let capture_constraint = fri_curr - current_hash[0];
+
+            // Root-mode index must be fully consumed (idx == 0 after all Merkle steps).
+            // This forces a proper binary decomposition of the initial index via the per-step update:
+            //   idx_cur = 2*idx_next + dir.
+            // is_root_check = Π_{k=1..6}(aux[2]-k) (non-zero only when aux[2]=0).
+            let is_root_check = (aux_mode - one)
+                * (aux_mode - two)
+                * (aux_mode - three)
+                * (aux_mode - four)
+                * (aux_mode - five)
+                * (aux_mode - six);
+            let root_idx_zero = op.is_deep * is_root_check * fri_curr;
+
+            // Merkle index update (Init kind 11):
+            // - idx is in fri[4]
+            // - dir bit is in fri[5] (0/1)
+            // Enforce: idx_cur = 2*idx_next + dir.
+            let dir = current[FRI_START + 5];
+            let idx_cur = fri_curr;
+            let idx_next = fri_next;
+            let idx_update_constraint = idx_cur - (two * idx_next + dir);
+
+            result[idx] = op.is_fri * fri_fold_constraint
+                + both_not_special * copy_constraint
+                + op.is_nop * is_capture * capture_constraint
+                + op.is_init * l11 * idx_update_constraint
+                + root_idx_zero;
         } else if i == 6 {
-            // Equality verification for modes 1,2,3 (OOD/TERMINAL/DEEP)
-            // aux[2] = 0: constraint vanishes (root mode uses columns 0-3)
-            // aux[2] != 0: requires fri[6] == fri[7]
-            result[idx] = op.is_deep * aux_mode * equality_constraint 
-                + both_not_special * copy_constraint;
+            // Equality verification on ALL DeepCompose rows.
+            // Trace builder must ensure fri[6]==fri[7] also in modes 0/4/5 (set both to 0).
+            result[idx] = op.is_deep * equality_constraint + both_not_special * copy_constraint;
         } else if i < 4 {
             // Root verification for mode 0: hash_state == fri[0..3]
             // Use factors to exclude modes 4,5,6 from root check.
@@ -319,7 +466,13 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 + both_not_special * copy_constraint;
         } else {
             // Columns 5, 7: copy constraint only
-            result[idx] = both_not_special * copy_constraint;
+            if i == 5 {
+                // For Init kind 11, enforce dir bit in fri[5] is binary.
+                let dir = fri_curr;
+                result[idx] = both_not_special * copy_constraint + op.is_init * l11 * enforce_binary(dir);
+            } else {
+                result[idx] = both_not_special * copy_constraint;
+            }
         }
         idx += 1;
     }

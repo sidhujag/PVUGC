@@ -291,18 +291,23 @@ impl Air for VerifierAir {
         // the actual trace evaluation. For most FRI columns, degree 6 works.
         for i in 0..8 {
             if i == 4 {
-                // FRI folding: op.is_fri(3)*fold(2) = degree 5
-                // fri_fold_constraint has degree 2 (products like x*g, beta*f_x)
-                // No copy constraint needed since column 4 only changes during FRI fold
-                degrees.push(TransitionConstraintDegree::new(5));
+                // Column 4 participates in:
+                // - FRI folding: op.is_fri(3) * fold(2) ≈ degree 5
+                // - copy constraints on non-special transitions: both_not_special(6) * copy(1) = degree 7
+                // - capture binding on Nop rows: op.is_nop(3) * is_capture(7) * (fri4-hash0)(1) = degree 11
+                // Max = 11
+                degrees.push(TransitionConstraintDegree::new(11));
             } else if i == 6 {
-                // OOD constraint: op.is_deep(3) * aux_mode(1) * ood(1) + copy term
-                // Degree: max(3+1+1, 6+1) = 7
+                // Equality constraint on all DeepCompose rows:
+                // op.is_deep(3) * (fri[6]-fri[7])(1) = degree 4
+                // Copy term remains degree 7.
                 degrees.push(TransitionConstraintDegree::new(7));
             } else if i == 5 {
-                // Column 5: unused (fri_state[5] always 0)
-                // Constraint always evaluates to 0, declare degree 1 (minimum)
-                degrees.push(TransitionConstraintDegree::new(1));
+                // Column 5 is scratch and is copied on non-special transitions:
+                // both_not_special(6) * copy(1) = degree 7
+                // Additionally, for Init kind 11 we enforce dir bit binary:
+                // op.is_init(3) * l11(3) * binary(2) = degree 8
+                degrees.push(TransitionConstraintDegree::new(8));
             } else if i == 7 {
                 // Column 7: copy constraint only
                 // both_not_special(6) * copy(1) = degree 7

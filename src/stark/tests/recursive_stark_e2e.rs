@@ -80,7 +80,7 @@ fn test_e2e_add2_to_verifier_air_single_child() {
     // -------------------------------------------------------------------------
     let parsed = parse_proof::<Add2Air>(&app_proof, &app_result);
     let verifier = VerifierProver::new(options.clone());
-    let verification_trace = verifier.build_verification_trace_typed(&parsed, ChildAirType::generic_add2());
+    let verification_trace = verifier.build_verification_trace(&parsed, ChildAirType::generic_add2());
 
 
     // -------------------------------------------------------------------------
@@ -163,7 +163,7 @@ fn test_e2e_multiple_add2_instances_same_verifier_trace_width() {
         let (p, t) = generate_test_add2_proof_rpo_with_options(BaseElement::ZERO, steps, options.clone());
         let out = t.get(1, t.length() - 1);
         let parsed = parse_proof::<Add2Air>(&p, &out);
-        let trace = verifier.build_verification_trace_typed(&parsed, child_type.clone());
+        let trace = verifier.build_verification_trace(&parsed, child_type.clone());
         assert_eq!(trace.width(), VERIFIER_TRACE_WIDTH);
     }
 }

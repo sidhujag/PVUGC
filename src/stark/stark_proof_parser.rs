@@ -810,68 +810,6 @@ fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
     sponge.squeeze_field_elements::<InnerFr>(1)[0]
 }
 
-/// Compute statement hash binding all public data (including positions and ALL air params)
-#[allow(dead_code)]
-fn compute_statement_hash(
-    trace_roots: &[[u8; 32]],
-    comp_root: &[u8; 32],
-    fri_roots: &[[u8; 32]],
-    ood_commit: &[u8; 32],
-    pub_inputs: &[u64],
-    query_positions: &[usize],
-    air_params: &super::inner_stark_full::AirParams, // Full air_params for complete binding
-) -> InnerFr {
-    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
-    use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
-    use ark_crypto_primitives::sponge::CryptographicSponge;
-
-    let mut hasher = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
-
-    // Helper: Convert 8 LE bytes to field element
-    let bytes_to_fe = |chunk: &[u8]| -> InnerFr {
-        let mut val = 0u64;
-        for (i, &b) in chunk.iter().enumerate().take(8) {
-            val |= (b as u64) << (i * 8);
-        }
-        InnerFr::from(val)
-    };
-
-    // Absorb all commitments
-    for trace_root in trace_roots {
-        for chunk in trace_root.chunks(8) {
-            hasher.absorb(&bytes_to_fe(chunk));
-        }
-    }
-    for chunk in comp_root.chunks(8) {
-        hasher.absorb(&bytes_to_fe(chunk));
-    }
-    for fri_root in fri_roots {
-        for chunk in fri_root.chunks(8) {
-            hasher.absorb(&bytes_to_fe(chunk));
-        }
-    }
-    for chunk in ood_commit.chunks(8) {
-        hasher.absorb(&bytes_to_fe(chunk));
-    }
-
-    // Absorb public inputs
-    for pub_in in pub_inputs {
-        hasher.absorb(&InnerFr::from(*pub_in));
-    }
-
-    // Use the *same* positions commitment as the circuit
-    let pos_commit = poseidon_commit_positions_offchain(query_positions);
-    hasher.absorb(&pos_commit);
-
-    // Compute and absorb air_params hash (MUST match in-circuit computation!)
-    // This binds ALL structural params, not just an identity hash.
-    let params_hash = compute_air_params_hash(air_params);
-    hasher.absorb(&params_hash);
-
-    let hash = hasher.squeeze_field_elements::<InnerFr>(1);
-    hash[0]
-}
-
 /// Compute the arming-friendly statement hash for Groth16.
 ///
 /// Expected layout is `VerifierPublicInputs::to_elements()`:

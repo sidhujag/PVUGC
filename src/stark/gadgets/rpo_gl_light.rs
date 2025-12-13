@@ -109,11 +109,15 @@ fn apply_inv_sbox_light(
 ) -> Result<GlVar, SynthesisError> {
     use crate::stark::gl_u64::{fr_to_gl_u64, gl_inv_sbox};
 
-    // Witness the inverse
-    let y_fr = y.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-    let y_val = fr_to_gl_u64(y_fr);
-    let x_val = gl_inv_sbox(y_val);
+    // Witness the inverse.
+    //
+    // IMPORTANT: compute from `y.value()` inside the witness closure so CRS setup
+    // can run without witness assignments.
     let x = GlVar(FpVar::new_witness(cs.clone(), || {
+        // During Groth16 CRS setup, witness values are not available; treat missing as 0.
+        let y_fr = y.0.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        let y_val = fr_to_gl_u64(y_fr);
+        let x_val = gl_inv_sbox(y_val);
         Ok(InnerFr::from(x_val as u128))
     })?);
 
@@ -214,18 +218,13 @@ pub fn canonicalize_to_bytes(
     cs: ConstraintSystemRef<InnerFr>,
     gl_values: &[GlVar], // 4 GL values for 32 bytes
 ) -> Result<Vec<UInt8<InnerFr>>, SynthesisError> {
-    use super::gl_range::gl_alloc_u64;
+    use super::gl_range::gl_alloc_u64_from_fpvar;
 
     let mut bytes = Vec::with_capacity(32);
 
     for gl_val in gl_values {
-        // Witness the canonical u64 value
-        use crate::stark::gl_u64::fr_to_gl_u64;
-        let fr = gl_val.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-        let canonical_u64 = fr_to_gl_u64(fr);
-
-        // Allocate with range check to ensure < 2^64
-        let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
+        // Allocate canonical u64 (computed inside witness closure) with < p_GL range check.
+        let (u64_var, canonical_fp) = gl_alloc_u64_from_fpvar(cs.clone(), &gl_val.0)?;
 
         // Enforce: gl_val ≡ canonical_fp (mod p_GL) with BOUNDED quotient
         // Use enforce_gl_eq_with_bound(q ≤ 1) for soundness
@@ -245,12 +244,9 @@ pub fn canonicalize_gl_to_u64_light(
     cs: ConstraintSystemRef<InnerFr>,
     gl_val: &GlVar,
 ) -> Result<UInt64GLVar, SynthesisError> {
-    use super::gl_range::gl_alloc_u64;
-    use crate::stark::gl_u64::fr_to_gl_u64;
+    use super::gl_range::gl_alloc_u64_from_fpvar;
     use crate::stark::inner_stark_full::enforce_gl_eq_with_bound;
-    let fr = gl_val.0.value().map_err(|_| SynthesisError::AssignmentMissing)?;
-    let canonical_u64 = fr_to_gl_u64(fr);
-    let (u64_var, canonical_fp) = gl_alloc_u64(cs.clone(), Some(canonical_u64))?;
+    let (u64_var, canonical_fp) = gl_alloc_u64_from_fpvar(cs.clone(), &gl_val.0)?;
     enforce_gl_eq_with_bound(&gl_val.0, &canonical_fp, Some(1))?;
     Ok(u64_var)
 }

@@ -97,6 +97,44 @@ pub fn gl_alloc_u64(
     Ok((u, acc))
 }
 
+/// Allocate a canonical GL value derived from an existing `FpGLVar`.
+///
+/// This is specifically for "serialization boundary" canonicalization where we need a UInt64
+/// representation of a GL field element, but we must remain compatible with Groth16 CRS setup
+/// (where witness values are not available).
+///
+/// The u64 witness is computed *inside* the witness closure from `gl_val.value()`, so it is not
+/// evaluated during CRS setup.
+pub fn gl_alloc_u64_from_fpvar(
+    cs: ConstraintSystemRef<InnerFr>,
+    gl_val: &FpGLVar,
+) -> Result<(UInt64Var, FpGLVar), SynthesisError> {
+    use crate::stark::gl_u64::fr_to_gl_u64;
+
+    let u = UInt64::new_witness(cs.clone(), || {
+        // During Groth16 CRS setup, witness values are not available; treat missing as 0.
+        let fr = gl_val.value().unwrap_or_else(|_| InnerFr::from(0u64));
+        Ok(fr_to_gl_u64(fr))
+    })?;
+    enforce_lt_p_gl(&u)?;
+
+    // Reconstruct field var from bits: sum bit_i * 2^i
+    let bits = u.to_bits_le()?;
+    let one = FpGLVar::constant(InnerFr::from(1u64));
+    let zero = FpGLVar::constant(InnerFr::from(0u64));
+
+    if bits.is_empty() {
+        return Ok((u, FpGLVar::constant(InnerFr::from(0u64))));
+    }
+
+    let mut acc = FpGLVar::conditionally_select(&bits[0], &one, &zero)?;
+    for (i, b) in bits.iter().enumerate().skip(1) {
+        let bit_fp = FpGLVar::conditionally_select(b, &one, &zero)?;
+        acc += bit_fp * FpGLVar::constant(InnerFr::from(1u64 << i));
+    }
+    Ok((u, acc))
+}
+
 /// Convenience: allocate many GL values
 pub fn gl_alloc_u64_vec(
     cs: ConstraintSystemRef<InnerFr>,

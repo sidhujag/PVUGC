@@ -5,13 +5,19 @@
 
 use winterfell::{
     math::{fields::f64::BaseElement, FieldElement},
-    Proof, TraceTable,
+    TraceTable,
 };
 
 use super::{
-    VerifierOp, VerifierPublicInputs, HASH_STATE_WIDTH, NUM_SELECTORS, RPO_CYCLE_LEN,
-    VERIFIER_TRACE_WIDTH,
+    VerifierOp, HASH_STATE_WIDTH, NUM_SELECTORS, VERIFIER_TRACE_WIDTH,
 };
+
+// Init kinds (encoded via aux[0] on Init rows).
+// Must match `constraints.rs`.
+const INIT_KIND_RESET_WITH_LEN: u64 = 8;
+const INIT_KIND_LOAD_CAPACITY4: u64 = 9;
+const INIT_KIND_COPY_DIGEST_FROM_RATE: u64 = 10;
+const INIT_KIND_MERKLE_PREP_MERGE8: u64 = 11;
 
 // ============================================================================
 // TRACE BUILDER
@@ -107,10 +113,61 @@ impl VerifierTraceBuilder {
 
     /// Initialize the sponge state
     pub fn init_sponge(&mut self) {
-        self.hash_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
-        self.fri_state = [BaseElement::ZERO; 8]; // Reset FRI columns
-        self.aux_state[0] = BaseElement::new(7); // Not in permute
+        // Constrained reset: transition enforces next hash state is all zeros with len=0.
+        self.reset_hash_with_len(0);
+        // Reset scratch columns after emitting the init row.
+        self.fri_state = [BaseElement::ZERO; 8];
+    }
+
+    /// Constrained reset of the hash state to all-zeros with state[0] = len.
+    ///
+    /// Implemented as an Init row with aux[0]=INIT_KIND_RESET_WITH_LEN and fri[0]=len.
+    /// The AIR transition constraints enforce the next row's hash state equals the reset state.
+    fn reset_hash_with_len(&mut self, len: usize) {
+        // Provide the length (domain separation) to the AIR via fri[0].
+        self.fri_state = [BaseElement::ZERO; 8];
+        self.fri_state[0] = BaseElement::new(len as u64);
+        // aux[0] selects init kind on Init rows.
+        self.aux_state[0] = BaseElement::new(INIT_KIND_RESET_WITH_LEN);
         self.emit_row(VerifierOp::Init);
+
+        // Apply the reset for subsequent rows (this becomes the "next" hash state).
+        self.hash_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
+        self.hash_state[0] = BaseElement::new(len as u64);
+
+        // Reset aux[0] back to 7 (not in permute) for normal operations.
+        self.aux_state[0] = BaseElement::new(7);
+    }
+
+    /// Constrained load of hash_state[0..3] from fri[0..3] (capacity load).
+    /// Zeros the rest of the state.
+    fn load_capacity4_from_fri(&mut self, cap: [BaseElement; 4]) {
+        self.fri_state = [BaseElement::ZERO; 8];
+        self.fri_state[0..4].copy_from_slice(&cap);
+        self.aux_state[0] = BaseElement::new(INIT_KIND_LOAD_CAPACITY4);
+        self.emit_row(VerifierOp::Init);
+
+        self.hash_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
+        self.hash_state[0..4].copy_from_slice(&cap);
+        self.aux_state[0] = BaseElement::new(7);
+    }
+
+    /// Constrained copy of digest from rate[0..3] (hash_state[4..7]) into capacity[0..3].
+    /// Zeros the rest of the state.
+    fn copy_digest_from_rate_to_capacity(&mut self) {
+        self.fri_state = [BaseElement::ZERO; 8];
+        self.aux_state[0] = BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE);
+        self.emit_row(VerifierOp::Init);
+
+        let digest = [
+            self.hash_state[4],
+            self.hash_state[5],
+            self.hash_state[6],
+            self.hash_state[7],
+        ];
+        self.hash_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
+        self.hash_state[0..4].copy_from_slice(&digest);
+        self.aux_state[0] = BaseElement::new(7);
     }
 
     /// Absorb 8 elements into the sponge rate
@@ -119,7 +176,9 @@ impl VerifierTraceBuilder {
     /// The next row (typically Permute or Nop) shows the post-absorption state.
     pub fn absorb(&mut self, input: &[BaseElement; 8]) {
         self.aux_state[0] = BaseElement::new(7); // Not in permute
-        // FRI columns preserved from previous row (no reset)
+        // Provide absorbed block to the AIR via fri[0..8].
+        self.fri_state = [BaseElement::ZERO; 8];
+        self.fri_state.copy_from_slice(input);
         
         // Emit row BEFORE modifying (shows pre-absorption state)
         self.emit_row(VerifierOp::Absorb);
@@ -177,61 +236,61 @@ impl VerifierTraceBuilder {
     /// 
     /// Matches Winterfell's merge function: parent = hash_elements(left || right)
     /// Output is from rate portion (indices 4-7), copied to capacity (0-3) for next step.
-    pub fn merkle_step(&mut self, sibling: [BaseElement; 4], direction: bool) {
-        // Save current digest (in indices 0-3) before modifying state
-        let current_digest = [
-            self.hash_state[0],
-            self.hash_state[1],
-            self.hash_state[2],
-            self.hash_state[3],
-        ];
-        
-        // Store sibling in FRI working columns for AIR constraint verification
-        for i in 0..4 {
-            self.fri_state[i] = sibling[i];
-        }
-        // Store direction in aux
-        self.aux_state[0] = if direction {
-            BaseElement::ONE
-        } else {
-            BaseElement::ZERO
-        };
+    pub fn set_merkle_index(&mut self, idx: usize) {
+        self.fri_state[4] = BaseElement::new(idx as u64);
+    }
 
-        self.emit_row(VerifierOp::MerklePath);
+    /// Merkle path step using the current index in fri[4].
+    ///
+    /// This enforces direction bits are consistent with the index:
+    /// dir = idx & 1; idx_next = idx >> 1.
+    pub fn merkle_step_from_index(&mut self, sibling: [BaseElement; 4]) {
+        // Current digest must be in capacity[0..3].
+        let current_digest = [self.hash_state[0], self.hash_state[1], self.hash_state[2], self.hash_state[3]];
 
-        // Reset state for hash_elements (merge = hash(left || right))
-        for i in 0..HASH_STATE_WIDTH {
-            self.hash_state[i] = BaseElement::ZERO;
-        }
-        
-        // Set state[0] = input length (8 elements for merge)
+        let idx_u64 = self.fri_state[4].as_int();
+        let dir_bit_u64 = idx_u64 & 1;
+        let idx_next_u64 = idx_u64 >> 1;
+
+        // Place sibling and dir into the current row, and use Init-kind 11 to constrain
+        // the next row hash state to the reset+loaded merge state.
+        self.fri_state[0..4].copy_from_slice(&sibling);
+        self.fri_state[5] = BaseElement::new(dir_bit_u64);
+        self.aux_state[0] = BaseElement::new(INIT_KIND_MERKLE_PREP_MERGE8);
+        self.emit_row(VerifierOp::Init);
+
+        // Apply constrained next state: reset to len=8 and load [left||right] into rate.
+        self.hash_state = [BaseElement::ZERO; HASH_STATE_WIDTH];
         self.hash_state[0] = BaseElement::new(8);
-
-        // Absorb left || right into rate portion (indices 4-11)
-        if direction {
-            // Current is right child: absorb sibling || current_digest
+        if dir_bit_u64 == 1 {
+            // Current is right child: left=sibling, right=current_digest.
             for i in 0..4 {
                 self.hash_state[4 + i] = sibling[i];
                 self.hash_state[8 + i] = current_digest[i];
             }
         } else {
-            // Current is left child: absorb current_digest || sibling
+            // Current is left child: left=current_digest, right=sibling.
             for i in 0..4 {
                 self.hash_state[4 + i] = current_digest[i];
                 self.hash_state[8 + i] = sibling[i];
             }
         }
 
-        // Emit as Init (allows any state change) since we reset the sponge for merge
-        // Then permute to compute the merge hash
-        self.emit_row(VerifierOp::Init);
+        // Update index for next level (this is constrained by Init-kind 11 via fri[4] transition).
+        self.fri_state[4] = BaseElement::new(idx_next_u64);
+
+        // Reset aux[0] back to 7 for normal operations.
+        self.aux_state[0] = BaseElement::new(7);
+
+        // Permute to compute the merge hash.
         self.permute();
-        
-        // Output is from rate portion (indices 4-7)
-        // Copy to capacity (0-3) for next merkle_step or verify_root
-        for i in 0..4 {
-            self.hash_state[i] = self.hash_state[4 + i];
-        }
+
+        // `hash_elements` output digest is in rate[0..3] after permutation.
+        self.copy_digest_from_rate_to_capacity();
+
+        // Preserve the Merkle index for the next step.
+        // NOTE: copy_digest_from_rate_to_capacity() clears fri_state, so we must restore it here.
+        self.fri_state[4] = BaseElement::new(idx_next_u64);
     }
 
     /// Perform FRI folding step
@@ -323,6 +382,9 @@ impl VerifierTraceBuilder {
         // This is the ONLY place we bind to public inputs, ensuring the prover
         // can't substitute fake commitments.
         self.aux_state[2] = BaseElement::new(4u64);
+        // Equality constraint on DeepCompose is unconditional; keep fri[6..7] equal here.
+        self.fri_state[6] = BaseElement::ZERO;
+        self.fri_state[7] = BaseElement::ZERO;
         
         // Emit DeepCompose row - checkpoint counter increments
         self.emit_row(VerifierOp::DeepCompose);
@@ -334,13 +396,16 @@ impl VerifierTraceBuilder {
     ///
     /// The AIR constraint will verify hash_state[0..3] == pub_inputs.params_digest when aux[2]=5.
     pub fn verify_params_digest(&mut self, params_digest: [BaseElement; 4]) -> bool {
-        self.hash_state[0] = params_digest[0];
-        self.hash_state[1] = params_digest[1];
-        self.hash_state[2] = params_digest[2];
-        self.hash_state[3] = params_digest[3];
+        // Constrained load: move the computed digest into hash_state[0..3].
+        // This is modeled as an Init(kind=LOAD_CAPACITY4) transition to avoid
+        // any "out of band" hash_state mutation between rows.
+        self.load_capacity4_from_fri(params_digest);
 
         // Set mode = PARAMS VERIFICATION (aux[2] = 5)
         self.aux_state[2] = BaseElement::new(5u64);
+        // Equality constraint on DeepCompose is unconditional; keep fri[6..7] equal here.
+        self.fri_state[6] = BaseElement::ZERO;
+        self.fri_state[7] = BaseElement::ZERO;
         self.emit_row(VerifierOp::DeepCompose);
         true
     }
@@ -665,6 +730,9 @@ impl VerifierTraceBuilder {
         for i in 0..4 {
             self.fri_state[i] = expected_root[i];
         }
+        // Equality constraint on DeepCompose is unconditional; keep fri[6..7] equal here.
+        self.fri_state[6] = BaseElement::ZERO;
+        self.fri_state[7] = BaseElement::ZERO;
         
         // Set mode = ROOT VERIFICATION (aux[2] = 0)
         self.aux_state[2] = BaseElement::ZERO;
@@ -692,54 +760,29 @@ impl VerifierTraceBuilder {
     /// - OUTPUT is from rate portion (indices 4-7), copied to capacity (0-3)
     ///   for subsequent merkle_step operations
     pub fn init_leaf(&mut self, leaf_data: &[BaseElement]) {
-        // Reset state to zero
-        for i in 0..HASH_STATE_WIDTH {
-            self.hash_state[i] = BaseElement::ZERO;
-        }
-        
-        // Set state[0] = input length for domain separation
-        // This matches Winterfell's hash_elements behavior
-        self.hash_state[0] = BaseElement::new(leaf_data.len() as u64);
-        
-        // Process leaf data in chunks of 8 (RPO rate)
-        let mut rate_idx = 0;
-        let mut first_emission = true;
-        for &elem in leaf_data.iter() {
-            // Add element to rate portion (state[4 + rate_idx])
-            self.hash_state[4 + rate_idx] = self.hash_state[4 + rate_idx] + elem;
-            rate_idx += 1;
-            
-            // If we've filled 8 rate elements, emit and permute
-            if rate_idx == 8 {
-                // First emission uses Init (allows state reset), subsequent use Absorb
-                if first_emission {
-                    self.emit_row(VerifierOp::Init);
-                    first_emission = false;
-                } else {
-                self.emit_row(VerifierOp::Absorb);
-                }
-                self.permute();
-                rate_idx = 0;
+        // Reset sponge with domain-separation length.
+        self.reset_hash_with_len(leaf_data.len());
+
+        // Absorb leaf data in 8-element blocks (rate width).
+        // This matches `hash_elements` behavior.
+        for chunk in leaf_data.chunks(8) {
+            let mut block = [BaseElement::ZERO; 8];
+            for (i, &e) in chunk.iter().enumerate() {
+                block[i] = e;
             }
-        }
-        
-        // If there are remaining elements (partial block), emit and permute
-        if rate_idx > 0 || leaf_data.is_empty() {
-            // First emission uses Init (allows state reset), subsequent use Absorb
-            if first_emission {
-                self.emit_row(VerifierOp::Init);
-            } else {
-            self.emit_row(VerifierOp::Absorb);
-            }
+            self.absorb(&block);
             self.permute();
         }
-        
-        // For hash_elements, output is from RATE portion (indices 4-7)
-        // Copy to capacity (0-3) so merkle_step can use it as the current digest
-        // This matches Winterfell's Rp64_256::hash_elements output location
-        for i in 0..4 {
-            self.hash_state[i] = self.hash_state[4 + i];
+
+        if leaf_data.is_empty() {
+            // `hash_elements([])` still performs a permutation of the empty-block sponge.
+            let block = [BaseElement::ZERO; 8];
+            self.absorb(&block);
+            self.permute();
         }
+
+        // Output digest lives in rate[0..3] after permutation.
+        self.copy_digest_from_rate_to_capacity();
     }
 
     /// Set the final acceptance flag
@@ -813,6 +856,7 @@ fn encode_op(op: VerifierOp) -> (BaseElement, BaseElement, BaseElement) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stark::verifier_air::VerifierPublicInputs;
 
     #[test]
     fn test_trace_builder_basic() {
@@ -1021,8 +1065,10 @@ mod tests {
         builder.hash_state[2] = left_arr[2];
         builder.hash_state[3] = left_arr[3];
         
-        // Apply merkle_step with right as sibling, direction=false (left is current)
-        builder.merkle_step(right_arr, false);
+        // Apply merkle_step with right as sibling, direction=false (left is current).
+        // direction=false corresponds to idx LSB = 0.
+        builder.set_merkle_index(0);
+        builder.merkle_step_from_index(right_arr);
         
         let our_digest = [
             builder.hash_state[0],

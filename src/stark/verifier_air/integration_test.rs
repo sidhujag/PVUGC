@@ -161,9 +161,10 @@ mod tests {
         // Squeeze challenge
         let _challenge = builder.squeeze();
         
-        // Merkle verification step
+        // Merkle verification step (idx=0 => left child)
         let sibling = make_digest(100);
-        builder.merkle_step(sibling, false);
+        builder.set_merkle_index(0);
+        builder.merkle_step_from_index(sibling);
         
         // FRI fold
         let _folded = builder.fri_fold(
