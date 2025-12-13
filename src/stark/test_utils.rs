@@ -96,10 +96,7 @@ fn load_or_build_inner_crs_keys() -> (ProvingKey<Bls12_377>, VerifyingKey<Bls12_
     // Use Aggregator STARK flow for the inner CRS
     // This ensures all app STARKs (VDF, CubicFib, etc.) go through the same Aggregator
     // The Aggregator has FIXED structure, making the quotient gap linear!
-    // Seed the CRS from a CubicFib instance (different app than VDF), to avoid
-    // accidentally "locking" the cache to a VDF-shaped circuit during development.
-    // If the inner circuit is truly universal, the choice of seed instance does not matter.
-    let instance = build_cubic_fib_recursive_stark_instance(1, 1, 16);
+    let instance = build_vdf_recursive_stark_instance(3, 8);
     let mut rng = StdRng::seed_from_u64(42);
     let (pk, vk) =
         Groth16::<Bls12_377>::circuit_specific_setup(instance.circuit.clone(), &mut rng).unwrap();
@@ -123,8 +120,7 @@ fn load_or_build_inner_crs_keys() -> (ProvingKey<Bls12_377>, VerifyingKey<Bls12_
         vdf_instance.circuit.air_params.fri_terminal,
     );
     eprintln!(
-        "[inner_crs] built CRS check (vdf): fs_ctx_len={} trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
-        vdf_instance.circuit.fs_context_seed_gl.len(),
+        "[inner_crs] built CRS check (vdf): trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
         vdf_instance.circuit.trace_commitment_le32.len(),
         vdf_instance.circuit.trace_segments.len(),
         vdf_instance.circuit.fri_commitments_le32.len(),
@@ -152,8 +148,7 @@ fn load_or_build_inner_crs_keys() -> (ProvingKey<Bls12_377>, VerifyingKey<Bls12_
         cubic_instance.circuit.air_params.fri_terminal,
     );
     eprintln!(
-        "[inner_crs] built CRS check (cubic): fs_ctx_len={} trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
-        cubic_instance.circuit.fs_context_seed_gl.len(),
+        "[inner_crs] built CRS check (cubic): trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
         cubic_instance.circuit.trace_commitment_le32.len(),
         cubic_instance.circuit.trace_segments.len(),
         cubic_instance.circuit.fri_commitments_le32.len(),

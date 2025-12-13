@@ -89,9 +89,6 @@ pub struct FullStarkVerifierCircuit {
     // STARK public inputs (to bind into statement hash)
     pub stark_pub_inputs: Vec<u64>, // STARK's public inputs
 
-    // Fiat-Shamir context seed (for transcript alignment)
-    pub fs_context_seed_gl: Vec<u64>, // proof.context.to_elements().as_int()
-
     // Commitments (witness, but bound to public hash)
     pub trace_commitment_le32: Vec<[u8; 32]>,
     pub comp_commitment_le32: [u8; 32],
@@ -492,7 +489,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 &trace_root_bytes,
                 &comp_root_bytes,
                 &fri_roots_bytes,
-                &self.fs_context_seed_gl,
+                &self.stark_pub_inputs,
                 &ood_trace_current_fp,
                 &ood_trace_next_fp,
                 &ood_comp_current_fp,
@@ -772,7 +769,7 @@ fn derive_fs_challenges_in_circuit(
     trace_roots: &[Vec<UInt8<InnerFr>>], // Support multiple trace segments
     comp_root: &[UInt8<InnerFr>],
     fri_roots: &[Vec<UInt8<InnerFr>>],
-    fs_context_seed_gl: &[u64], // proof.context.to_elements().as_int()
+    stark_pub_inputs_u64: &[u64], // VerifierPublicInputs::to_elements().as_int()
     ood_trace_current: &[FpGLVar],
     ood_trace_next: &[FpGLVar],
     ood_comp: &[FpGLVar],
@@ -786,10 +783,58 @@ fn derive_fs_challenges_in_circuit(
     use super::gadgets::rpo_gl_light::{RandomCoinGL, RpoParamsGLLight};
     use super::gadgets::utils::digest32_to_gl4;
 
-    // 0) Create counter-based RandomCoin with context seed
-    let ctx = gl_alloc_u64_vec(cs.clone(), fs_context_seed_gl)?;
-    let ctx_gl: Vec<GlVar> = ctx.iter().map(|fp| GlVar(fp.clone())).collect();
-    let mut coin = RandomCoinGL::new(cs.clone(), &ctx_gl, RpoParamsGLLight::default())?;
+    // 0) Create counter-based RandomCoin with context seed.
+    //
+    // SECURITY (bypass hardening):
+    // Do NOT accept an unconstrained `fs_context_seed_gl` from the host parser.
+    // Instead, reconstruct Winterfell's seed = context.to_elements() || pub_inputs.to_elements().
+    //
+    // For our proof contexts, `context.to_elements()` is the 8-element encoding used by Winterfell
+    // for ProofContext, which (for Goldilocks, FieldExtension::None) matches:
+    //   [ (main_width<<8)|aux_width,
+    //     trace_len,
+    //     num_trace_segments,
+    //     modulus_hi32,
+    //     num_constraint_coeffs,
+    //     (ext_code<<24)|(fri_folding_factor<<16)|(fri_terminal_degree<<8)|lde_blowup,
+    //     grinding_factor,
+    //     num_queries ]
+    //
+    // We reconstruct this deterministically from `air_params` + the known number of trace segments
+    // (== number of trace commitments being verified).
+    //
+    // Then we append the VerifierAir public inputs (as u64 limbs) to match Winterfell's
+    // `DefaultRandomCoin` initialization.
+    let num_trace_segments_ctx = trace_roots.len() as u64;
+    let field_modulus_hi32 = 0xFFFF_FFFFu64;
+    let ext_code = 1u64; // FieldExtension::None
+    let fri_terminal_degree = match &air_params.fri_terminal {
+        super::gadgets::fri::FriTerminalKind::Constant => 0u64,
+        super::gadgets::fri::FriTerminalKind::Poly { degree } => *degree as u64,
+    };
+    let options_pack = (ext_code << 24)
+        | ((air_params.fri_folding_factor as u64) << 16)
+        | (fri_terminal_degree << 8)
+        | (air_params.lde_blowup as u64);
+    let ctx_seed_u64: [u64; 8] = [
+        (air_params.trace_width as u64) << 8, // (main_width<<8)|aux_width, aux_width=0
+        air_params.trace_len as u64,
+        num_trace_segments_ctx,
+        field_modulus_hi32,
+        air_params.num_constraint_coeffs as u64,
+        options_pack,
+        air_params.grinding_factor as u64,
+        air_params.num_queries as u64,
+    ];
+    let mut seed_gl: Vec<GlVar> = Vec::with_capacity(ctx_seed_u64.len() + stark_pub_inputs_u64.len());
+    for &v in &ctx_seed_u64 {
+        seed_gl.push(GlVar(FpGLVar::constant(InnerFr::from(v))));
+    }
+    // Append public inputs as canonical GL u64s (< p_GL).
+    let pub_inputs_fp = gl_alloc_u64_vec(cs.clone(), stark_pub_inputs_u64)?;
+    seed_gl.extend(pub_inputs_fp.into_iter().map(GlVar));
+
+    let mut coin = RandomCoinGL::new(cs.clone(), &seed_gl, RpoParamsGLLight::default())?;
 
     // 1) Reseed with each trace commitment, then draw constraint composition coefficients
     for tr in trace_roots {
@@ -1127,29 +1172,22 @@ fn bind_statement_hash(
 
     let statement_hash_var = FpVar::<InnerFr>::new_input(cs.clone(), || Ok(statement_hash))?;
 
-    // Arming-friendly statement binding:
-    // Bind the Groth16 public input to:
-    //   VerifierPublicInputs.statement_hash (first 4 u64s)
-    //   || [expected_checkpoint_count, expected_mode_counter, params_digest] (last 6 u64s)
+    // Arming statement binding:
+    // Bind the Groth16 public input to the FULL VerifierAir public-input vector.
     //
-    // This commits the Groth16 statement to the VerifierAir proof's (params_digest, interpreter_hash)
-    // policy fields, in addition to the VerifierAir statement_hash.
+    // SECURITY:
+    // Winterfell seeds Fiat–Shamir with (context.to_elements || public_inputs.to_elements).
+    // If we bind only a subset of public inputs, the remaining public-input words become
+    // "free knobs" which can bias the Fiat–Shamir transcript without changing the Groth16 statement.
+    //
+    // Therefore we commit to all `stark_pub_inputs` words here.
     if stark_pub_inputs.len() < 22 {
         return Err(SynthesisError::Unsatisfiable);
     }
-    let stmt = &stark_pub_inputs[0..4];
-    let tail = &stark_pub_inputs[stark_pub_inputs.len() - 6..];
 
     let mut hasher = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
     hasher.absorb(&FpVar::constant(InnerFr::from(0xA11Du64)))?;
-    for &v in stmt {
-        // IMPORTANT (universality):
-        // Do NOT absorb per-proof public-input words as constants; that would bake them into the
-        // R1CS coefficients and make the Groth16 CRS non-reusable across different proofs/apps.
-        let v_var = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
-        hasher.absorb(&v_var)?;
-    }
-    for &v in tail {
+    for &v in stark_pub_inputs {
         let v_var = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
         hasher.absorb(&v_var)?;
     }

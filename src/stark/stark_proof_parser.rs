@@ -135,18 +135,48 @@ where
     let lde_domain_size = air_params.trace_len * air_params.lde_blowup;
     // Use actual number of unique queries from proof (after deduplication)
 
-    // Extract FS context seed for transcript alignment (Winterfell 0.13.x)
-    // Per Winterfell verifier/lib.rs:100-101: seed with context + public inputs!
+    // SECURITY (bypass hardening):
+    // The Groth16 circuit MUST NOT accept an unconstrained "FS context seed" from the host.
+    // We reconstruct the seed inside the circuit from AirParams + public inputs.
+    //
+    // To ensure our reconstruction matches Winterfell for this proof type, we assert here
+    // (host-side) that `proof.context.to_elements()` is exactly the 5-element encoding used
+    // by `ParsedProof::context_to_elements()` (trace_width, comp_width, trace_len, lde_blowup, num_queries).
     use winter_math::ToElements;
-    let mut fs_context_seed_gl: Vec<u64> = proof
+    let ctx_from_proof: Vec<u64> = proof
         .context
         .to_elements()
         .into_iter()
         .map(|e: GL| e.as_int())
         .collect();
-
-    // Append public inputs to match Winterfell's initialization
-    fs_context_seed_gl.extend(pub_inputs_u64.iter().copied());
+    let num_trace_segments_ctx = proof.context.trace_info().num_segments() as u64;
+    let field_modulus_hi32 = 0xFFFF_FFFFu64; // Goldilocks modulus high 32 bits
+    let ext_code = 1u64; // FieldExtension::None
+    let fri_terminal_degree = match &air_params.fri_terminal {
+        super::gadgets::fri::FriTerminalKind::Constant => 0u64,
+        super::gadgets::fri::FriTerminalKind::Poly { degree } => *degree as u64,
+    };
+    let options_pack = (ext_code << 24)
+        | ((air_params.fri_folding_factor as u64) << 16)
+        | (fri_terminal_degree << 8)
+        | (air_params.lde_blowup as u64);
+    let ctx_from_params: Vec<u64> = vec![
+        // trace_info encoding: (main_width << 8) | aux_width.
+        // For our recursive verifier proofs, aux_width is always 0.
+        (air_params.trace_width as u64) << 8,
+        air_params.trace_len as u64,
+        num_trace_segments_ctx,
+        field_modulus_hi32,
+        air_params.num_constraint_coeffs as u64,
+        options_pack,
+        air_params.grinding_factor as u64,
+        air_params.num_queries as u64,
+    ];
+    assert_eq!(
+        ctx_from_proof,
+        ctx_from_params,
+        "ProofContext::to_elements() mismatch: proof={ctx_from_proof:?} params={ctx_from_params:?}"
+    );
 
     let (trace_commitments, comp_commitment, fri_commitments) = proof
         .commitments
@@ -337,7 +367,6 @@ where
     FullStarkVerifierCircuit {
         statement_hash,
         stark_pub_inputs: pub_inputs_u64,
-        fs_context_seed_gl,
         trace_commitment_le32,
         comp_commitment_le32,
         fri_commitments_le32,
@@ -846,31 +875,16 @@ fn compute_statement_hash(
 /// Compute the arming-friendly statement hash for Groth16.
 ///
 /// Expected layout is `VerifierPublicInputs::to_elements()`:
-/// - First 4 u64s: `statement_hash` (Goldilocks ints)
-/// - Last 6 u64s (in this order):
-///   - `expected_checkpoint_count` (1)
-///   - `expected_mode_counter` (1)
-///   - `params_digest` (4)
+/// - Entire public input vector (all words).
 fn compute_armed_statement_hash_from_verifier_pub_inputs(pub_inputs: &[u64]) -> InnerFr {
     use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
     use ark_crypto_primitives::sponge::CryptographicSponge;
 
-    assert!(
-        pub_inputs.len() >= 22,
-        "Verifier public inputs too short to extract statement/expected-counters/params"
-    );
-
-    let stmt = &pub_inputs[0..4];
-    let tail = &pub_inputs[pub_inputs.len() - 6..];
-
     let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
     // Domain separator for arming statement.
     sponge.absorb(&InnerFr::from(0xA11Du64));
-    for &v in stmt {
-        sponge.absorb(&InnerFr::from(v));
-    }
-    for &v in tail {
+    for &v in pub_inputs {
         sponge.absorb(&InnerFr::from(v));
     }
     sponge.squeeze_field_elements::<InnerFr>(1)[0]
