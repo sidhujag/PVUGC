@@ -1,7 +1,7 @@
 ///! Comprehensive STARK verifier tests
 ///!
-///! Tests the Groth16 circuit verifying the recursive STARK pipeline:
-///! VDF STARK → Aggregator STARK → Verifier STARK → Groth16
+///! Tests the Groth16 circuit verifying the recursive STARK pipeline (VerifierAir-only):
+///! VDF STARK → VerifierAir (verifies VDF) → Groth16
 ///!
 ///! The Groth16 circuit now verifies VerifierAir (27 columns), which itself
 ///! verifies Aggregator proofs. Tests are organized as:
@@ -14,7 +14,7 @@ use crate::stark::test_utils::build_vdf_recursive_stark_instance;
 
 /// Build a valid recursive STARK circuit with specified VDF steps
 /// 
-/// Uses the full pipeline: VDF → Aggregator → Verifier STARK → Groth16
+/// Uses the full pipeline: VDF → VerifierAir → Groth16
 fn build_recursive_circuit_with_steps(steps: usize) -> crate::stark::inner_stark_full::FullStarkVerifierCircuit {
     build_vdf_recursive_stark_instance(3, steps).circuit
 }

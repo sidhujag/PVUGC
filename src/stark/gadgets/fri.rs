@@ -53,12 +53,13 @@ pub struct FriLayerQueryGL<'a> {
 pub fn verify_fri_layers_gl(
     cs: ConstraintSystemRef<InnerFr>,
     cfg: &FriConfigGL,
-    main_positions: &[usize],  // positions in initial domain (one per query)
+    main_positions: &[super::gl_range::UInt64Var], // positions in initial domain (one per query)
     mut current: Vec<FpGLVar>, // DEEP sums per query
     layers: &[FriLayerQueryGL],
     remainder_coeffs_opt: Option<&[u64]>, // for Poly terminal: coeffs (low->high)
 ) -> Result<(), SynthesisError> {
-    use crate::stark::inner_stark_full::{enforce_gl_eq, enforce_gl_eq_with_bound};
+    use crate::stark::inner_stark_full::enforce_gl_eq;
+    use super::gl_range::{gl_alloc_u64, UInt64Var};
 
     let t = cfg.folding_factor;
     if t == 0 {
@@ -76,9 +77,23 @@ pub fn verify_fri_layers_gl(
     }
 
     // Positions used for folding current evaluations across layers (unique per layer for 'current')
-    let mut positions: Vec<usize> = main_positions.to_vec();
+    let mut positions: Vec<UInt64Var> = main_positions.to_vec();
     // Full (non-unique) positions per layer (one per original query)
-    let mut positions_full: Vec<usize> = main_positions.to_vec();
+    let mut positions_full: Vec<UInt64Var> = main_positions.to_vec();
+
+    // Helper: reduce a u64 position mod 2^k by masking low k bits (fixed-cost).
+    fn mask_low_bits(pos: &UInt64Var, k: usize) -> Result<UInt64Var, SynthesisError> {
+        let bits = pos.to_bits_le()?;
+        let mut masked = Vec::with_capacity(64);
+        for i in 0..64 {
+            if i < k {
+                masked.push(bits[i].clone());
+            } else {
+                masked.push(Boolean::constant(false));
+            }
+        }
+        Ok(UInt64Var::from_bits_le(&masked))
+    }
 
     // Track domain generator and domain size for current layer
     let mut g_current = GlVar(FpGLVar::constant(InnerFr::from(cfg.g_lde)));
@@ -95,28 +110,28 @@ pub fn verify_fri_layers_gl(
             return Err(SynthesisError::Unsatisfiable);
         }
         // Derive non-unique positions for this layer from main positions
+        let k_folded = ilog2_pow2(folded_domain_size);
         positions_full = positions_full
             .iter()
-            .map(|&pos| pos % folded_domain_size)
-            .collect();
+            .map(|pos| mask_low_bits(pos, k_folded))
+            .collect::<Result<_, _>>()?;
         // Unique-vector folded positions derived from current 'positions' ordering
-        let folded_positions: Vec<usize> = positions
+        let folded_positions: Vec<UInt64Var> = positions
             .iter()
-            .map(|&pos| pos % folded_domain_size)
-            .collect();
+            .map(|pos| mask_low_bits(pos, k_folded))
+            .collect::<Result<_, _>>()?;
 
-        // Create deduplicated folded positions for query lookup (for 'current' folding path)
-        // NOTE: Do NOT sort! Must preserve insertion order; use HashSet to avoid O(n^2)
-        let mut folded_positions_unique = Vec::new();
-        {
-            use std::collections::HashSet;
-            let mut seen: HashSet<usize> = HashSet::with_capacity(folded_positions.len());
-            for &fp in &folded_positions {
-                if seen.insert(fp) {
-                    folded_positions_unique.push(fp);
-                }
-            }
-        }
+        // IMPORTANT (universality / fixed R1CS shape):
+        // Do NOT deduplicate positions inside the circuit.
+        //
+        // Fiat–Shamir query collisions after folding can cause the number of unique folded
+        // positions to vary across proofs. If we deduplicate here, the amount of work
+        // (and thus the Groth16 R1CS shape) depends on the concrete query positions.
+        //
+        // We keep the per-query position vector at fixed length (= num_queries) by not
+        // deduplicating. Batch Merkle verification still uses the (padded) unique openings
+        // carried in the witness.
+        let folded_positions_unique = folded_positions.clone();
 
         // Verify FRI layer commitment using batch multiproof (required)
         use super::rpo_gl_light::rpo_hash_elements_light;
@@ -134,12 +149,17 @@ pub fn verify_fri_layers_gl(
                     return Err(SynthesisError::Unsatisfiable);
                 }
             }
-            // Build digests and retain FP pairs; zip to lock ordering with indexes
+            // Build digests and retain FP pairs; zip to lock ordering with indexes.
+            // NOTE: `layer.unique_*` are PER-QUERY (length == num_queries) to keep variable
+            // allocation order independent of proof-specific index ordering.
             let mut leaf_digests: Vec<[GlVar; 4]> = Vec::with_capacity(layer.unique_values.len());
             let mut leaf_pairs_fp: Vec<(FpGLVar, FpGLVar)> =
                 Vec::with_capacity(layer.unique_values.len());
+            let mut unique_idx_vars: Vec<UInt64Var> = Vec::with_capacity(layer.unique_indexes.len());
             for (&idx, &(lo, hi)) in layer.unique_indexes.iter().zip(layer.unique_values.iter()) {
-                let _ = idx; // order anchor
+                // Allocate index as a witness u64 so it participates as a variable.
+                let (idx_u64, _) = gl_alloc_u64(cs.clone(), Some(idx as u64))?;
+                unique_idx_vars.push(idx_u64);
                 let v_lo_fp = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(lo)))?;
                 let v_hi_fp = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(hi)))?;
                 let v_lo = GlVar(v_lo_fp.clone());
@@ -160,33 +180,32 @@ pub fn verify_fri_layers_gl(
                 cs.clone(),
                 &cfg.params_rpo,
                 leaf_digests,
-                &layer.unique_indexes,
+                &unique_idx_vars,
                 &layer.batch_nodes,
                 layer.batch_depth as usize,
                 layer.root_bytes,
             )?;
-            // Consistency: enforce for every current entry in this layer
-            // Build index -> (v_lo, v_hi) map aligned with Merkle batch unique indexes
-            use std::collections::BTreeMap;
-            let mut pair_by_index: BTreeMap<usize, (FpGLVar, FpGLVar)> = BTreeMap::new();
-            for (i, &idx) in layer.unique_indexes.iter().enumerate() {
-                pair_by_index.insert(idx, leaf_pairs_fp[i].clone());
-            }
-            // Hoist 1 constant for expected-bad equality
-            let one_fp = FpGLVar::constant(InnerFr::from(1u64));
-            for (j, &pos_prev) in positions.iter().enumerate() {
-                let u_j = pos_prev % folded_domain_size;
-                if let Some((v_lo_fp, v_hi_fp)) = pair_by_index.get(&u_j) {
-                    let is_hi = pos_prev / row_length; // 0 => lo, 1 => hi
-                    let is_lo_bool = Boolean::constant(is_hi == 0);
-                    let expected_value_fp =
-                        FpVar::<InnerFr>::conditionally_select(&is_lo_bool, v_lo_fp, v_hi_fp)?;
-                    enforce_gl_eq(&current[j], &expected_value_fp)?;
-                } else {
-                    // Missing pair for this folded index: synthesize constraints and ensure unsatisfied
-                    let expected_bad = current[j].clone() + one_fp.clone();
-                    enforce_gl_eq_with_bound(&current[j], &expected_bad, Some(0))?;
-                }
+            // Consistency: for each query slot j:
+            // - enforce the Merkle opening index equals the folded position derived from pos_prev
+            // - enforce `current[j]` equals the corresponding opened value (lo/hi) for that query
+            for (j, pos_prev) in positions.iter().enumerate() {
+                let u_j = mask_low_bits(pos_prev, k_folded)?;
+                let idx_var = unique_idx_vars.get(j).ok_or(SynthesisError::Unsatisfiable)?;
+                let eq = idx_var.is_eq(&u_j)?;
+                eq.enforce_equal(&Boolean::constant(true))?;
+
+                let (v_lo_fp, v_hi_fp) = leaf_pairs_fp
+                    .get(j)
+                    .cloned()
+                    .ok_or(SynthesisError::Unsatisfiable)?;
+
+                // Select lo/hi based on whether `pos_prev` is in the upper half of the unfolded domain.
+                let pos_bits = pos_prev.to_bits_le()?;
+                let half_bit_idx = ilog2_pow2(row_length);
+                let sel = pos_bits.get(half_bit_idx).ok_or(SynthesisError::Unsatisfiable)?;
+                let expected_value_fp =
+                    FpVar::<InnerFr>::conditionally_select(sel, &v_hi_fp, &v_lo_fp)?;
+                enforce_gl_eq(&current[j], &expected_value_fp)?;
             }
 
             // Fold to next layer using Merkle-checked pairs
@@ -207,28 +226,25 @@ pub fn verify_fri_layers_gl(
             let two = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
             let mut xes: Vec<GlVar> = Vec::with_capacity(folded_positions_unique.len());
             let mut nums: Vec<GlVar> = Vec::with_capacity(folded_positions_unique.len());
-            for &folded_pos in &folded_positions_unique {
-                // If missing, fall back to zeros to avoid early synthesis error; consistency above already forces failure
-                let (v_lo_fp, v_hi_fp) = match pair_by_index.get(&folded_pos) {
-                    Some(p) => p.clone(),
-                    None => (
-                        FpGLVar::constant(InnerFr::from(0u64)),
-                        FpGLVar::constant(InnerFr::from(0u64)),
-                    ),
-                };
-                let v_lo_gl = GlVar(v_lo_fp.clone());
-                let v_hi_gl = GlVar(v_hi_fp.clone());
+            for (j, folded_pos) in folded_positions_unique.iter().enumerate() {
+                let (v_lo_fp, v_hi_fp) = leaf_pairs_fp
+                    .get(j)
+                    .cloned()
+                    .ok_or(SynthesisError::Unsatisfiable)?;
+                let v_lo_gl = GlVar(v_lo_fp);
+                let v_hi_gl = GlVar(v_hi_fp);
                 let beta_gl = GlVar(layer.beta.clone());
                 // xe = offset * g_current^folded_pos using pow2 table
-                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-                let mut e = folded_pos;
-                let mut k = 0usize;
-                while e > 0 {
-                    if (e & 1) == 1 && k < pow2_g.len() {
-                        acc = gl_mul_light(cs.clone(), &acc, &pow2_g[k])?;
-                    }
-                    e >>= 1;
-                    k += 1;
+                // IMPORTANT (universality / fixed R1CS shape):
+                // fixed-cost exponentiation (no variable-time loop on `folded_pos`).
+                let one_gl = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+                let mut acc = one_gl.clone();
+                let folded_bits = folded_pos.to_bits_le()?;
+                for (k, base) in pow2_g.iter().enumerate() {
+                    let bit = folded_bits.get(k).ok_or(SynthesisError::Unsatisfiable)?;
+                    let sel_fp = FpVar::<InnerFr>::conditionally_select(bit, &base.0, &one_gl.0)?;
+                    let sel = GlVar(sel_fp);
+                    acc = gl_mul_light(cs.clone(), &acc, &sel)?;
                 }
                 let xe = gl_mul_light(cs.clone(), &offset, &acc)?;
                 xes.push(xe.clone());
@@ -261,7 +277,7 @@ pub fn verify_fri_layers_gl(
         use super::gl_fast::gl_mul_light;
         g_current = gl_mul_light(cs.clone(), &g_current, &g_current)?;
 
-        // Update domain size and positions for next layer (unique)
+        // Update domain size and positions for next layer (fixed-length per query)
         domain_size = folded_domain_size;
         positions = folded_positions_unique;
     }
@@ -285,10 +301,15 @@ pub fn verify_fri_layers_gl(
             }
 
             // Prepare GL constants (coefficients are ALREADY in reverse order)
+            // IMPORTANT (universality): remainder coefficients are proof-dependent witness data.
+            // Do NOT embed them as constants into the R1CS.
             let coeff_gl: Vec<GlVar> = coeffs
                 .iter()
-                .map(|&c| GlVar(FpGLVar::constant(InnerFr::from(c))))
-                .collect();
+                .map(|&c| {
+                    let fp = FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c)))?;
+                    Ok(GlVar(fp))
+                })
+                .collect::<Result<_, SynthesisError>>()?;
 
             // For each query, compute x at final layer using g_final = g_lde^(t^layers)
             let layers_cnt = layers.len();
@@ -315,19 +336,22 @@ pub fn verify_fri_layers_gl(
             }
 
             for (q_idx, v) in current.iter().enumerate() {
-                let pos = positions.get(q_idx).copied().unwrap_or(0);
+                let pos = positions.get(q_idx).ok_or(SynthesisError::Unsatisfiable)?;
 
                 // x_final = offset_final * (g_final)^(positions[q_idx]) using GL arithmetic
                 // x_final = offset_final * g_final^pos using pow2_final
-                let mut acc = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-                let mut e = pos;
-                let mut k = 0usize;
-                while e > 0 {
-                    if (e & 1) == 1 && k < pow2_final.len() {
-                        acc = gl_mul_light(cs.clone(), &acc, &pow2_final[k])?;
-                    }
-                    e >>= 1;
-                    k += 1;
+                // IMPORTANT (universality / fixed R1CS shape):
+                // Do a fixed amount of work independent of `pos`.
+                // If we short-circuit based on `pos`'s highest set bit, the Groth16 circuit shape
+                // depends on the Fiat–Shamir query positions (which vary across proofs).
+                let one_gl = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+                let mut acc = one_gl.clone();
+        let pos_bits = pos.to_bits_le()?;
+                for (k, base) in pow2_final.iter().enumerate() {
+            let bit = pos_bits.get(k).ok_or(SynthesisError::Unsatisfiable)?;
+            let sel_fp = FpVar::<InnerFr>::conditionally_select(bit, &base.0, &one_gl.0)?;
+            let sel = GlVar(sel_fp);
+            acc = gl_mul_light(cs.clone(), &acc, &sel)?;
                 }
                 let x = gl_mul_light(cs.clone(), &offset_final, &acc)?;
 
@@ -372,7 +396,10 @@ mod tests {
             FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(3u64))).unwrap(),
         ];
 
-        let res = verify_fri_layers_gl(cs.clone(), &cfg, &[0, 1], current, &[], None);
+        use crate::stark::gadgets::gl_range::gl_alloc_u64;
+        let (p0, _) = gl_alloc_u64(cs.clone(), Some(0)).unwrap();
+        let (p1, _) = gl_alloc_u64(cs.clone(), Some(1)).unwrap();
+        let res = verify_fri_layers_gl(cs.clone(), &cfg, &[p0, p1], current, &[], None);
         assert!(res.is_ok());
     }
 }

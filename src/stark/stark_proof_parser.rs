@@ -222,24 +222,50 @@ where
         comp_commitment,
     );
     // Capture composition batch multiproof
-    let (comp_batch_proof, _comp_table) = proof
+    let (comp_batch_proof, comp_table) = proof
         .constraint_queries
         .clone()
         .parse::<E, H, V>(lde_domain_size, actual_num_queries, comp_width)
         .expect("parse comp batch");
-    let mut comp_batch_nodes: Vec<Vec<[u8; 32]>> = comp_batch_proof
-        .nodes
-        .iter()
-        .map(|v| v.iter().map(|d| d.as_bytes()).collect())
-        .collect();
     let comp_batch_depth: u8 = comp_batch_proof.depth;
-    let comp_batch_indexes: Vec<usize> = positions_for_parsing.to_vec();
+    let tree_num_leaves: usize = 1usize << (comp_batch_depth as usize);
+    let mut idxs_aligned: Vec<usize> = positions_for_parsing.iter().map(|&p| p % tree_num_leaves).collect();
+    idxs_aligned.truncate(comp_queries.len());
+
+    // Compute leaf digests (for decompression).
+    let rows_vec: Vec<Vec<E>> = comp_table.rows().map(|row| row.to_vec()).collect();
+    let leaf_digests: Vec<H::Digest> = rows_vec.iter().map(|row| H::hash_elements(row)).collect();
+
+    // Decompress batch proof into fixed-depth per-opening sibling paths.
+    let openings = comp_batch_proof
+        .into_openings(&leaf_digests, &idxs_aligned)
+        .expect("decompress comp batch proof into openings");
+    let mut comp_batch_nodes: Vec<Vec<[u8; 32]>> = openings
+        .into_iter()
+        .map(|(_leaf, siblings)| siblings.into_iter().map(|d| d.as_bytes()).collect())
+        .collect();
+    let comp_batch_indexes: Vec<usize> = idxs_aligned;
     // Align nodes vector count with number of composition rows
     if comp_batch_nodes.len() < comp_queries.len() {
         let deficit = comp_queries.len() - comp_batch_nodes.len();
-        comp_batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
+        // IMPORTANT (universality): duplicate last real path instead of empty,
+        // so downstream batch verification has fixed shape even under collisions.
+        if let Some(last) = comp_batch_nodes.last().cloned() {
+            comp_batch_nodes.extend(std::iter::repeat(last).take(deficit));
+        } else {
+            comp_batch_nodes.extend(std::iter::repeat(vec![[0u8; 32]]).take(deficit));
+        }
     } else if comp_batch_nodes.len() > comp_queries.len() {
         comp_batch_nodes.truncate(comp_queries.len());
+    }
+
+    // Pad/truncate inner node vectors to fixed depth (stabilizes Groth16 constraint shape).
+    let comp_target_inner = comp_batch_depth as usize;
+    for node_vec in &mut comp_batch_nodes {
+        node_vec.truncate(comp_target_inner);
+        if node_vec.len() < comp_target_inner {
+            node_vec.extend(std::iter::repeat([0u8; 32]).take(comp_target_inner - node_vec.len()));
+        }
     }
 
     // Parse OOD frame
@@ -296,17 +322,17 @@ where
         FriTerminalKind::Constant => Vec::new(),
     };
 
-    // Compute statement hash (including position commitment and ALL air_params!)
-    // This binds all structural parameters, preventing any param manipulation.
-    let statement_hash = compute_statement_hash(
-        &trace_commitment_le32,
-        &comp_commitment_le32,
-        &fri_commitments_le32,
-        &ood_commitment_le32,
-        &pub_inputs_u64,
-        &query_positions, // Bind positions to prevent adversarial selection!
-        &air_params,      // Bind ALL air_params to prevent parameter attacks!
-    );
+    // Compute the Groth16 public statement for this circuit.
+    //
+    // Protocol direction (PVUGC arming):
+    // We want the SNARK to be keyed to an arming-friendly statement derived from the
+    // VerifierAir public inputs (which include the aggregated statement + interpreter hash),
+    // rather than a hash of proof-instance transcript artifacts.
+    //
+    // IMPORTANT: This is a protocol-level choice. If we do not replay Fiat–Shamir in-circuit,
+    // query positions are not derived inside the SNARK; in that case additional binding may be
+    // required for full STARK soundness. (See higher-level design notes.)
+    let statement_hash = compute_armed_statement_hash_from_verifier_pub_inputs(&pub_inputs_u64);
 
     FullStarkVerifierCircuit {
         statement_hash,
@@ -364,6 +390,8 @@ where
             .expect("parse trace queries");
 
         let rows_vec: Vec<Vec<E>> = table.rows().map(|row| row.to_vec()).collect();
+        // Compute leaf digests for Merkle-path decompression.
+        let leaf_digests: Vec<H::Digest> = rows_vec.iter().map(|row| H::hash_elements(row)).collect();
 
         // Sanity: segment row counts consistent across segments
         if !segment_witnesses.is_empty() && segment_witnesses[0].queries.len() != rows_vec.len() {
@@ -387,23 +415,41 @@ where
         let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
         let mut idxs_aligned: Vec<usize> = positions.iter().map(|&p| p % tree_num_leaves).collect();
         idxs_aligned.truncate(segment_queries.len());
-        let mut batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
-            .nodes
-            .iter()
-            .map(|v| v.iter().map(|d| d.as_bytes()).collect())
+        // Decompress batch proof into fixed-depth per-opening sibling paths.
+        let openings = batch_proof
+            .into_openings(&leaf_digests, &idxs_aligned)
+            .expect("decompress trace batch proof into openings");
+        let mut batch_nodes: Vec<Vec<[u8; 32]>> = openings
+            .into_iter()
+            .map(|(_leaf, siblings)| siblings.into_iter().map(|d| d.as_bytes()).collect())
             .collect();
         // Align nodes vector count with number of rows for this segment
         if batch_nodes.len() < segment_queries.len() {
             let deficit = segment_queries.len() - batch_nodes.len();
-            batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
+            // IMPORTANT (universality): duplicate last real path instead of empty,
+            // so downstream batch verification has fixed shape even under collisions.
+            if let Some(last) = batch_nodes.last().cloned() {
+                batch_nodes.extend(std::iter::repeat(last).take(deficit));
+            } else {
+                batch_nodes.extend(std::iter::repeat(vec![[0u8; 32]]).take(deficit));
+            }
         } else if batch_nodes.len() > segment_queries.len() {
             batch_nodes.truncate(segment_queries.len());
+        }
+
+        // Pad/truncate inner node vectors to fixed depth (stabilizes Groth16 constraint shape).
+        let target_inner = tree_num_leaves.trailing_zeros() as usize;
+        for node_vec in &mut batch_nodes {
+            node_vec.truncate(target_inner);
+            if node_vec.len() < target_inner {
+                node_vec.extend(std::iter::repeat([0u8; 32]).take(target_inner - node_vec.len()));
+            }
         }
 
         segment_witnesses.push(TraceSegmentWitness {
             queries: segment_queries,
             batch_nodes,
-            batch_depth: batch_proof.depth,
+            batch_depth: target_inner as u8,
             batch_indexes: idxs_aligned,
         });
     }
@@ -515,7 +561,7 @@ where
     let mut current_domain_size = initial_domain_size;
 
     for (_layer_idx, (query_vals, batch_proof)) in
-        layer_queries.iter().zip(&layer_proofs).enumerate()
+        layer_queries.into_iter().zip(layer_proofs.into_iter()).enumerate()
     {
         // Fold positions for this layer
         // NOTE: Fold using CURRENT domain, then divide (matches Winterfell line 256-257, 303-304)
@@ -592,62 +638,95 @@ where
             queries.push(FriQuery { values });
         }
 
-        // Collect unique (v_lo, v_hi) pairs and batch nodes metadata for batch verification
-        let unique_values: Vec<(u64, u64)> = folded_positions
+        // =========================================================================
+        // Universality (Groth16 CRS reuse):
+        //
+        // We must ensure allocation order inside the Groth16 circuit does NOT depend on
+        // proof-dependent index ordering. The simplest way is to carry FRI Merkle openings
+        // PER QUERY (length == num_queries) rather than "unique folded positions".
+        //
+        // We already expanded `queries` to length == num_queries (one per query position),
+        // so we also expand Merkle sibling paths to length == num_queries by mapping each
+        // query's folded position to its unique opening path.
+        // =========================================================================
+
+        // Per-query folded indexes (one per query, may contain duplicates).
+        let per_query_indexes: Vec<usize> = layer_positions.clone();
+        // Per-query (v_lo, v_hi) pairs in the same order as `layer_positions`.
+        let per_query_values: Vec<(u64, u64)> = queries
             .iter()
-            .map(|fp| {
-                let vals = folded_data
-                    .get(fp)
-                    .cloned()
-                    .expect("missing folded data for unique index");
+            .map(|q| {
                 assert!(
-                    vals.len() == folding_factor,
-                    "unique folded values must equal folding_factor"
+                    q.values.len() == folding_factor,
+                    "FRI per-query values must equal folding_factor"
                 );
-                let lo = vals[0];
-                let hi = vals[1];
-                (lo, hi)
+                (q.values[0], q.values[1])
             })
             .collect();
-        let unique_indexes: Vec<usize> = folded_positions.clone();
-        // Sanity: indexes in-range
-        for &idx in &unique_indexes {
-            assert!(idx < current_domain_size, "FRI index out of range");
-        }
-        // Sanity: unique lengths
-        assert!(
-            unique_indexes.len() == unique_values.len(),
-            "unique_indexes/unique_values length mismatch"
-        );
         // Batch proof structural checks
         let tree_num_leaves: usize = 1usize << (batch_proof.depth as usize);
         assert!(
             tree_num_leaves == current_domain_size,
             "FRI tree leaf count != folded domain size"
         );
-        assert!(
-            !batch_proof.nodes.is_empty(),
-            "FRI batch nodes must be non-empty"
-        );
-        // In Winterfell, nodes are grouped per opening (path), not per level here.
-        // We require nodes to be at least as long as uniques, and will pad/truncate to align.
-        let mut batch_nodes: Vec<Vec<[u8; 32]>> = batch_proof
-            .nodes
-            .iter()
-            .map(|v| v.iter().map(|d| d.as_bytes()).collect())
-            .collect();
-        if batch_nodes.len() < unique_indexes.len() {
-            let deficit = unique_indexes.len() - batch_nodes.len();
-            batch_nodes.extend(std::iter::repeat_with(|| Vec::new()).take(deficit));
-        } else if batch_nodes.len() > unique_indexes.len() {
-            batch_nodes.truncate(unique_indexes.len());
-        }
         let batch_depth: u8 = batch_proof.depth;
+
+        // Decompress batch proof into per-opening sibling paths for UNIQUE folded positions,
+        // then expand to PER-QUERY sibling paths using the per-query folded positions.
+        let unique_indexes: Vec<usize> = folded_positions.clone();
+        // Compute leaf digests for the UNIQUE openings (each leaf hashes the folding_factor values).
+        let leaf_digests: Vec<H::Digest> = unique_indexes
+            .iter()
+            .map(|idx| {
+                let vals = folded_data
+                    .get(idx)
+                    .cloned()
+                    .expect("missing folded data for unique index");
+                let elems: Vec<E> = vals
+                    .into_iter()
+                    .map(|v| E::try_from(v).unwrap_or(E::ZERO))
+                    .collect();
+                H::hash_elements(&elems)
+            })
+            .collect();
+        let openings = batch_proof
+            .into_openings(&leaf_digests, &unique_indexes)
+            .expect("decompress FRI batch proof into openings");
+        let unique_nodes: Vec<Vec<[u8; 32]>> = openings
+            .into_iter()
+            .map(|(_leaf, siblings)| siblings.into_iter().map(|d| d.as_bytes()).collect())
+            .collect();
+        assert!(
+            unique_nodes.len() == unique_indexes.len(),
+            "FRI openings count mismatch after decompression"
+        );
+        use std::collections::HashMap;
+        let mut nodes_by_index: HashMap<usize, Vec<[u8; 32]>> = HashMap::with_capacity(unique_indexes.len());
+        for (idx, nodes) in unique_indexes.iter().copied().zip(unique_nodes.into_iter()) {
+            nodes_by_index.insert(idx, nodes);
+        }
+        let mut batch_nodes: Vec<Vec<[u8; 32]>> = Vec::with_capacity(per_query_indexes.len());
+        for idx in &per_query_indexes {
+            let nodes = nodes_by_index
+                .get(idx)
+                .cloned()
+                .expect("missing Merkle path for per-query folded index");
+            batch_nodes.push(nodes);
+        }
+
+        // Pad/truncate inner node vectors to fixed depth (stabilizes Groth16 constraint shape).
+        let fri_target_inner = batch_depth as usize;
+        for node_vec in &mut batch_nodes {
+            node_vec.truncate(fri_target_inner);
+            if node_vec.len() < fri_target_inner {
+                node_vec.extend(std::iter::repeat([0u8; 32]).take(fri_target_inner - node_vec.len()));
+            }
+        }
 
         result.push(FriLayerQueries {
             queries,
-            unique_indexes,
-            unique_values,
+            unique_indexes: per_query_indexes,
+            unique_values: per_query_values,
             batch_nodes,
             batch_depth,
         });
@@ -703,6 +782,7 @@ fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
 }
 
 /// Compute statement hash binding all public data (including positions and ALL air params)
+#[allow(dead_code)]
 fn compute_statement_hash(
     trace_roots: &[[u8; 32]],
     comp_root: &[u8; 32],
@@ -761,6 +841,39 @@ fn compute_statement_hash(
 
     let hash = hasher.squeeze_field_elements::<InnerFr>(1);
     hash[0]
+}
+
+/// Compute the arming-friendly statement hash for Groth16.
+///
+/// Expected layout is `VerifierPublicInputs::to_elements()`:
+/// - First 4 u64s: `statement_hash` (Goldilocks ints)
+/// - Last 6 u64s (in this order):
+///   - `expected_checkpoint_count` (1)
+///   - `expected_mode_counter` (1)
+///   - `params_digest` (4)
+fn compute_armed_statement_hash_from_verifier_pub_inputs(pub_inputs: &[u64]) -> InnerFr {
+    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
+    use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
+    use ark_crypto_primitives::sponge::CryptographicSponge;
+
+    assert!(
+        pub_inputs.len() >= 22,
+        "Verifier public inputs too short to extract statement/expected-counters/params"
+    );
+
+    let stmt = &pub_inputs[0..4];
+    let tail = &pub_inputs[pub_inputs.len() - 6..];
+
+    let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
+    // Domain separator for arming statement.
+    sponge.absorb(&InnerFr::from(0xA11Du64));
+    for &v in stmt {
+        sponge.absorb(&InnerFr::from(v));
+    }
+    for &v in tail {
+        sponge.absorb(&InnerFr::from(v));
+    }
+    sponge.squeeze_field_elements::<InnerFr>(1)[0]
 }
 
 /// Compute Poseidon hash of all air_params (must match in-circuit computation exactly!)

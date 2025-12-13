@@ -213,7 +213,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // aux[2] = 2: TERMINAL mode - verify fri[6] == fri[7] (FRI final == expected)
     // aux[2] = 3: DEEP mode - verify fri[6] == fri[7] (DEEP computed == expected)
     // aux[2] = 4: STATEMENT mode - verify hash_state[0..3] == pub_inputs.statement_hash
-    // aux[2] = 5: INTERPRETER mode - verify hash_state[0..3] == pub_inputs.interpreter_hash
+    // aux[2] = 5: PARAMS mode - verify hash_state[0..3] matches expected params digest
+    // aux[2] = 6: (unused)
     // ========================================================================
     let aux_mode = current[AUX_START + 2];
     let one = E::ONE;
@@ -221,6 +222,7 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let three = E::from(super::BaseElement::new(3));
     let four = E::from(super::BaseElement::new(4));
     let five = E::from(super::BaseElement::new(5));
+    let six = E::from(super::BaseElement::new(6));
     
     // Statement hash binding constraints (mode 4)
     // When aux[2] = 4, verify hash_state matches public input statement_hash
@@ -230,13 +232,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let statement_constraint_2 = current_hash[2] - E::from(pub_inputs.statement_hash[2]);
     let statement_constraint_3 = current_hash[3] - E::from(pub_inputs.statement_hash[3]);
     
-    // Interpreter hash binding constraints (mode 5)
-    // When aux[2] = 5, verify hash_state matches public input interpreter_hash
-    // This binds the constraint formula
-    let interpreter_constraint_0 = current_hash[0] - E::from(pub_inputs.interpreter_hash[0]);
-    let interpreter_constraint_1 = current_hash[1] - E::from(pub_inputs.interpreter_hash[1]);
-    let interpreter_constraint_2 = current_hash[2] - E::from(pub_inputs.interpreter_hash[2]);
-    let interpreter_constraint_3 = current_hash[3] - E::from(pub_inputs.interpreter_hash[3]);
+    // Params digest binding constraints (mode 5)
+    // When aux[2] = 5, verify hash_state matches public input params_digest.
+    let params_constraint_0 = current_hash[0] - E::from(pub_inputs.params_digest[0]);
+    let params_constraint_1 = current_hash[1] - E::from(pub_inputs.params_digest[1]);
+    let params_constraint_2 = current_hash[2] - E::from(pub_inputs.params_digest[2]);
+    let params_constraint_3 = current_hash[3] - E::from(pub_inputs.params_digest[3]);
     
     // Root verification: hash_state[i] == fri[i] for i in 0..4
     let root_constraint_0 = current_hash[0] - current[FRI_START];
@@ -265,9 +266,14 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 + both_not_special * copy_constraint;
         } else if i < 4 {
             // Root verification for mode 0: hash_state == fri[0..3]
-            // Use 5 factors to exclude modes 4 and 5 from root check
-            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4)(aux[2]-5) = non-zero only when aux[2]=0
-            let is_root_check = (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four) * (aux_mode - five);
+            // Use factors to exclude modes 4,5,6 from root check.
+            // is_root_check = Π_{k=1..6}(aux[2]-k) = non-zero only when aux[2]=0
+            let is_root_check = (aux_mode - one)
+                * (aux_mode - two)
+                * (aux_mode - three)
+                * (aux_mode - four)
+                * (aux_mode - five)
+                * (aux_mode - six);
             let root_constraint = match i {
                 0 => root_constraint_0,
                 1 => root_constraint_1,
@@ -276,8 +282,14 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             };
             
             // Statement hash verification for mode 4
-            // is_statement_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-5) = non-zero only when aux[2]=4
-            let is_statement_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - five);
+            // is_statement_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-5)*(aux[2]-6)
+            // = non-zero only when aux[2]=4
+            let is_statement_check = aux_mode
+                * (aux_mode - one)
+                * (aux_mode - two)
+                * (aux_mode - three)
+                * (aux_mode - five)
+                * (aux_mode - six);
             let statement_constraint = match i {
                 0 => statement_constraint_0,
                 1 => statement_constraint_1,
@@ -285,19 +297,25 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 _ => statement_constraint_3,
             };
             
-            // Interpreter hash verification for mode 5
-            // is_interpreter_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-4) = non-zero only when aux[2]=5
-            let is_interpreter_check = aux_mode * (aux_mode - one) * (aux_mode - two) * (aux_mode - three) * (aux_mode - four);
-            let interpreter_constraint = match i {
-                0 => interpreter_constraint_0,
-                1 => interpreter_constraint_1,
-                2 => interpreter_constraint_2,
-                _ => interpreter_constraint_3,
+            // Params digest verification for mode 5
+            // is_params_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-4)*(aux[2]-6)
+            // = non-zero only when aux[2]=5
+            let is_params_check = aux_mode
+                * (aux_mode - one)
+                * (aux_mode - two)
+                * (aux_mode - three)
+                * (aux_mode - four)
+                * (aux_mode - six);
+            let params_constraint = match i {
+                0 => params_constraint_0,
+                1 => params_constraint_1,
+                2 => params_constraint_2,
+                _ => params_constraint_3,
             };
             
             result[idx] = op.is_deep * is_root_check * root_constraint
                 + op.is_deep * is_statement_check * statement_constraint
-                + op.is_deep * is_interpreter_check * interpreter_constraint
+                + op.is_deep * is_params_check * params_constraint
                 + both_not_special * copy_constraint;
         } else {
             // Columns 5, 7: copy constraint only
@@ -345,52 +363,50 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         } else if i == 1 {
             // mode counter (aux[1])
             //
-            // Tracks statement hash (mode 4) and interpreter hash (mode 5) verifications.
-            // Packed encoding: aux[1] = statement_count + 64 * interpreter_count
+            // Tracks statement hash (mode 4) and params digest (mode 5) verifications.
             //
-            // Final boundary: aux[1] = 1 + 64 = 65 (exactly 1 of each)
+            // Packed encoding: aux[1] = statement_count + 4096 * params_count
             //
             // This prevents attacks where an attacker skips these critical bindings
             // or substitutes other check types.
             //
             // Update rules:
             // - On DeepCompose mode 4: aux[1] += 1 (increment statement count)
-            // - On DeepCompose mode 5: aux[1] += 64 (increment interpreter count)
+            // - On DeepCompose mode 5: aux[1] += 4096 (increment params count)
             // - Otherwise: aux[1] unchanged (copy)
             //
-            // is_mode_4 and is_mode_5 are computed using the existing selectors:
-            // is_statement_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-5)
-            //   = 4*3*2*1*(-1) = -24 when mode=4, 0 otherwise
-            // is_interpreter_check = aux[2]*(aux[2]-1)*(aux[2]-2)*(aux[2]-3)*(aux[2]-4)
-            //   = 5*4*3*2*1 = 120 when mode=5, 0 otherwise
-            //
-            // We normalize by dividing by these constants to get 0/1 indicators.
+            // We normalize polynomial selectors to 0/1 indicators.
             let mode = current[AUX_START + 2];
             let one = E::ONE;
             let two = E::from(super::BaseElement::new(2));
             let three = E::from(super::BaseElement::new(3));
             let four = E::from(super::BaseElement::new(4));
             let five = E::from(super::BaseElement::new(5));
+            let six = E::from(super::BaseElement::new(6));
             
-            // Raw selector for mode 4 (non-zero = -24 when mode=4)
-            let mode_4_raw = mode * (mode - one) * (mode - two) * (mode - three) * (mode - five);
-            // Normalize: divide by -24 to get 1 when mode=4
-            // (-24)^(-1) mod p: since 768614336225607680 * 24 = p-1, we have (-24)^(-1) = 768614336225607680
-            let neg_24_inv = E::from(super::BaseElement::new(768614336225607680u64));
-            let is_mode_4 = mode_4_raw * neg_24_inv;
+            // Raw selector for mode 4 (non-zero = 48 when mode=4; zero at mode=0..6 except 4):
+            // mode_4_raw = mode*(mode-1)*(mode-2)*(mode-3)*(mode-5)*(mode-6)
+            let mode_4_raw =
+                mode * (mode - one) * (mode - two) * (mode - three) * (mode - five) * (mode - six);
+            // Normalize: divide by 48 to get 1 when mode=4
+            // 48^(-1) mod Goldilocks prime = 18062436901301780481
+            let inv_48 = E::from(super::BaseElement::new(18062436901301780481u64));
+            let is_mode_4 = mode_4_raw * inv_48;
             
-            // Raw selector for mode 5 (non-zero = 120 when mode=5)
-            let mode_5_raw = mode * (mode - one) * (mode - two) * (mode - three) * (mode - four);
-            // Normalize: divide by 120 to get 1 when mode=5
-            // 120^(-1) mod p: since 153722867245121536 * 120 = p-1, we have 120^(-1) = p - 153722867245121536
-            let inv_120 = E::from(super::BaseElement::new(18293021202169462785u64));
-            let is_mode_5 = mode_5_raw * inv_120;
+            // Raw selector for mode 5 (non-zero = -120 when mode=5; zero at mode=0..6 except 5):
+            // mode_5_raw = mode*(mode-1)*(mode-2)*(mode-3)*(mode-4)*(mode-6)
+            let mode_5_raw =
+                mode * (mode - one) * (mode - two) * (mode - three) * (mode - four) * (mode - six);
+            // Normalize: divide by -120 to get 1 when mode=5
+            // (-120)^(-1) mod Goldilocks prime = 153722867245121536
+            let inv_neg_120 = E::from(super::BaseElement::new(153722867245121536u64));
+            let is_mode_5 = mode_5_raw * inv_neg_120;
             
             // Increment values
-            let sixty_four = E::from(super::BaseElement::new(64));
+            let four_thousand_ninety_six = E::from(super::BaseElement::new(4096));
             
-            // Constraint: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 * 1 + is_mode_5 * 64)
-            let increment = op.is_deep * (is_mode_4 + is_mode_5 * sixty_four);
+            // Constraint: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 * 1 + is_mode_5 * 4096)
+            let increment = op.is_deep * (is_mode_4 + is_mode_5 * four_thousand_ninety_six);
             let mode_counter_constraint = aux_next - aux_curr - increment;
             
             result[idx] = mode_counter_constraint;

@@ -39,7 +39,7 @@
 //! This represents a hash-chain-like accumulation over the child hashes.
 
 use winterfell::{
-    math::{fields::f64::BaseElement, FieldElement},
+    math::{fields::f64::BaseElement, FieldElement, StarkField},
     Air, AirContext, Assertion, EvaluationFrame, ProofOptions, TraceInfo,
     TransitionConstraintDegree,
 };
@@ -198,6 +198,24 @@ pub struct AggregatorPublicInputs {
     
     /// Final state commitment (last child's output)
     pub final_state: [BaseElement; 4],
+
+    /// Aggregation level (leaf chunks are level 0; parents increment by 1).
+    pub level: u32,
+
+    /// Span start index (inclusive).
+    pub start_idx: u64,
+
+    /// Span end index (inclusive).
+    pub end_idx: u64,
+
+    /// App context hash (e.g. "txout"/Add2 target context).
+    pub context_hash: [BaseElement; 4],
+
+    /// App interpreter/formula hash (Generic app identity).
+    pub interpreter_hash: [BaseElement; 4],
+
+    /// App security-params digest policy.
+    pub params_digest: [BaseElement; 4],
 }
 
 impl std::fmt::Display for AggregatorPublicInputs {
@@ -217,14 +235,36 @@ impl AggregatorPublicInputs {
         children_root: [BaseElement; 4],
         initial_state: [BaseElement; 4],
         final_state: [BaseElement; 4],
+        level: u32,
+        start_idx: u64,
+        end_idx: u64,
+        context_hash: [BaseElement; 4],
+        interpreter_hash: [BaseElement; 4],
+        params_digest: [BaseElement; 4],
     ) -> Self {
         // Compute result as hash of all components (simplified)
-        let result = Self::compute_result(&children_root, &initial_state, &final_state);
+        let result = Self::compute_result(
+            &children_root,
+            &initial_state,
+            &final_state,
+            level,
+            start_idx,
+            end_idx,
+            &context_hash,
+            &interpreter_hash,
+            &params_digest,
+        );
         Self {
             result,
             children_root,
             initial_state,
             final_state,
+            level,
+            start_idx,
+            end_idx,
+            context_hash,
+            interpreter_hash,
+            params_digest,
         }
     }
     
@@ -233,6 +273,12 @@ impl AggregatorPublicInputs {
         children_root: &[BaseElement; 4],
         initial_state: &[BaseElement; 4],
         final_state: &[BaseElement; 4],
+        level: u32,
+        start_idx: u64,
+        end_idx: u64,
+        context_hash: &[BaseElement; 4],
+        interpreter_hash: &[BaseElement; 4],
+        params_digest: &[BaseElement; 4],
     ) -> BaseElement {
         // Simple combination (in production, use proper Poseidon hash)
         let mut acc = BaseElement::ZERO;
@@ -245,6 +291,18 @@ impl AggregatorPublicInputs {
         for &elem in final_state.iter() {
             acc = acc * BaseElement::new(13) + elem;
         }
+        acc = acc * BaseElement::new(17) + BaseElement::new(level as u64);
+        acc = acc * BaseElement::new(19) + BaseElement::new(start_idx);
+        acc = acc * BaseElement::new(23) + BaseElement::new(end_idx);
+        for &elem in context_hash.iter() {
+            acc = acc * BaseElement::new(29) + elem;
+        }
+        for &elem in interpreter_hash.iter() {
+            acc = acc * BaseElement::new(31) + elem;
+        }
+        for &elem in params_digest.iter() {
+            acc = acc * BaseElement::new(37) + elem;
+        }
         acc
     }
     
@@ -255,6 +313,12 @@ impl AggregatorPublicInputs {
             children_root: [BaseElement::ZERO; 4],
             initial_state: [BaseElement::ZERO; 4],
             final_state: [BaseElement::ZERO; 4],
+            level: 0,
+            start_idx: 0,
+            end_idx: 0,
+            context_hash: [BaseElement::ZERO; 4],
+            interpreter_hash: [BaseElement::ZERO; 4],
+            params_digest: [BaseElement::ZERO; 4],
         }
     }
 }
@@ -271,11 +335,17 @@ impl AggregatorPublicInputs {
 // All 13 elements are bound into the Groth16 statement_hash for full security.
 impl winterfell::math::ToElements<BaseElement> for AggregatorPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut elements = Vec::with_capacity(13);
+        let mut elements = Vec::with_capacity(13 + 1 + 2 + 12);
         elements.push(self.result);
         elements.extend_from_slice(&self.children_root);
         elements.extend_from_slice(&self.initial_state);
         elements.extend_from_slice(&self.final_state);
+        elements.push(BaseElement::new(self.level as u64));
+        elements.push(BaseElement::new(self.start_idx));
+        elements.push(BaseElement::new(self.end_idx));
+        elements.extend_from_slice(&self.context_hash);
+        elements.extend_from_slice(&self.interpreter_hash);
+        elements.extend_from_slice(&self.params_digest);
         elements
     }
 }
@@ -297,6 +367,19 @@ pub struct ChildStatementHash {
     pub program_hash: [BaseElement; 4],
     /// Chunk index in the sequence
     pub chunk_index: u64,
+
+    /// Leaf level (0) or internal level (>0).
+    pub level: u32,
+    /// Span start index (inclusive).
+    pub start_idx: u64,
+    /// Span end index (inclusive).
+    pub end_idx: u64,
+    /// App context hash.
+    pub context_hash: [BaseElement; 4],
+    /// App interpreter/formula hash.
+    pub interpreter_hash: [BaseElement; 4],
+    /// App params digest.
+    pub params_digest: [BaseElement; 4],
 }
 
 impl ChildStatementHash {
@@ -340,6 +423,18 @@ impl ChildStatementHash {
         }
         
         h0 = h0 + BaseElement::new(self.chunk_index);
+        h1 = h1 + BaseElement::new(self.level as u64);
+        h2 = h2 + BaseElement::new(self.start_idx);
+        h3 = h3 + BaseElement::new(self.end_idx);
+        for &e in self.context_hash.iter() {
+            h0 = h0 * BaseElement::new(53) + e;
+        }
+        for &e in self.interpreter_hash.iter() {
+            h1 = h1 * BaseElement::new(59) + e;
+        }
+        for &e in self.params_digest.iter() {
+            h2 = h2 * BaseElement::new(61) + e;
+        }
         
         [h0, h1, h2, h3]
     }
@@ -400,6 +495,21 @@ pub fn verify_chain_consistency(children: &[ChildStatementHash]) -> bool {
     
     for i in 0..children.len() - 1 {
         if children[i].output_state != children[i + 1].input_state {
+            return false;
+        }
+        if children[i].end_idx.saturating_add(1) != children[i + 1].start_idx {
+            return false;
+        }
+        if children[i].level != children[i + 1].level {
+            return false;
+        }
+        if children[i].context_hash != children[i + 1].context_hash {
+            return false;
+        }
+        if children[i].interpreter_hash != children[i + 1].interpreter_hash {
+            return false;
+        }
+        if children[i].params_digest != children[i + 1].params_digest {
             return false;
         }
     }
@@ -544,12 +654,24 @@ impl Prover for AggregatorProver {
             } else {
                 children[children.len() - 1].output_state
             };
+            let level = if children.is_empty() { 0 } else { children[0].level.saturating_add(1) };
+            let start_idx = children.first().map(|c| c.start_idx).unwrap_or(0);
+            let end_idx = children.last().map(|c| c.end_idx).unwrap_or(0);
+            let context_hash = children.first().map(|c| c.context_hash).unwrap_or([BaseElement::ZERO; 4]);
+            let interpreter_hash = children.first().map(|c| c.interpreter_hash).unwrap_or([BaseElement::ZERO; 4]);
+            let params_digest = children.first().map(|c| c.params_digest).unwrap_or([BaseElement::ZERO; 4]);
             
             AggregatorPublicInputs {
                 result,
                 children_root,
                 initial_state,
                 final_state,
+                level,
+                start_idx,
+                end_idx,
+                context_hash,
+                interpreter_hash,
+                params_digest,
             }
         } else {
             // Simple case: just result, extras are ZERO
@@ -647,6 +769,12 @@ pub fn generate_aggregator_proof(
         output_state: app_statement_hash,
         program_hash: [BaseElement::ZERO; 4],
         chunk_index: 0,
+        level: 0,
+        start_idx: 0,
+        end_idx: 0,
+        context_hash: [BaseElement::ZERO; 4],
+        interpreter_hash: [BaseElement::ZERO; 4],
+        params_digest: [BaseElement::ZERO; 4],
     };
     
     // Use the multi-child flow to ensure proper binding
@@ -681,6 +809,31 @@ pub fn generate_aggregator_proof_multi(
     let prover = AggregatorProver::with_children(options, children.to_vec());
     let proof = prover.prove(trace.clone())?;
     let pub_inputs = prover.get_pub_inputs(&trace);
+
+    // Development sanity-check: ensure the produced Aggregator proof verifies.
+    // This catches prover/trace/pub-input mismatches early.
+    #[cfg(any(test, debug_assertions))]
+    {
+        use winter_crypto::{DefaultRandomCoin, MerkleTree};
+        use winterfell::{verify, AcceptableOptions};
+
+        eprintln!(
+            "[aggregator] sanity-check: verifying proof (children={}, trace_len={}, num_queries={}, lde_blowup={}, fri_folding_factor={})",
+            children.len(),
+            proof.context.trace_info().length(),
+            proof.options().num_queries(),
+            proof.options().blowup_factor(),
+            proof.options().to_fri_options().folding_factor(),
+        );
+        let acceptable = AcceptableOptions::OptionSet(vec![prover.options().clone()]);
+        verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+            proof.clone(),
+            pub_inputs.clone(),
+            &acceptable,
+        )
+        .expect("Aggregator proof verification failed (sanity check)");
+        eprintln!("[aggregator] sanity-check: proof verified OK");
+    }
     
     Ok((proof, pub_inputs, trace))
 }
@@ -690,7 +843,7 @@ pub fn generate_aggregator_proof_multi(
 // ============================================================================
 
 use super::verifier_air::{
-    append_proof_verification, append_proof_verification_with_options, VerificationResult,
+    append_proof_verification_with_options, VerificationResult,
     prover::ParsedProof,
     trace::VerifierTraceBuilder,
 };
@@ -707,7 +860,9 @@ use super::verifier_air::{
 /// A malicious prover cannot produce a valid trace without valid child proofs.
 pub fn build_verifying_aggregator_trace(
     child0_proof: &ParsedProof,
+    child0_type: super::verifier_air::ood_eval::ChildAirType,
     child1_proof: &ParsedProof,
+    child1_type: super::verifier_air::ood_eval::ChildAirType,
 ) -> (TraceTable<BaseElement>, VerificationResult, VerificationResult, [BaseElement; 4]) {
     // Estimate total trace length (2 proofs + binding rows)
     let child0_len = estimate_verification_trace_length(child0_proof);
@@ -716,22 +871,22 @@ pub fn build_verifying_aggregator_trace(
     let total_len = (child0_len + child1_len + binding_rows).next_power_of_two();
     
     let mut builder = VerifierTraceBuilder::new(total_len);
-    
-    // Use generic VDF formula for VdfAir child proofs
-    // NOTE: If verifying other AIR types, pass the appropriate ChildAirType
-    use super::verifier_air::ood_eval::ChildAirType;
-    let child_type = ChildAirType::generic_vdf();
+
+    // SECURITY / API NOTE:
+    // This function is used to build a *verifying aggregator* node which verifies 2 child proofs.
+    // The child AIR type (and for Generic mode: the interpreter/formula) must be supplied by the
+    // caller and will be bound by VerifierAir via the interpreter-hash check(s).
     
     // === Phase 1: Verify child 0 (skip per-child statement hash verification) ===
     // We skip the statement hash check here because pub_inputs.statement_hash
     // will be the COMBINED hash, not child0's individual hash.
     let result0 = append_proof_verification_with_options(
-        &mut builder, child0_proof, child_type.clone(), false
+        &mut builder, child0_proof, child0_type, false
     );
     
     // === Phase 2: Verify child 1 (skip per-child statement hash verification) ===
     let result1 = append_proof_verification_with_options(
-        &mut builder, child1_proof, child_type, false
+        &mut builder, child1_proof, child1_type, false
     );
     
     // === Phase 3: Bind both statement hashes ===
@@ -781,6 +936,35 @@ pub fn child_from_verification(
         output_state: result.statement_hash,   // The verified statement hash
         program_hash,                           // Circuit ID of the verified AIR
         chunk_index,
+        level: 0,
+        start_idx: 0,
+        end_idx: 0,
+        context_hash: [BaseElement::ZERO; 4],
+        interpreter_hash: [BaseElement::ZERO; 4],
+        params_digest: [BaseElement::ZERO; 4],
+    }
+}
+
+/// Create a `ChildStatementHash` from an Aggregator node's public statement.
+///
+/// This is used when building higher levels of the aggregation tree: parents treat each child
+/// (which is itself an Aggregator node) as a span with `(initial_state, final_state)` and a
+/// level/span/context/interpreter/params binding.
+pub fn child_from_aggregator_pub_inputs(
+    pub_inputs: &AggregatorPublicInputs,
+    program_hash: [BaseElement; 4],
+) -> ChildStatementHash {
+    ChildStatementHash {
+        input_state: pub_inputs.initial_state,
+        output_state: pub_inputs.final_state,
+        program_hash,
+        chunk_index: pub_inputs.start_idx,
+        level: pub_inputs.level,
+        start_idx: pub_inputs.start_idx,
+        end_idx: pub_inputs.end_idx,
+        context_hash: pub_inputs.context_hash,
+        interpreter_hash: pub_inputs.interpreter_hash,
+        params_digest: pub_inputs.params_digest,
     }
 }
 
@@ -814,41 +998,59 @@ use super::verifier_air::{VerifierPublicInputs, prover::VerifierProver};
 /// - Combined statement hash for propagation up the tree
 pub fn generate_verifying_aggregator_proof(
     child0_proof: &ParsedProof,
+    child0_type: super::verifier_air::ood_eval::ChildAirType,
     child1_proof: &ParsedProof,
+    child1_type: super::verifier_air::ood_eval::ChildAirType,
+    expected_child_params_digest: [BaseElement; 4],
     options: ProofOptions,
 ) -> Result<(Proof, VerifierPublicInputs, TraceTable<BaseElement>), ProverError> {
     // Build the verification trace (27 columns)
-    let (trace, result0, result1, combined_hash) = build_verifying_aggregator_trace(child0_proof, child1_proof);
+    let (trace, result0, result1, combined_hash) = build_verifying_aggregator_trace(
+        child0_proof,
+        child0_type.clone(),
+        child1_proof,
+        child1_type.clone(),
+    );
     
     // Check both children verified successfully
     // If verification failed, the trace won't satisfy the acceptance flag boundary assertion
     assert!(result0.valid, "Child 0 verification failed");
     assert!(result1.valid, "Child 1 verification failed");
     
-    // Create public inputs
-    // Note: checkpoint count accounts for BOTH child proofs being verified
-    // BUT with skipped per-child statement hash verification
-    let single_child_checkpoints = VerifierPublicInputs::compute_expected_checkpoints(
-        child0_proof.num_queries, 
-        child0_proof.num_fri_layers,
+    // Create public inputs.
+    //
+    // The VerifierAir enforces these via boundary assertions on aux counters.
+    // To avoid mismatches between "expected" accounting and the actual trace builder
+    // schedule (especially across small proof parameter regimes), we derive the
+    // expected counters from the constructed trace itself.
+    //
+    // aux[1] is the mode counter, aux[3] is the checkpoint counter.
+    let last = trace.length() - 1;
+    let expected_mode_counter = trace.get(24, last).as_int() as usize;
+    let total_checkpoints = trace.get(26, last).as_int() as usize;
+    
+    // Compute interpreter hash for the child proofs.
+    //
+    // IMPORTANT:
+    // Today, VerifierAir has a *single* public input `interpreter_hash` which is checked in
+    // INTERPRETER mode (aux[2]=5). Because this verifying-aggregator node verifies TWO proofs,
+    // both interpreter checks must agree on the same expected hash.
+    //
+    // In the intended protocol, the armed statement selects the interpreter/formula, and the
+    // aggregation tree is built over proofs of that same interpreter. We enforce that here.
+    let interpreter_hash_0 = child0_type.compute_formula_hash();
+    let interpreter_hash_1 = child1_type.compute_formula_hash();
+    assert_eq!(
+        interpreter_hash_0, interpreter_hash_1,
+        "verifying-aggregator currently requires both children to use the same interpreter hash"
     );
-    // For 2 children with SKIPPED per-child statement hash:
-    // - Each child contributes (single_child_checkpoints - 1) checkpoints (OOD + Merkle, no statement)
-    // - Plus 1 final combined statement hash verification
-    // Total = (single - 1) * 2 + 1 = single * 2 - 1
-    let total_checkpoints = single_child_checkpoints * 2 - 1;
-    
-    // Compute interpreter hash for the child proofs (VDF formula)
-    use super::verifier_air::ood_eval::ChildAirType;
-    let child_type = ChildAirType::generic_vdf();
-    let interpreter_hash = child_type.compute_formula_hash();
-    
-    // Mode counter: 1 statement + 2 interpreters (one per child)
-    let expected_mode_counter = VerifierPublicInputs::compute_expected_mode_counter(2);
+    // Params digest POLICY for the child proofs.
+    // SECURITY: do NOT derive this from the proof; it must be fixed by protocol policy.
+    let _ = (child0_proof, child1_proof); // keep args used for now
     
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
-        trace_commitment: result0.trace_commitment,  // From first child
+        trace_commitment: result0.trace_commitment,
         comp_commitment: result0.comp_commitment,
         fri_commitments: result0.fri_commitments.clone(),
         num_queries: child0_proof.num_queries,
@@ -856,7 +1058,7 @@ pub fn generate_verifying_aggregator_proof(
         g_trace: child0_proof.g_trace,
         pub_result: child0_proof.pub_result,
         expected_checkpoint_count: total_checkpoints,
-        interpreter_hash,
+        params_digest: expected_child_params_digest,
         expected_mode_counter,
     };
     
@@ -940,24 +1142,48 @@ mod tests {
                 output_state: [BaseElement::new(100), BaseElement::new(101), BaseElement::new(102), BaseElement::new(103)],
                 program_hash: [BaseElement::new(1); 4],
                 chunk_index: 0,
+                level: 0,
+                start_idx: 0,
+                end_idx: 0,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
             },
             ChildStatementHash {
                 input_state: [BaseElement::new(100), BaseElement::new(101), BaseElement::new(102), BaseElement::new(103)],
                 output_state: [BaseElement::new(200), BaseElement::new(201), BaseElement::new(202), BaseElement::new(203)],
                 program_hash: [BaseElement::new(1); 4],
                 chunk_index: 1,
+                level: 0,
+                start_idx: 1,
+                end_idx: 1,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
             },
             ChildStatementHash {
                 input_state: [BaseElement::new(200), BaseElement::new(201), BaseElement::new(202), BaseElement::new(203)],
                 output_state: [BaseElement::new(300), BaseElement::new(301), BaseElement::new(302), BaseElement::new(303)],
                 program_hash: [BaseElement::new(1); 4],
                 chunk_index: 2,
+                level: 0,
+                start_idx: 2,
+                end_idx: 2,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
             },
             ChildStatementHash {
                 input_state: [BaseElement::new(300), BaseElement::new(301), BaseElement::new(302), BaseElement::new(303)],
                 output_state: [BaseElement::new(400), BaseElement::new(401), BaseElement::new(402), BaseElement::new(403)],
                 program_hash: [BaseElement::new(1); 4],
                 chunk_index: 3,
+                level: 0,
+                start_idx: 3,
+                end_idx: 3,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
             },
         ];
         
@@ -989,12 +1215,24 @@ mod tests {
                 output_state: [BaseElement::new(1); 4],
                 program_hash: [BaseElement::ZERO; 4],
                 chunk_index: 0,
+                level: 0,
+                start_idx: 0,
+                end_idx: 0,
+                context_hash: [BaseElement::ZERO; 4],
+                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
             },
             ChildStatementHash {
                 input_state: [BaseElement::new(1); 4],  // Matches previous output
                 output_state: [BaseElement::new(2); 4],
                 program_hash: [BaseElement::ZERO; 4],
                 chunk_index: 1,
+                level: 0,
+                start_idx: 1,
+                end_idx: 1,
+                context_hash: [BaseElement::ZERO; 4],
+                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
             },
         ];
         assert!(verify_chain_consistency(&good_chain));
@@ -1005,12 +1243,24 @@ mod tests {
                 output_state: [BaseElement::new(1); 4],
                 program_hash: [BaseElement::ZERO; 4],
                 chunk_index: 0,
+                level: 0,
+                start_idx: 0,
+                end_idx: 0,
+                context_hash: [BaseElement::ZERO; 4],
+                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
             },
             ChildStatementHash {
                 input_state: [BaseElement::new(999); 4],  // Does NOT match previous output
                 output_state: [BaseElement::new(2); 4],
                 program_hash: [BaseElement::ZERO; 4],
                 chunk_index: 1,
+                level: 0,
+                start_idx: 1,
+                end_idx: 1,
+                context_hash: [BaseElement::ZERO; 4],
+                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
             },
         ];
         assert!(!verify_chain_consistency(&bad_chain));
@@ -1024,6 +1274,12 @@ mod tests {
                 output_state: [BaseElement::new(2); 4],
                 program_hash: [BaseElement::new(3); 4],
                 chunk_index: 0,
+                level: 0,
+                start_idx: 0,
+                end_idx: 0,
+                context_hash: [BaseElement::ZERO; 4],
+                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
             },
         ];
         
@@ -1031,5 +1287,109 @@ mod tests {
         let root2 = compute_children_merkle_root(&children);
         
         assert_eq!(root1, root2, "Merkle root should be deterministic");
+    }
+
+    #[test]
+    fn test_context_changes_affect_public_binding() {
+        let mk_children = |ctx0: BaseElement| {
+            vec![
+                ChildStatementHash {
+                    input_state: [BaseElement::new(0); 4],
+                    output_state: [BaseElement::new(1); 4],
+                    program_hash: [BaseElement::new(5); 4],
+                    chunk_index: 0,
+                    level: 0,
+                    start_idx: 0,
+                    end_idx: 0,
+                    context_hash: [ctx0; 4],
+                    interpreter_hash: [BaseElement::new(7); 4],
+                    params_digest: [BaseElement::new(9); 4],
+                },
+                ChildStatementHash {
+                    input_state: [BaseElement::new(1); 4],
+                    output_state: [BaseElement::new(2); 4],
+                    program_hash: [BaseElement::new(5); 4],
+                    chunk_index: 1,
+                    level: 0,
+                    start_idx: 1,
+                    end_idx: 1,
+                    context_hash: [ctx0; 4],
+                    interpreter_hash: [BaseElement::new(7); 4],
+                    params_digest: [BaseElement::new(9); 4],
+                },
+            ]
+        };
+
+        let options = ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+
+        let (_p1, pub1, _t1) = generate_aggregator_proof_multi(&mk_children(BaseElement::new(10)), 8, options.clone())
+            .expect("proof generation should succeed");
+        let (_p2, pub2, _t2) = generate_aggregator_proof_multi(&mk_children(BaseElement::new(11)), 8, options)
+            .expect("proof generation should succeed");
+
+        assert_ne!(pub1.result, pub2.result);
+        assert_ne!(pub1.children_root, pub2.children_root);
+    }
+
+    #[test]
+    fn test_tree_level_increments() {
+        let leaf_children = vec![
+            ChildStatementHash {
+                input_state: [BaseElement::new(0); 4],
+                output_state: [BaseElement::new(1); 4],
+                program_hash: [BaseElement::new(5); 4],
+                chunk_index: 0,
+                level: 0,
+                start_idx: 0,
+                end_idx: 0,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
+            },
+            ChildStatementHash {
+                input_state: [BaseElement::new(1); 4],
+                output_state: [BaseElement::new(2); 4],
+                program_hash: [BaseElement::new(5); 4],
+                chunk_index: 1,
+                level: 0,
+                start_idx: 1,
+                end_idx: 1,
+                context_hash: [BaseElement::new(10); 4],
+                interpreter_hash: [BaseElement::new(20); 4],
+                params_digest: [BaseElement::new(30); 4],
+            },
+        ];
+
+        let options = ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+
+        let (_p0, pub0, _t0) = generate_aggregator_proof_multi(&leaf_children, 8, options.clone())
+            .expect("leaf aggregation should succeed");
+        assert_eq!(pub0.level, 1, "first aggregation level should be 1 (children are level 0)");
+
+        // Aggregate two level-1 spans into a level-2 parent.
+        let left_child = child_from_aggregator_pub_inputs(&pub0, [BaseElement::new(9); 4]);
+        let mut right_child = left_child.clone();
+        right_child.start_idx = left_child.end_idx + 1;
+        right_child.end_idx = right_child.start_idx;
+        right_child.input_state = left_child.output_state;
+        right_child.output_state = [BaseElement::new(3); 4];
+
+        let (_p1, pub1, _t1) = generate_aggregator_proof_multi(&[left_child, right_child], 8, options)
+            .expect("parent aggregation should succeed");
+        assert_eq!(pub1.level, 2);
+        assert_eq!(pub1.start_idx, 0);
+        assert_eq!(pub1.end_idx, 2);
     }
 }

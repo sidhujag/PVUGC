@@ -167,6 +167,30 @@ pub struct FriQuery {
 
 impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<InnerFr>) -> Result<(), SynthesisError> {
+        #[cfg(any(test, debug_assertions))]
+        let debug_checkpoint = |label: &str, cs: &ConstraintSystemRef<InnerFr>| {
+            // Always print shape; this is stable during synthesis.
+            eprintln!(
+                "[r1cs][shape] {}: constraints={} public_inputs={} witnesses={}",
+                label,
+                cs.num_constraints(),
+                cs.num_instance_variables(),
+                cs.num_witness_variables(),
+            );
+            // Best-effort: don't panic inside constraint generation; just print.
+            let ok = match cs.is_satisfied() {
+                Ok(v) => v,
+                // During synthesis some variables may not have assignments yet; don't treat
+                // this as a meaningful UNSAT signal.
+                Err(SynthesisError::AssignmentMissing) => return,
+                Err(_) => false,
+            };
+            if !ok {
+                eprintln!("[r1cs][checkpoint] UNSAT at {}", label);
+                eprintln!("[r1cs][checkpoint] first failing: {:?}", cs.which_is_unsatisfied());
+            }
+        };
+
         // Allocate commitment bytes as witnesses (used for both statement hash and later verification)
         let trace_root_bytes: Vec<Vec<UInt8<InnerFr>>> = self
             .trace_commitment_le32
@@ -191,6 +215,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                     .collect()
             })
             .collect::<Result<_, _>>()?;
+        let expected_ood_commitment_le32 = self.ood_commitment_le32;
         let ood_commit_bytes: Vec<UInt8<InnerFr>> = self
             .ood_commitment_le32
             .iter()
@@ -199,7 +224,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
 
         // STEP 1: Bind commitments to public statement hash
         bind_statement_hash(
-            cs.clone(),
+            ark_relations::ns!(cs, "step1_bind_statement_hash").cs(),
             self.statement_hash,
             &trace_root_bytes,
             &comp_root_bytes,
@@ -210,16 +235,20 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &self.air_params,
         )?;
 
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step1_bind_statement_hash", &cs);
+
         // STEP 1.5: Verify OOD frame commitment using light RPO
+        let cs_ood = ark_relations::ns!(cs, "step1_5_ood_commitment").cs();
         use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
         let rpo_params = RpoParamsGLLight::default();
 
         // Allocate OOD values - MATCH Winterfell's merge_ood_evaluations order
         // Per Winterfell source: [trace_current, constraint_current, trace_next, constraint_next]
-        let ood_trace_current_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_trace_current)?;
-        let ood_comp_current_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_comp)?;
-        let ood_trace_next_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_trace_next)?;
-        let ood_comp_next_fp = gl_alloc_u64_vec(cs.clone(), &self.ood_comp_next)?;
+        let ood_trace_current_fp = gl_alloc_u64_vec(cs_ood.clone(), &self.ood_trace_current)?;
+        let ood_comp_current_fp = gl_alloc_u64_vec(cs_ood.clone(), &self.ood_comp)?;
+        let ood_trace_next_fp = gl_alloc_u64_vec(cs_ood.clone(), &self.ood_trace_next)?;
+        let ood_comp_next_fp = gl_alloc_u64_vec(cs_ood.clone(), &self.ood_comp_next)?;
 
         let ood_trace_current_gl: Vec<GlVar> = ood_trace_current_fp
             .iter()
@@ -250,16 +279,48 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         ood_elements_gl.extend(ood_comp_next_gl.iter().cloned());
 
         // Hash using light RPO (congruence-only, no internal canonicalization)
-        let ood_digest_gl = rpo_hash_elements_light(cs.clone(), &ood_elements_gl, &rpo_params)?;
+        let ood_digest_gl = rpo_hash_elements_light(cs_ood.clone(), &ood_elements_gl, &rpo_params)?;
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            use crate::stark::gl_u64::fr_to_gl_u64;
+            let mut computed = [0u8; 32];
+            for i in 0..4 {
+                let Ok(fr) = ood_digest_gl[i].0.value() else {
+                    // Value not assigned yet; skip debug.
+                    computed = expected_ood_commitment_le32;
+                    break;
+                };
+                let u = fr_to_gl_u64(fr);
+                computed[i * 8..(i + 1) * 8].copy_from_slice(&u.to_le_bytes());
+            }
+            if computed != expected_ood_commitment_le32 {
+                let to_hex = |bytes: &[u8]| -> String {
+                    let mut s = String::with_capacity(bytes.len() * 2);
+                    for b in bytes {
+                        s.push_str(&format!("{:02x}", b));
+                    }
+                    s
+                };
+                eprintln!(
+                    "[r1cs][ood_commitment] mismatch: computed={} expected={}",
+                    to_hex(&computed),
+                    to_hex(&expected_ood_commitment_le32),
+                );
+            }
+        }
 
         // BOUNDARY: Canonicalize computed digest to compare with proof bytes
-        let ood_digest_bytes = canonicalize_to_bytes(cs.clone(), &ood_digest_gl)?;
+        let ood_digest_bytes = canonicalize_to_bytes(cs_ood.clone(), &ood_digest_gl)?;
 
         // Compare canonicalized bytes to proof's OOD commitment bytes
         for (computed, expected) in ood_digest_bytes.iter().zip(ood_commit_bytes.iter()) {
             let eq = computed.is_eq(expected)?;
             eq.enforce_equal(&Boolean::constant(true))?;
         }
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step1_5_ood_commitment", &cs);
 
         // Enforce non-empty queries and alignment with positions. The circuit now requires
         // the committed query list to be exactly `num_queries` long; if Fiat–Shamir draws
@@ -300,6 +361,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         }
 
         // STEP 2: Verify trace commitment (batch-only)
+        let cs_trace_commit = ark_relations::ns!(cs, "step2_trace_commitment").cs();
         if self.trace_segments.len() != trace_root_bytes.len() {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -335,15 +397,18 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 ]);
             }
             verify_batch_merkle_root_gl(
-                cs.clone(),
+                cs_trace_commit.clone(),
                 &params,
                 leaves,
-                &segment.batch_indexes,
+                &query_pos_uint_vars,
                 &segment.batch_nodes,
                 segment.batch_depth as usize,
                 root_bytes,
             )?;
         }
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step2_trace_commitment", &cs);
 
         // Ensure aggregated trace rows match expected widths / OOD frame
         let expected_trace_width = self.ood_trace_current.len();
@@ -356,6 +421,7 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             }
         }
         // STEP 3: Verify composition commitment (batch-only)
+        let cs_comp_commit = ark_relations::ns!(cs, "step3_comp_commitment").cs();
         if !self.comp_batch_nodes.is_empty() {
             use super::gadgets::merkle_batch::verify_batch_merkle_root_gl;
             use super::gadgets::rpo_gl_light::{rpo_hash_elements_light, RpoParamsGLLight};
@@ -381,10 +447,10 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 ]);
             }
             verify_batch_merkle_root_gl(
-                cs.clone(),
+                cs_comp_commit.clone(),
                 &params,
                 leaves,
-                &self.comp_batch_indexes,
+                &query_pos_uint_vars,
                 &self.comp_batch_nodes,
                 self.comp_batch_depth as usize,
                 &comp_root_bytes,
@@ -393,6 +459,9 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             // Missing batch metadata; refuse per-path verification
             return Err(SynthesisError::Unsatisfiable);
         }
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step3_comp_commitment", &cs);
 
         // Use authoritative composition width from AirParams; sanity-check if data present
         let comp_width = self.air_params.comp_width;
@@ -434,6 +503,9 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
                 self.pow_nonce,
             )?;
 
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step4_derive_fs", &cs);
+
         enforce_query_positions_alignment(
             &query_pos_uint_vars,
             raw_query_positions,
@@ -451,6 +523,9 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &self.air_params,
             &self.stark_pub_inputs, // Pass Verifier AIR public inputs for statement_hash
         )?;
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step4_ood_equation", &cs);
         
 
         // STEP 5: Compute DEEP composition polynomial (returns DEEP evaluations for FRI)
@@ -462,11 +537,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             &ood_trace_next_gl,
             &ood_comp_current_gl,
             &ood_comp_next_gl,
-            &self.query_positions,
+            &query_pos_uint_vars,
             &z,
             &deep_coeffs,
             &self.air_params,
         )?;
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step5_deep_composition", &cs);
 
         // STEP 6: Use the heavy FRI verifier for correct semantics
         use super::gadgets::fri::{verify_fri_layers_gl, FriConfigGL, FriLayerQueryGL};
@@ -530,11 +608,14 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         verify_fri_layers_gl(
             cs.clone(),
             &fri_config,
-            &self.query_positions,
+            &query_pos_uint_vars,
             deep_evaluations,
             &fri_layer_queries,
             remainder_coeffs_opt,
         )?;
+
+        #[cfg(any(test, debug_assertions))]
+        debug_checkpoint("after_step6_fri", &cs);
 
         Ok(())
     }
@@ -802,7 +883,7 @@ pub fn verify_deep_composition(
     ood_trace_next: &[GlVar],
     ood_comp: &[GlVar],
     ood_comp_next: &[GlVar],
-    query_positions: &[usize],
+    query_positions: &[UInt64GLVar],
     z: &FpGLVar,
     deep_coeffs: &[FpGLVar],
     air_params: &AirParams,
@@ -852,15 +933,13 @@ pub fn verify_deep_composition(
         let comp_row = comp_queries
             .get(q_idx)
             .ok_or(SynthesisError::Unsatisfiable)?;
-        let position = query_positions.get(q_idx).copied().unwrap_or(0);
+        let position = query_positions.get(q_idx).ok_or(SynthesisError::Unsatisfiable)?;
 
-        // Bit-decompose position (constant bits, no constraints!)
-        let mut position_bits = Vec::with_capacity(m);
-        let mut pos = position;
-        for _ in 0..m {
-            position_bits.push(Boolean::constant((pos & 1) == 1));
-            pos >>= 1;
-        }
+        // Bit-decompose position IN-CIRCUIT (fixed shape).
+        let position_bits_full = position.to_bits_le()?;
+        let position_bits = position_bits_full
+            .get(0..m)
+            .ok_or(SynthesisError::Unsatisfiable)?;
 
         // Compute x = offset * g_lde^position using precomputed pow2 table
         let mut acc = one_gl.clone();
@@ -1034,13 +1113,13 @@ fn enforce_query_positions_alignment(
 fn bind_statement_hash(
     cs: ConstraintSystemRef<InnerFr>,
     statement_hash: InnerFr,
-    trace_root_bytes: &[Vec<UInt8<InnerFr>>],
-    comp_root_bytes: &[UInt8<InnerFr>],
-    fri_roots_bytes: &[Vec<UInt8<InnerFr>>],
-    ood_commit_bytes: &[UInt8<InnerFr>],
+    _trace_root_bytes: &[Vec<UInt8<InnerFr>>],
+    _comp_root_bytes: &[UInt8<InnerFr>],
+    _fri_roots_bytes: &[Vec<UInt8<InnerFr>>],
+    _ood_commit_bytes: &[UInt8<InnerFr>],
     stark_pub_inputs: &[u64],
-    query_positions: &[usize],
-    air_params: &AirParams,
+    _query_positions: &[usize],
+    _air_params: &AirParams,
 ) -> Result<(), SynthesisError> {
     use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
     use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
@@ -1048,46 +1127,32 @@ fn bind_statement_hash(
 
     let statement_hash_var = FpVar::<InnerFr>::new_input(cs.clone(), || Ok(statement_hash))?;
 
-    // Hash commitments and verify against public input
+    // Arming-friendly statement binding:
+    // Bind the Groth16 public input to:
+    //   VerifierPublicInputs.statement_hash (first 4 u64s)
+    //   || [expected_checkpoint_count, expected_mode_counter, params_digest] (last 6 u64s)
+    //
+    // This commits the Groth16 statement to the VerifierAir proof's (params_digest, interpreter_hash)
+    // policy fields, in addition to the VerifierAir statement_hash.
+    if stark_pub_inputs.len() < 22 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    let stmt = &stark_pub_inputs[0..4];
+    let tail = &stark_pub_inputs[stark_pub_inputs.len() - 6..];
+
     let mut hasher = PoseidonSpongeVar::new(cs.clone(), &POSEIDON377_PARAMS_T3_V1);
-
-    // Absorb trace commitment (as field elements)
-    for root in trace_root_bytes {
-        for chunk in root.chunks(8) {
-            let fe = bytes_to_field_le(chunk)?;
-            hasher.absorb(&fe)?;
-        }
+    hasher.absorb(&FpVar::constant(InnerFr::from(0xA11Du64)))?;
+    for &v in stmt {
+        // IMPORTANT (universality):
+        // Do NOT absorb per-proof public-input words as constants; that would bake them into the
+        // R1CS coefficients and make the Groth16 CRS non-reusable across different proofs/apps.
+        let v_var = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
+        hasher.absorb(&v_var)?;
     }
-    // Absorb comp commitment
-    for chunk in comp_root_bytes.chunks(8) {
-        let fe = bytes_to_field_le(chunk)?;
-        hasher.absorb(&fe)?;
+    for &v in tail {
+        let v_var = FpVar::new_witness(cs.clone(), || Ok(InnerFr::from(v)))?;
+        hasher.absorb(&v_var)?;
     }
-    // Absorb FRI commitments
-    for fri_root in fri_roots_bytes {
-        for chunk in fri_root.chunks(8) {
-            let fe = bytes_to_field_le(chunk)?;
-            hasher.absorb(&fe)?;
-        }
-    }
-    // Absorb OOD commitment (binds OOD frame, prevents free witnesses)
-    for chunk in ood_commit_bytes.chunks(8) {
-        let fe = bytes_to_field_le(chunk)?;
-        hasher.absorb(&fe)?;
-    }
-
-    // Absorb STARK public inputs
-    for pub_in in stark_pub_inputs {
-        hasher.absorb(&FpVar::constant(InnerFr::from(*pub_in)))?;
-    }
-
-    // Commit to query positions and absorb (prevents adversarial positions!)
-    let pos_commit = commit_positions_poseidon(cs.clone(), query_positions)?;
-    hasher.absorb(&pos_commit)?;
-
-    // Absorb AIR params hash
-    let params_hash = hash_air_params(cs.clone(), air_params)?;
-    hasher.absorb(&params_hash)?;
 
     let computed_hash = hasher.squeeze_field_elements(1)?;
     computed_hash[0].enforce_equal(&statement_hash_var)?;

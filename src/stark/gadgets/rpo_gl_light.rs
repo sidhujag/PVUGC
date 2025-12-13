@@ -116,7 +116,8 @@ fn apply_inv_sbox_light(
         Ok(InnerFr::from(x_val as u128))
     })?);
 
-    // Verify: x^7 = y (this enforces the modular congruence)
+    // Verify: x^7 = y (this enforces the modular congruence under the canonical representation
+    // invariant for GL values in this gadget suite)
     let x7 = apply_sbox_light(cs, &x)?;
     x7.0.enforce_equal(&y.0)?;
 
@@ -318,8 +319,15 @@ pub fn rpo_merge_with_int_light(
 ) -> Result<Vec<GlVar>, SynthesisError> {
     assert_eq!(digest.len(), 4, "Digest must be 4 elements");
 
-    // Convert counter to GL element
-    let counter_gl = GlVar(FpVar::constant(InnerFr::from(counter as u128)));
+    // IMPORTANT (universality):
+    // Do NOT embed proof-dependent integers as constants in the R1CS. Even when callers pass
+    // deterministic counters, different verification paths can result in different counter
+    // schedules across instances. Treat the integer as a witness GL element.
+    use crate::stark::gl_u64::P_GL;
+    use super::gl_range::gl_alloc_u64;
+    let counter_mod = ((counter as u128) % P_GL) as u64;
+    let (_counter_u64, counter_fp) = gl_alloc_u64(cs.clone(), Some(counter_mod))?;
+    let counter_gl = GlVar(counter_fp);
 
     // Merge is hash(digest || counter)
     let mut input = Vec::with_capacity(5);
@@ -508,7 +516,22 @@ impl RandomCoinGL {
             return Err(SynthesisError::Unsatisfiable);
         }
 
-        let new_seed = rpo_merge_with_int_light(self.cs.clone(), &self.seed, nonce, &self.params)?;
+        // IMPORTANT (universality):
+        // `nonce` is proof-specific (Winterfell PoW/grinding) and MUST NOT be embedded as an
+        // R1CS constant. If we treat it as a constant, Groth16 CRS reuse across proofs breaks.
+        //
+        // Winterfell merges the nonce by converting it to a base-field element (mod p_GL) and
+        // hashing `merge(seed, nonce_elem)`. We mirror that, but allocate the nonce element
+        // as a witness variable.
+        use crate::stark::gl_u64::P_GL;
+        use super::gl_range::gl_alloc_u64;
+        let nonce_mod = ((nonce as u128) % P_GL) as u64;
+        let (_nonce_u64, nonce_fp) = gl_alloc_u64(self.cs.clone(), Some(nonce_mod))?;
+        let nonce_gl = GlVar(nonce_fp);
+        let mut input = Vec::with_capacity(5);
+        input.extend_from_slice(&self.seed);
+        input.push(nonce_gl);
+        let new_seed = rpo_hash_elements_light(self.cs.clone(), &input, &self.params)?;
         // Enforce grinding on first limb only (matches DefaultRandomCoin::check_leading_zeros)
         if grinding_factor > 0 {
             let u64_limb = canonicalize_gl_to_u64_light(self.cs.clone(), &new_seed[0])?;

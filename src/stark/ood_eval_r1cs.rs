@@ -10,6 +10,7 @@
 //! ensuring the proof is for VerifierAir specifically.
 
 use ark_r1cs_std::fields::FieldVar;
+use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::R1CSVar;
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
@@ -82,18 +83,18 @@ pub fn verify_ood_equation_in_circuit(
     let exemption = gl_sub_light(cs.clone(), &z_gl, &g_pow_n_minus_1_gl)?;
     let z_minus_1 = gl_sub_light(cs.clone(), &z_gl, &one)?;
     
-    // Extract interpreter_hash and mode_counter from public inputs
-    // Layout: statement_hash(4) + trace_commit(4) + comp_commit(4) + 
-    //         num_queries(1) + trace_len(1) + g_trace(1) + pub_result(1) + 
-    //         expected_checkpoints(1) + expected_mode_counter(1) + interpreter_hash(4) = 22 minimum
-    // 
+    // Extract params_digest from public inputs.
+    //
+    // Layout tail (last 4 u64s):
+    //   params_digest (4)
+    //
     // SECURITY: Must require minimum length to ensure fields don't overlap.
     let pub_len = stark_pub_inputs.len();
-    if pub_len < 22 {
+    if pub_len < 8 {
         return Err(SynthesisError::Unsatisfiable);
     }
-    
-    let interpreter_hash: [u64; 4] = [
+
+    let params_digest: [u64; 4] = [
         stark_pub_inputs[pub_len - 4],
         stark_pub_inputs[pub_len - 3],
         stark_pub_inputs[pub_len - 2],
@@ -104,7 +105,11 @@ pub fn verify_ood_equation_in_circuit(
     // STEP 2: Evaluate all 27 VerifierAir transition constraints (HARDCODED)
     // =========================================================================
     let constraints = evaluate_verifier_air_constraints_gl(
-        cs.clone(), ood_trace_current, ood_trace_next, &statement_hash, &interpreter_hash
+        cs.clone(),
+        ood_trace_current,
+        ood_trace_next,
+        &statement_hash,
+        &params_digest,
     )?;
     
     // =========================================================================
@@ -167,7 +172,10 @@ pub fn verify_ood_equation_in_circuit(
     // Layout: [..., expected_checkpoint_count, expected_mode_counter, interpreter_hash[0..4]]
     // So expected_mode_counter is at position pub_len - 5
     let expected_mode_counter = stark_pub_inputs[pub_len - 5];
-    let expected_mode_counter_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_mode_counter)));
+    // IMPORTANT (universality): do not embed per-proof pub inputs as R1CS constants.
+    let expected_mode_counter_gl = GlVar(FpGLVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(expected_mode_counter))
+    })?);
     
     let final_aux1_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 6;
     let beta_aux1_final = GlVar(constraint_coeffs[final_aux1_coeff_idx].clone());
@@ -177,7 +185,9 @@ pub fn verify_ood_equation_in_circuit(
     // Final aux[3] = expected_checkpoint_count (column 26) - coeff index 34
     // expected_checkpoint_count is at position pub_len - 6
     let expected_checkpoints = stark_pub_inputs[pub_len - 6];
-    let expected_checkpoints_gl = GlVar(FpGLVar::constant(InnerFr::from(expected_checkpoints)));
+    let expected_checkpoints_gl = GlVar(FpGLVar::new_witness(cs.clone(), || {
+        Ok(InnerFr::from(expected_checkpoints))
+    })?);
     
     let final_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 7;
     let beta_aux3_final = GlVar(constraint_coeffs[final_aux3_coeff_idx].clone());
@@ -246,7 +256,7 @@ fn evaluate_verifier_air_constraints_gl(
     current: &[GlVar],
     next: &[GlVar],
     statement_hash: &[u64; 4], // Verifier AIR's statement_hash public input
-    interpreter_hash: &[u64; 4], // Verifier AIR's interpreter_hash public input
+    params_digest: &[u64; 4],
 ) -> Result<Vec<GlVar>, SynthesisError> {
     const NUM_SELECTORS: usize = 3;
     const HASH_STATE_START: usize = 3;
@@ -403,10 +413,10 @@ fn evaluate_verifier_air_constraints_gl(
     // Statement verification constraints: hash_state[i] == pub_inputs.statement_hash[i]
     // Used when aux[2] = 4 (STATEMENT mode)
     let statement_hash_gl: [GlVar; 4] = [
-        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[0]))),
-        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[1]))),
-        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[2]))),
-        GlVar(FpGLVar::constant(InnerFr::from(statement_hash[3]))),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(statement_hash[0])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(statement_hash[1])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(statement_hash[2])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(statement_hash[3])))?),
     ];
     let statement_constraints: [GlVar; 4] = [
         gl_sub_light(cs.clone(), &current_hash[0], &statement_hash_gl[0])?,
@@ -415,55 +425,55 @@ fn evaluate_verifier_air_constraints_gl(
         gl_sub_light(cs.clone(), &current_hash[3], &statement_hash_gl[3])?,
     ];
     
-    // Interpreter hash binding constraints (mode 5)
-    let interpreter_hash_gl: [GlVar; 4] = [
-        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[0]))),
-        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[1]))),
-        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[2]))),
-        GlVar(FpGLVar::constant(InnerFr::from(interpreter_hash[3]))),
+    // Params digest binding constraints (mode 5)
+    let params_digest_gl: [GlVar; 4] = [
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(params_digest[0])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(params_digest[1])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(params_digest[2])))?),
+        GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(params_digest[3])))?),
     ];
-    let interpreter_constraints: [GlVar; 4] = [
-        gl_sub_light(cs.clone(), &current_hash[0], &interpreter_hash_gl[0])?,
-        gl_sub_light(cs.clone(), &current_hash[1], &interpreter_hash_gl[1])?,
-        gl_sub_light(cs.clone(), &current_hash[2], &interpreter_hash_gl[2])?,
-        gl_sub_light(cs.clone(), &current_hash[3], &interpreter_hash_gl[3])?,
+    let params_constraints: [GlVar; 4] = [
+        gl_sub_light(cs.clone(), &current_hash[0], &params_digest_gl[0])?,
+        gl_sub_light(cs.clone(), &current_hash[1], &params_digest_gl[1])?,
+        gl_sub_light(cs.clone(), &current_hash[2], &params_digest_gl[2])?,
+        gl_sub_light(cs.clone(), &current_hash[3], &params_digest_gl[3])?,
     ];
     
-    // Use 5 factors to exclude modes 4 and 5 from root check
-    // Compute is_root_check = (aux[2] - 1) * (aux[2] - 2) * (aux[2] - 3) * (aux[2] - 4) * (aux[2] - 5)
-    // When aux[2] = 0: (-1)*(-2)*(-3)*(-4)*(-5) = -120 (non-zero, check applies)
-    // When aux[2] = 1,2,3,4,5: is_root_check = 0 (check doesn't apply)
+    // Root check selector: non-zero only when aux[2] = 0
+    // is_root_check = Π_{k=1..6}(aux[2]-k)
     let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
     let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
     let four_gl = GlVar(FpGLVar::constant(InnerFr::from(4u64)));
     let five_gl = GlVar(FpGLVar::constant(InnerFr::from(5u64)));
+    let six_gl = GlVar(FpGLVar::constant(InnerFr::from(6u64)));
     let aux_m1 = gl_sub_light(cs.clone(), aux_mode, &one)?;
     let aux_m2 = gl_sub_light(cs.clone(), aux_mode, &two_gl)?;
     let aux_m3 = gl_sub_light(cs.clone(), aux_mode, &three_gl)?;
     let aux_m4 = gl_sub_light(cs.clone(), aux_mode, &four_gl)?;
     let aux_m5 = gl_sub_light(cs.clone(), aux_mode, &five_gl)?;
+    let aux_m6 = gl_sub_light(cs.clone(), aux_mode, &six_gl)?;
     let is_root_check_temp = gl_mul_light(cs.clone(), &aux_m1, &aux_m2)?;
     let is_root_check_temp2 = gl_mul_light(cs.clone(), &is_root_check_temp, &aux_m3)?;
     let is_root_check_temp3 = gl_mul_light(cs.clone(), &is_root_check_temp2, &aux_m4)?;
-    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp3, &aux_m5)?;
+    let is_root_check_temp4 = gl_mul_light(cs.clone(), &is_root_check_temp3, &aux_m5)?;
+    let is_root_check = gl_mul_light(cs.clone(), &is_root_check_temp4, &aux_m6)?;
     
     // Statement check for mode 4
-    // is_statement_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-5)
+    // is_statement_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-5) * (aux[2]-6)
     // When aux[2] = 4: 4*3*2*1*(-1) = -24 (non-zero, check applies)
     // When aux[2] = 0,1,2,3,5: is_statement_check = 0 (check doesn't apply)
     let is_statement_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
     let is_statement_check_temp2 = gl_mul_light(cs.clone(), &is_statement_check_temp, &aux_m2)?;
     let is_statement_check_temp3 = gl_mul_light(cs.clone(), &is_statement_check_temp2, &aux_m3)?;
-    let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp3, &aux_m5)?;
+    let is_statement_check_temp4 = gl_mul_light(cs.clone(), &is_statement_check_temp3, &aux_m5)?;
+    let is_statement_check = gl_mul_light(cs.clone(), &is_statement_check_temp4, &aux_m6)?;
     
-    // Interpreter check for mode 5
-    // is_interpreter_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-4)
-    // When aux[2] = 5: 5*4*3*2*1 = 120 (non-zero, check applies)
-    // When aux[2] = 0,1,2,3,4: is_interpreter_check = 0 (check doesn't apply)
-    let is_interpreter_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
-    let is_interpreter_check_temp2 = gl_mul_light(cs.clone(), &is_interpreter_check_temp, &aux_m2)?;
-    let is_interpreter_check_temp3 = gl_mul_light(cs.clone(), &is_interpreter_check_temp2, &aux_m3)?;
-    let is_interpreter_check = gl_mul_light(cs.clone(), &is_interpreter_check_temp3, &aux_m4)?;
+    // is_params_check = aux[2] * (aux[2]-1) * (aux[2]-2) * (aux[2]-3) * (aux[2]-4) * (aux[2]-6)
+    let is_params_check_temp = gl_mul_light(cs.clone(), aux_mode, &aux_m1)?;
+    let is_params_check_temp2 = gl_mul_light(cs.clone(), &is_params_check_temp, &aux_m2)?;
+    let is_params_check_temp3 = gl_mul_light(cs.clone(), &is_params_check_temp2, &aux_m3)?;
+    let is_params_check_temp4 = gl_mul_light(cs.clone(), &is_params_check_temp3, &aux_m4)?;
+    let is_params_check = gl_mul_light(cs.clone(), &is_params_check_temp4, &aux_m6)?;
     
     for i in 0..8 {
         let fri_curr = &current[FRI_START + i];
@@ -491,19 +501,18 @@ fn evaluate_verifier_air_constraints_gl(
             let c = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
             constraints.push(c);
         } else if i < 4 {
-            // FRI columns 0-3: ROOT/STATEMENT/INTERPRETER VERIFICATION
+            // FRI columns 0-3: ROOT/STATEMENT/PARAMS VERIFICATION
             //
             // ROOT mode (aux[2] = 0): verify hash_state[i] == fri[i]
             // STATEMENT mode (aux[2] = 4): verify hash_state[i] == pub_inputs.statement_hash[i]
-            // INTERPRETER mode (aux[2] = 5): verify hash_state[i] == pub_inputs.interpreter_hash[i]
+            // PARAMS mode (aux[2] = 5): verify hash_state[i] == params digest
             //
-            // is_root_check = (aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4)(aux[2]-5) = non-zero when aux[2]=0
-            // is_statement_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-5) = non-zero when aux[2]=4
-            // is_interpreter_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4) = non-zero when aux[2]=5
+            // is_root_check = Π_{k=1..6}(aux[2]-k) = non-zero when aux[2]=0
+            // is_statement_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-5)(aux[2]-6) = non-zero when aux[2]=4
+            // is_params_check = aux[2](aux[2]-1)(aux[2]-2)(aux[2]-3)(aux[2]-4)(aux[2]-6) = non-zero when aux[2]=5
             //
             // Constraint: op.is_deep * is_root_check * root_constraint
             //           + op.is_deep * is_statement_check * statement_constraint
-            //           + op.is_deep * is_interpreter_check * interpreter_constraint
             //           + both_not_special * copy_constraint = 0
             let deep_root = gl_mul_light(cs.clone(), &op.is_deep, &is_root_check)?;
             let root_term = gl_mul_light(cs.clone(), &deep_root, &root_constraints[i])?;
@@ -512,15 +521,15 @@ fn evaluate_verifier_air_constraints_gl(
             let deep_statement = gl_mul_light(cs.clone(), &op.is_deep, &is_statement_check)?;
             let statement_term = gl_mul_light(cs.clone(), &deep_statement, &statement_constraints[i])?;
             
-            // Interpreter hash verification for mode 5
-            let deep_interpreter = gl_mul_light(cs.clone(), &op.is_deep, &is_interpreter_check)?;
-            let interpreter_term = gl_mul_light(cs.clone(), &deep_interpreter, &interpreter_constraints[i])?;
+            // Params digest verification for mode 5
+            let deep_params = gl_mul_light(cs.clone(), &op.is_deep, &is_params_check)?;
+            let params_term = gl_mul_light(cs.clone(), &deep_params, &params_constraints[i])?;
             
             let copy_term = gl_mul_light(cs.clone(), &both_not_special, &copy_constraint)?;
             
-            // Full constraint: root term + statement term + interpreter term + copy term
+            // Full constraint: root term + statement term + params term + copy term
             let c1 = gl_add_light(cs.clone(), &root_term, &statement_term)?;
-            let c2 = gl_add_light(cs.clone(), &c1, &interpreter_term)?;
+            let c2 = gl_add_light(cs.clone(), &c1, &params_term)?;
             let c = gl_add_light(cs.clone(), &c2, &copy_term)?;
             constraints.push(c);
         } else {
@@ -580,24 +589,23 @@ fn evaluate_verifier_air_constraints_gl(
         } else if i == 1 {
             // Mode counter
             //
-            // Tracks statement hash (mode 4) and interpreter hash (mode 5) verifications.
-            // Packed encoding: aux[1] = statement_count + 64 * interpreter_count
+            // Tracks statement hash (mode 4) and params digest (mode 5) verifications.
+            // Packed encoding: aux[1] = statement_count + 4096 * params_count
             //
             // Update rules:
             // - On DeepCompose mode 4: aux[1] += 1
-            // - On DeepCompose mode 5: aux[1] += 64
+            // - On DeepCompose mode 5: aux[1] += 4096
             // - Otherwise: aux[1] unchanged
             //
-            // Constraint: aux[1]_next - aux[1]_curr - is_deep * (is_mode_4 + is_mode_5 * 64) = 0
+            // Constraint: aux[1]_next - aux[1]_curr - is_deep * (is_mode_4 + is_mode_5 * 4096) = 0
             //
-            // We reuse is_statement_check and is_interpreter_check from FRI constraints
-            // but need to normalize them to 0/1
+            // We compute is_mode_4 / is_mode_5 and normalize them to 0/1
             let mode = aux_mode;
             let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
             let three_gl = GlVar(FpGLVar::constant(InnerFr::from(3u64)));
             let four_gl = GlVar(FpGLVar::constant(InnerFr::from(4u64)));
             let five_gl = GlVar(FpGLVar::constant(InnerFr::from(5u64)));
-            let sixty_four = GlVar(FpGLVar::constant(InnerFr::from(64u64)));
+            let four_thousand_ninety_six = GlVar(FpGLVar::constant(InnerFr::from(4096u64)));
             
             // Compute mode selectors (reusing what we have)
             let mode_m1 = gl_sub_light(cs.clone(), mode, &one)?;
@@ -606,28 +614,30 @@ fn evaluate_verifier_air_constraints_gl(
             let mode_m4 = gl_sub_light(cs.clone(), mode, &four_gl)?;
             let mode_m5 = gl_sub_light(cs.clone(), mode, &five_gl)?;
             
-            // is_mode_4_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-5) = -24 when mode=4
+            // is_mode_4_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-5) * (mode-6) = 48 when mode=4
             let p1 = gl_mul_light(cs.clone(), mode, &mode_m1)?;
             let p2 = gl_mul_light(cs.clone(), &p1, &mode_m2)?;
             let p3 = gl_mul_light(cs.clone(), &p2, &mode_m3)?;
-            let is_mode_4_raw = gl_mul_light(cs.clone(), &p3, &mode_m5)?;
-            // Normalize: divide by -24 (multiply by inverse)
-            // (-24)^(-1) mod p = 768614336225607680
-            let neg_24_inv = GlVar(FpGLVar::constant(InnerFr::from(768614336225607680u64)));
-            let is_mode_4 = gl_mul_light(cs.clone(), &is_mode_4_raw, &neg_24_inv)?;
+            let p4 = gl_mul_light(cs.clone(), &p3, &mode_m5)?;
+            let is_mode_4_raw = gl_mul_light(cs.clone(), &p4, &aux_m6)?;
+            // Normalize: divide by 48 (multiply by inverse)
+            // 48^(-1) mod Goldilocks prime = 18062436901301780481
+            let inv_48 = GlVar(FpGLVar::constant(InnerFr::from(18062436901301780481u64)));
+            let is_mode_4 = gl_mul_light(cs.clone(), &is_mode_4_raw, &inv_48)?;
             
-            // is_mode_5_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-4) = 120 when mode=5
+            // is_mode_5_raw = mode * (mode-1) * (mode-2) * (mode-3) * (mode-4) * (mode-6) = -120 when mode=5
             let q1 = gl_mul_light(cs.clone(), mode, &mode_m1)?;
             let q2 = gl_mul_light(cs.clone(), &q1, &mode_m2)?;
             let q3 = gl_mul_light(cs.clone(), &q2, &mode_m3)?;
-            let is_mode_5_raw = gl_mul_light(cs.clone(), &q3, &mode_m4)?;
-            // Normalize: divide by 120
-            // 120^(-1) mod p = 18293021202169462785
-            let inv_120 = GlVar(FpGLVar::constant(InnerFr::from(18293021202169462785u64)));
-            let is_mode_5 = gl_mul_light(cs.clone(), &is_mode_5_raw, &inv_120)?;
+            let q4 = gl_mul_light(cs.clone(), &q3, &mode_m4)?;
+            let is_mode_5_raw = gl_mul_light(cs.clone(), &q4, &aux_m6)?;
+            // Normalize: divide by -120 (multiply by inverse)
+            // (-120)^(-1) mod Goldilocks prime = 153722867245121536
+            let inv_neg_120 = GlVar(FpGLVar::constant(InnerFr::from(153722867245121536u64)));
+            let is_mode_5 = gl_mul_light(cs.clone(), &is_mode_5_raw, &inv_neg_120)?;
             
-            // increment = is_mode_4 + is_mode_5 * 64
-            let mode_5_scaled = gl_mul_light(cs.clone(), &is_mode_5, &sixty_four)?;
+            // increment = is_mode_4 + is_mode_5 * 4096
+            let mode_5_scaled = gl_mul_light(cs.clone(), &is_mode_5, &four_thousand_ninety_six)?;
             let mode_increment = gl_add_light(cs.clone(), &is_mode_4, &mode_5_scaled)?;
             
             // final_increment = is_deep * mode_increment

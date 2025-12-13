@@ -90,14 +90,17 @@ impl VerifierTraceBuilder {
             self.aux_state[3] = self.aux_state[3] + BaseElement::ONE;
             
             // Update mode counter based on mode (aux[2])
-            // Mode 4 (statement): add 1
-            // Mode 5 (interpreter): add 64
-            // Packed encoding: statement_count + 64 * interpreter_count
+            //
+            // Packed encoding:
+            // - statement_count contributes +1 (mode 4)
+            // - params_count contributes +4096 (mode 5)
+            //
+            // This prevents a prover from skipping specific binding steps.
             let mode = self.aux_state[2].as_int();
             if mode == 4 {
                 self.aux_state[1] = self.aux_state[1] + BaseElement::ONE;
             } else if mode == 5 {
-                self.aux_state[1] = self.aux_state[1] + BaseElement::new(64);
+                self.aux_state[1] = self.aux_state[1] + BaseElement::new(4096);
             }
         }
     }
@@ -327,33 +330,18 @@ impl VerifierTraceBuilder {
         local_ok
     }
 
-    /// Verify interpreter/formula hash binding
-    /// 
-    /// This verifies that the constraint formula hash matches the expected
-    /// interpreter hash from public inputs.
-    /// 
-    /// Parameters:
-    /// - formula_hash: The hash of the EncodedFormula being used
-    /// 
-    /// Returns true if current hash_state[0..3] equals the formula hash.
-    /// 
-    /// Must be called AFTER computing the formula hash in the sponge.
-    /// The AIR constraint will verify hash_state[0..3] == pub_inputs.interpreter_hash.
-    pub fn verify_interpreter_hash(&mut self, formula_hash: [BaseElement; 4]) -> bool {
-        // Store the formula hash in hash_state for constraint verification
-        self.hash_state[0] = formula_hash[0];
-        self.hash_state[1] = formula_hash[1];
-        self.hash_state[2] = formula_hash[2];
-        self.hash_state[3] = formula_hash[3];
-        
-        // Set mode = INTERPRETER VERIFICATION (aux[2] = 5)
-        // The AIR constraint will enforce: hash_state[0..3] == pub_inputs.interpreter_hash
+    /// Verify security-parameter digest binding (num_queries/blowup/grinding/folding/trace_len).
+    ///
+    /// The AIR constraint will verify hash_state[0..3] == pub_inputs.params_digest when aux[2]=5.
+    pub fn verify_params_digest(&mut self, params_digest: [BaseElement; 4]) -> bool {
+        self.hash_state[0] = params_digest[0];
+        self.hash_state[1] = params_digest[1];
+        self.hash_state[2] = params_digest[2];
+        self.hash_state[3] = params_digest[3];
+
+        // Set mode = PARAMS VERIFICATION (aux[2] = 5)
         self.aux_state[2] = BaseElement::new(5u64);
-        
-        // Emit DeepCompose row - checkpoint counter increments
         self.emit_row(VerifierOp::DeepCompose);
-        
-        // Return true (actual check is done by AIR constraint)
         true
     }
 
@@ -463,9 +451,15 @@ impl VerifierTraceBuilder {
         let zerofier_num = z_pow_n - BaseElement::ONE;
         let exemption_sq = exemption * exemption;
 
-        // Get composition values
-        let comp_0 = ood_frame.composition.get(0).copied().unwrap_or(BaseElement::ZERO);
-        let comp_1 = ood_frame.composition.get(1).copied().unwrap_or(BaseElement::ZERO);
+        // Compute combined composition value:
+        //   C(z) = Σ_{i=0..w-1} C_i(z) * z^(i*n)
+        // where w = comp_width and n = trace_len.
+        let mut c_combined = BaseElement::ZERO;
+        let mut z_pow_in = BaseElement::ONE;
+        for &c_i in ood_frame.composition.iter() {
+            c_combined += c_i * z_pow_in;
+            z_pow_in *= z_pow_n;
+        }
 
         // Compute transition constraints using child-type-specific evaluator
         let constraints = evaluate_child_constraints(
@@ -497,8 +491,22 @@ impl VerifierTraceBuilder {
         let lhs = transition_sum * exemption_sq + boundary_sum * zerofier_num;
 
         // Compute RHS: C(z) * zerofier_num * exemption
-        let c_combined = comp_0 + comp_1 * z_pow_n;
         let rhs = c_combined * zerofier_num * exemption;
+
+        #[cfg(any(test, debug_assertions))]
+        if lhs != rhs {
+            eprintln!(
+                "[verifier][ood-mismatch] child={:?} trace_len={} comp_width={} coeffs={} z={} z^n={} lhs={} rhs={}",
+                child_type,
+                trace_len,
+                ood_frame.composition.len(),
+                constraint_coeffs.len(),
+                z.as_int(),
+                z_pow_n.as_int(),
+                lhs.as_int(),
+                rhs.as_int()
+            );
+        }
 
         // Store values in FRI columns for AIR constraint verification
         // Layout: [_, _, _, _, _, _, lhs, rhs]
@@ -521,6 +529,116 @@ impl VerifierTraceBuilder {
         };
 
         verify_ood_constraint_equation_typed(ood_frame, &params, &child_type).is_ok()
+    }
+
+    /// OOD verification for a VerifierAir *child proof*.
+    ///
+    /// VerifierAir has multiple boundary assertions (row 0 and final row) whose values depend on
+    /// the child's public inputs. When verifying a VerifierAir proof recursively, we must use the
+    /// full multiply-through equation (matching `ood_eval_r1cs`) rather than the simplified single-boundary form.
+    pub fn verify_ood_constraints_verifier_air_child(
+        &mut self,
+        ood_frame: &super::ood_eval::OodFrame,
+        z: BaseElement,
+        g_trace: BaseElement,
+        trace_len: usize,
+        constraint_coeffs: &Vec<BaseElement>,
+        trace_commitment: [BaseElement; 4],
+        comp_commitment: [BaseElement; 4],
+        fri_commitments: &Vec<[BaseElement; 4]>,
+        num_queries: usize,
+        proof_trace_len: usize,
+        pub_result: BaseElement,
+        expected_checkpoint_count: usize,
+        expected_mode_counter: usize,
+        statement_hash: &[BaseElement; 4],
+        params_digest: &[BaseElement; 4],
+    ) -> bool {
+        // Domain values
+        let z_pow_n = z.exp((trace_len as u64).into());
+        let g_pow_n_minus_1 = g_trace.exp(((trace_len - 1) as u64).into());
+        let exemption = z - g_pow_n_minus_1;
+        let zerofier_num = z_pow_n - BaseElement::ONE;
+        let z_minus_1 = z - BaseElement::ONE;
+
+        // 27 transition constraints (VerifierAir) evaluated with *child* public inputs.
+        // We must supply these so statement/params/root checks are evaluated correctly at OOD.
+        use super::constraints::evaluate_all;
+        use super::VerifierPublicInputs;
+        use winterfell::EvaluationFrame;
+
+        let frame = EvaluationFrame::from_rows(
+            ood_frame.trace_current.clone(),
+            ood_frame.trace_next.clone(),
+        );
+        let pub_inputs = VerifierPublicInputs {
+            statement_hash: *statement_hash,
+            trace_commitment,
+            comp_commitment,
+            fri_commitments: fri_commitments.clone(),
+            num_queries,
+            proof_trace_len,
+            g_trace,
+            pub_result,
+            expected_checkpoint_count: expected_checkpoint_count,
+            params_digest: *params_digest,
+            expected_mode_counter: expected_mode_counter,
+        };
+        let periodic_values: Vec<BaseElement> = vec![];
+        let mut constraints = vec![BaseElement::ZERO; super::VERIFIER_TRACE_WIDTH];
+        evaluate_all(&frame, &periodic_values, &mut constraints, &pub_inputs);
+
+        if constraint_coeffs.len() < 27 + 8 || constraints.len() < 27 {
+            return false;
+        }
+
+        let mut transition_sum = BaseElement::ZERO;
+        for i in 0..27 {
+            transition_sum += constraint_coeffs[i] * constraints[i];
+        }
+
+        // Combine C(z) from all composition columns: Σ C_i(z) * z^(i*n)
+        let mut c_combined = BaseElement::ZERO;
+        let mut z_pow_in = BaseElement::ONE;
+        for &c_i in ood_frame.composition.iter() {
+            c_combined += c_i * z_pow_in;
+            z_pow_in *= z_pow_n;
+        }
+
+        // Boundary contributions (match `ood_eval_r1cs`)
+        let mut initial_sum = BaseElement::ZERO;
+        // capacity[0..3] at columns 3..6 are zero at row 0
+        for j in 0..4 {
+            let col = 3 + j;
+            initial_sum += constraint_coeffs[27 + j] * ood_frame.trace_current[col];
+        }
+        // aux[1] initial = 0 (col 24)
+        initial_sum += constraint_coeffs[31] * ood_frame.trace_current[24];
+        // aux[3] initial = 0 (col 26)
+        initial_sum += constraint_coeffs[32] * ood_frame.trace_current[26];
+
+        let expected_mode = BaseElement::new(expected_mode_counter as u64);
+        let expected_ckpt = BaseElement::new(expected_checkpoint_count as u64);
+        let final_aux1 = ood_frame.trace_current[24] - expected_mode;
+        let final_aux3 = ood_frame.trace_current[26] - expected_ckpt;
+        let final_term = constraint_coeffs[33] * final_aux1 + constraint_coeffs[34] * final_aux3;
+
+        // Multiply-through equation:
+        // transition_sum * exemption^2 * (z-1) + initial_sum * (z^n-1) * exemption + final_term * (z^n-1) * (z-1)
+        //   = C(z) * (z^n-1) * (z-1) * exemption
+        let exemption_sq = exemption * exemption;
+        let lhs = transition_sum * exemption_sq * z_minus_1
+            + initial_sum * zerofier_num * exemption
+            + final_term * zerofier_num * z_minus_1;
+        let rhs = c_combined * zerofier_num * z_minus_1 * exemption;
+
+        // Store for AIR equality check in OOD mode.
+        self.fri_state[6] = lhs;
+        self.fri_state[7] = rhs;
+        self.aux_state[2] = BaseElement::ONE; // OOD mode
+        self.emit_row(VerifierOp::DeepCompose);
+
+        lhs == rhs
     }
 
     /// Check that computed Merkle root matches expected commitment (local check only)
@@ -726,7 +844,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64), // 2^61 in Goldilocks
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
-            interpreter_hash: [BaseElement::ZERO; 4],
+            params_digest: [BaseElement::ZERO; 4],
             expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 

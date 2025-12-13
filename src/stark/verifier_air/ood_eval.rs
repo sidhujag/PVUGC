@@ -300,6 +300,100 @@ pub fn encode_aggregator_vdf_formula() -> EncodedFormula {
     }
 }
 
+/// Encode a simple Add2 AIR (2 columns, 2 constraints):
+/// - c0: next[0] - curr[0] - 2 = 0
+/// - c1: next[1] - next[0] = 0
+///
+/// This matches `stark/tests/helpers/add2.rs`.
+pub fn encode_add2_formula() -> EncodedFormula {
+    EncodedFormula {
+        trace_width: 2,
+        constraints: vec![
+            // Constraint 0: next[0] - curr[0] - 2 = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 2,
+                        coeff_neg: true,
+                        vars: vec![], // constant 2
+                    },
+                ],
+            },
+            // Constraint 1: next[1] - next[0] = 0
+            EncodedConstraint {
+                monomials: vec![
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 1, power: 1 }],
+                    },
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                ],
+            },
+            // Constraint 2 (redundant degree-2): (next0 - cur0 - 2)^2 = 0
+            // Expanded:
+            //   next0^2 - 2*next0*cur0 + cur0^2 - 4*next0 + 4*cur0 + 4 = 0
+            EncodedConstraint {
+                monomials: vec![
+                    // + next0^2
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 2 }],
+                    },
+                    // - 2*next0*cur0
+                    Monomial {
+                        coeff: 2,
+                        coeff_neg: true,
+                        vars: vec![
+                            VarRef { col_type: ColType::Next, col_idx: 0, power: 1 },
+                            VarRef { col_type: ColType::Current, col_idx: 0, power: 1 },
+                        ],
+                    },
+                    // + cur0^2
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 2 }],
+                    },
+                    // - 4*next0
+                    Monomial {
+                        coeff: 4,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    // + 4*cur0
+                    Monomial {
+                        coeff: 4,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 1 }],
+                    },
+                    // + 4
+                    Monomial {
+                        coeff: 4,
+                        coeff_neg: false,
+                        vars: vec![],
+                    },
+                ],
+            },
+        ],
+    }
+}
+
 /// Encode simple Fibonacci-like constraints (2 columns)
 /// - c0: next[0] - curr[1] = 0
 /// - c1: next[1] - curr[0] - curr[1] = 0
@@ -339,6 +433,58 @@ pub fn encode_fib_formula() -> EncodedFormula {
                         coeff: 1,
                         coeff_neg: true,
                         vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 1 }],
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// Encode CubicFib constraints (2 columns, 1 constraint):
+/// - c0: next[0] - (curr[0] + curr[1])^3 = 0
+///
+/// This matches `stark/tests/helpers/cubic_fib.rs` (CubicFibAir).
+pub fn encode_cubic_fib_formula() -> EncodedFormula {
+    EncodedFormula {
+        trace_width: 2,
+        constraints: vec![
+            EncodedConstraint {
+                monomials: vec![
+                    // + next0
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: false,
+                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
+                    },
+                    // - a^3
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 3 }],
+                    },
+                    // - 3 a^2 b
+                    Monomial {
+                        coeff: 3,
+                        coeff_neg: true,
+                        vars: vec![
+                            VarRef { col_type: ColType::Current, col_idx: 0, power: 2 },
+                            VarRef { col_type: ColType::Current, col_idx: 1, power: 1 },
+                        ],
+                    },
+                    // - 3 a b^2
+                    Monomial {
+                        coeff: 3,
+                        coeff_neg: true,
+                        vars: vec![
+                            VarRef { col_type: ColType::Current, col_idx: 0, power: 1 },
+                            VarRef { col_type: ColType::Current, col_idx: 1, power: 2 },
+                        ],
+                    },
+                    // - b^3
+                    Monomial {
+                        coeff: 1,
+                        coeff_neg: true,
+                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 3 }],
                     },
                 ],
             },
@@ -467,6 +613,13 @@ impl ChildAirType {
         let circuit_hash = formula.compute_hash();
         ChildAirType::Generic { formula, circuit_hash }
     }
+
+    /// Create a generic CubicFib type using pre-encoded formula.
+    pub fn generic_cubic_fib() -> Self {
+        let formula = encode_cubic_fib_formula();
+        let circuit_hash = formula.compute_hash();
+        ChildAirType::Generic { formula, circuit_hash }
+    }
     
     /// Create a generic Aggregator VDF type using pre-encoded formula
     /// Convenience constructor for AggregatorAir proofs (2 constraints)
@@ -478,23 +631,48 @@ impl ChildAirType {
         let circuit_hash = formula.compute_hash();
         ChildAirType::Generic { formula, circuit_hash }
     }
+
+    /// Create a generic Add2 type using pre-encoded formula.
+    pub fn generic_add2() -> Self {
+        let formula = encode_add2_formula();
+        let circuit_hash = formula.compute_hash();
+        ChildAirType::Generic { formula, circuit_hash }
+    }
     
     /// Compute the formula hash for binding to public input
     /// 
-    /// For VerifierAir: Returns zeros (constraints are hardcoded, not witness-based)
+    /// For VerifierAir: Returns a fixed, versioned constant (constraints are hardcoded, not witness-based)
     /// For Generic: Returns the formula's hash
     /// 
     /// This hash is used to bind the constraint formula to the public input,
     /// preventing attackers from using a simpler formula that trivially satisfies.
     pub fn compute_formula_hash(&self) -> [BaseElement; 4] {
         match self {
-            // VerifierAir has hardcoded constraints, no witness formula
-            // We use zeros to indicate "no formula binding needed"
-            ChildAirType::VerifierAir => [BaseElement::ZERO; 4],
+            // VerifierAir has hardcoded constraints (not formula-as-witness), but we STILL
+            // bind a fixed identifier into public inputs so higher levels / Groth16 can
+            // commit to "which verifier" is intended.
+            //
+            // This must be treated as a protocol constant: changing it invalidates old proofs.
+            ChildAirType::VerifierAir => verifier_air_formula_hash(),
             // Generic mode: return the formula's hash
             ChildAirType::Generic { formula, circuit_hash: _ } => formula.compute_hash(),
         }
     }
+}
+
+/// Versioned identifier for the hardcoded VerifierAir constraint system.
+///
+/// SECURITY NOTE:
+/// - This is NOT derived from witness data.
+/// - This is a protocol constant which should only change with a deliberate
+///   version bump / migration.
+pub fn verifier_air_formula_hash() -> [BaseElement; 4] {
+    [
+        BaseElement::new(0x5645_5249_4649_4552u64), // "VERIFIER" (packed)
+        BaseElement::new(0x4149_525F_5631_0000u64), // "AIR_V1\0\0"
+        BaseElement::new(0x5056_5547_4300_0000u64), // "PVUGC\0\0\0"
+        BaseElement::new(1u64),
+    ]
 }
 
 // ============================================================================
@@ -595,7 +773,7 @@ fn evaluate_verifier_constraints(
         g_trace: BaseElement::ZERO,
         pub_result: BaseElement::ZERO,
         expected_checkpoint_count: 0,
-        interpreter_hash: [BaseElement::ZERO; 4],
+        params_digest: [BaseElement::ZERO; 4],
         expected_mode_counter: 0,
     };
     
@@ -676,7 +854,7 @@ pub fn verify_ood_constraint_equation_typed(
     if ood_frame.trace_width() < expected_width {
         return Err(OodVerificationError::TraceWidthMismatch);
     }
-    if ood_frame.comp_width() < 2 {
+    if ood_frame.comp_width() < 1 {
         return Err(OodVerificationError::CompositionMismatch {
             expected: BaseElement::ZERO,
             got: BaseElement::ONE,
@@ -745,9 +923,20 @@ pub fn verify_ood_constraint_equation_typed(
 
     // ==============================================================
     // RHS = C(z) * (z^n - 1) * exemption
-    // where C(z) = C_0(z) + C_1(z) * z^n
+    //
+    // Winterfell's composition polynomial can be split across 1+ columns depending on
+    // degrees/batching. For small AIRs, `comp_width` may be 1.
+    //
+    // Winterfell combines columns as:
+    //   C(z) = Σ_{i=0..w-1} C_i(z) * z^(i*n)
+    // where w = comp_width and n = trace_len.
     // ==============================================================
-    let c_combined = ood_frame.composition[0] + ood_frame.composition[1] * z_pow_n;
+    let mut c_combined = BaseElement::ZERO;
+    let mut z_pow_in = BaseElement::ONE;
+    for &c_i in ood_frame.composition.iter() {
+        c_combined += c_i * z_pow_in;
+        z_pow_in *= z_pow_n;
+    }
     let rhs = c_combined * zerofier_num * exemption;
 
     // Verify LHS == RHS
@@ -1014,7 +1203,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: 0,
-            interpreter_hash: [BaseElement::ZERO; 4],
+            params_digest: [BaseElement::ZERO; 4],
             expected_mode_counter: 0,
         };
         let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];

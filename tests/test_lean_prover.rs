@@ -91,7 +91,7 @@ fn test_lean_prover_end_to_end() {
         );
         let public_inputs_outer =
             arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner[0]);
-        let inputs_outer = vec![public_inputs_outer]; 
+        let inputs_outer = vec![public_inputs_outer];
 
         // 6. Prove using Lean Prover
         let circuit_lean = OuterCircuit::<DefaultCycle>::new(

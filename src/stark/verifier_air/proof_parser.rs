@@ -25,6 +25,9 @@ use super::{
     prover::{ParsedProof, QueryData, FriLayerData, FriQueryData},
 };
 
+use std::any::TypeId;
+use super::VerifierPublicInputs;
+
 /// The hasher type used throughout proof parsing (RPO-256)
 type Hasher = winter_crypto::hashers::Rp64_256;
 
@@ -44,7 +47,7 @@ pub fn parse_proof<A: Air<BaseField = BaseElement>>(
     pub_inputs: &A::PublicInputs,
 ) -> ParsedProof 
 where
-    A::PublicInputs: ToElements<BaseElement>,
+    A::PublicInputs: ToElements<BaseElement> + Clone + 'static,
 {
     let context = &proof.context;
     let trace_info = context.trace_info();
@@ -61,6 +64,7 @@ where
     // Compute FRI parameters
     let folding_factor = options.to_fri_options().folding_factor();
     let num_fri_layers = options.to_fri_options().num_fri_layers(lde_domain_size);
+    let grinding_factor = options.grinding_factor();
     let num_trace_segments = trace_info.num_segments();
 
     // ========================================================================
@@ -87,14 +91,12 @@ where
     // PARSE ACTUAL OOD FRAME FROM PROOF
     // ========================================================================
     
-    // Composition polynomial width (number of columns)
-    let comp_width = {
-        // For degree d constraints with trace_len n, comp width = ceil(d * (n-1) / n)
-        // For Aggregator AIR with degree-3 constraints: typically equals trace_width
-        // We use the verifier's constraint composition column count
-        let constraint_count = 2; // Aggregator AIR has 2 constraints
-        constraint_count.max(trace_width)
-    };
+    // Composition polynomial width (number of columns).
+    //
+    // IMPORTANT: this must match the prover/AIR, otherwise OOD-frame parsing will fail.
+    // We derive it by reconstructing the AIR from the proof context.
+    let air = A::new(trace_info.clone(), pub_inputs.clone(), options.clone());
+    let comp_width = air.context().num_constraint_composition_columns();
 
     // Parse OOD frame - these are the actual evaluations at the OOD point z
     let (trace_ood_frame, comp_ood_frame) = proof
@@ -111,36 +113,77 @@ where
     let ood_comp_next: Vec<BaseElement> = comp_ood_frame.next_row().to_vec();
 
     // ========================================================================
-    // DERIVE OOD PARAMETERS AND QUERY POSITIONS VIA FIAT-SHAMIR
+    // DERIVE OOD PARAMETERS AND QUERY POSITIONS VIA FIAT-SHAMIR (verifier-exact)
     // ========================================================================
-    
-    // Number of transition constraints for the inner AIR being verified
-    let num_constraints = 2; // Aggregator AIR has 2 transition constraints
-    
-    let fs_result = derive_fiat_shamir_params::<A>(
-        proof,
-        pub_inputs,
-        lde_domain_size,
-        num_fri_layers,
-        num_constraints,
-        &trace_commitments_raw,
-        &comp_commitment_raw,
-        &fri_commitments_raw,
-        &trace_ood_frame,
-        &comp_ood_frame,
-    );
-    
-    let z = fs_result.z;
-    let constraint_coeffs = fs_result.constraint_coeffs;
-    let query_positions = fs_result.query_positions;
+    //
+    // IMPORTANT: query positions must match Winterfell exactly; otherwise, Merkle path
+    // verification fails. We replay the verifier transcript using the AIR methods
+    // `get_constraint_composition_coefficients` and `get_deep_composition_coefficients`.
+    use winter_crypto::{DefaultRandomCoin, RandomCoin};
+    use winter_air::proof::merge_ood_evaluations;
+    use winter_math::ToElements as _;
+
+    let mut public_coin_seed = proof.context.to_elements();
+    public_coin_seed.append(&mut pub_inputs.to_elements());
+    let mut public_coin = DefaultRandomCoin::<Hasher>::new(&public_coin_seed);
+
+    for trace_root in &trace_commitments_raw {
+        public_coin.reseed(*trace_root);
+    }
+    let constraint_coeffs_obj = air
+        .get_constraint_composition_coefficients::<BaseElement, _>(&mut public_coin)
+        .expect("draw constraint coeffs");
+    let mut constraint_coeffs: Vec<BaseElement> = constraint_coeffs_obj.transition;
+    constraint_coeffs.extend_from_slice(&constraint_coeffs_obj.boundary);
+
+    // Reseed with composition commitment and draw OOD point z.
+    public_coin.reseed(comp_commitment_raw);
+    let z = public_coin.draw::<BaseElement>().expect("draw z");
+
+    // Absorb OOD frame and derive DEEP coefficients.
+    let ood_evals = merge_ood_evaluations(&trace_ood_frame, &comp_ood_frame);
+    public_coin.reseed(Hasher::hash_elements(&ood_evals));
+    let deep_coeffs_obj = air
+        .get_deep_composition_coefficients::<BaseElement, _>(&mut public_coin)
+        .expect("draw DEEP coeffs");
+    let mut deep_coeffs: Vec<BaseElement> = deep_coeffs_obj.trace;
+    deep_coeffs.extend_from_slice(&deep_coeffs_obj.constraints);
+
+    // Draw FRI betas (one per FRI layer).
+    let mut fri_betas = Vec::with_capacity(num_fri_layers);
+    for (i, fri_root) in fri_commitments_raw.iter().enumerate() {
+        public_coin.reseed(*fri_root);
+        if i < num_fri_layers {
+            fri_betas.push(public_coin.draw::<BaseElement>().expect("draw FRI beta"));
+        }
+    }
+
+    let mut query_positions = public_coin
+        .draw_integers(proof.options().num_queries(), lde_domain_size, proof.pow_nonce)
+        .expect("draw query positions");
+    query_positions.sort_unstable();
+    query_positions.dedup();
+
     let actual_num_queries = query_positions.len();
+    let num_constraints = proof.context.num_constraints().saturating_sub(1);
     
     // Compute trace domain generator
     let g_trace = compute_trace_generator(trace_len);
     
-    // Extract public result from public inputs (first element typically)
+    // Extract "pub_result" for the proof being verified.
+    //
+    // - For app AIRs (VDF, CubicFib, etc.) and AggregatorAir, this is the first public input element.
+    // - For VerifierAir proofs, `pub_result` is a dedicated field in `VerifierPublicInputs` and is NOT
+    //   the first element (the first 4 elements are `statement_hash`).
     let pub_inputs_elements = pub_inputs.to_elements();
-    let pub_result = pub_inputs_elements.first().copied().unwrap_or(BaseElement::ZERO);
+    let pub_result = if TypeId::of::<A::PublicInputs>() == TypeId::of::<VerifierPublicInputs>() {
+        // Layout per `VerifierPublicInputs::to_elements()`:
+        // [... commitments ...][num_queries][proof_trace_len][g_trace][pub_result][expected_checkpoint_count][expected_mode_counter][params_digest(4)]
+        let n = pub_inputs_elements.len();
+        if n >= 7 { pub_inputs_elements[n - 7] } else { BaseElement::ZERO }
+    } else {
+        pub_inputs_elements.first().copied().unwrap_or(BaseElement::ZERO)
+    };
 
     // ========================================================================
     // PARSE ACTUAL QUERY OPENINGS FROM PROOF
@@ -172,7 +215,7 @@ where
         folding_factor,
         lde_domain_size,
         &query_positions,
-        &fs_result.fri_betas,
+        &fri_betas,
     );
 
     // Parse FRI remainder coefficients from proof
@@ -196,11 +239,24 @@ where
     // Compute domain parameters
     let domain_offset = BaseElement::GENERATOR;
     let g_lde = BaseElement::get_root_of_unity(lde_domain_size.ilog2());
-    
-    // Parse DEEP composition coefficients from Fiat-Shamir
-    // These are drawn after the OOD frame
-    let deep_coeffs = fs_result.deep_coeffs.clone();
 
+    // ========================================================================
+    // Extract VerifierAir public-input tail if present (for VerifierAir-as-child)
+    // ========================================================================
+    let pub_elems = pub_inputs.to_elements();
+    let mut verifier_statement_hash = [BaseElement::ZERO; 4];
+    if pub_elems.len() >= 4 {
+        verifier_statement_hash.copy_from_slice(&pub_elems[0..4]);
+    }
+    let mut verifier_params_digest = [BaseElement::ZERO; 4];
+    let (verifier_expected_checkpoint_count, verifier_expected_mode_counter) = if pub_elems.len() >= 6 {
+        let tail = &pub_elems[pub_elems.len() - 6..];
+        verifier_params_digest.copy_from_slice(&tail[2..6]);
+        (tail[0].as_int() as usize, tail[1].as_int() as usize)
+    } else {
+        (0usize, 0usize)
+    };
+    
     ParsedProof {
         trace_commitment,
         comp_commitment,
@@ -214,6 +270,10 @@ where
         g_trace,
         constraint_coeffs,
         pub_result,
+        verifier_statement_hash,
+        verifier_params_digest,
+        verifier_expected_checkpoint_count,
+        verifier_expected_mode_counter,
         // Query and layer data
         trace_queries,
         comp_queries,
@@ -233,6 +293,8 @@ where
         num_queries,
         num_constraints,
         num_fri_layers,
+        fri_folding_factor: folding_factor,
+        grinding_factor,
     }
 }
 
@@ -299,41 +361,45 @@ where
     public_coin_seed.append(&mut pub_inputs.to_elements());
     let mut public_coin = DefaultRandomCoin::<Hasher>::new(&public_coin_seed);
 
-    // Reseed with trace commitments and draw constraint coefficients
+    // --- Phase 1: absorb trace commitments, derive OOD point z ---
     for trace_root in trace_commitments {
         public_coin.reseed(*trace_root);
     }
-    
-    // Draw constraint composition coefficients (these are used for OOD verification!)
-    let mut constraint_coeffs = Vec::with_capacity(num_constraints + 1);
-    for _ in 0..num_constraints {
-        constraint_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw constraint coeff"));
-    }
-    // Add one more for boundary constraint
-    constraint_coeffs.push(public_coin.draw::<BaseElement>().unwrap_or(BaseElement::ONE));
-
-    // Reseed with composition commitment and draw OOD point z
-    public_coin.reseed(*comp_commitment);
     let z = public_coin.draw::<BaseElement>().expect("Failed to draw z");
 
-    // Reseed with OOD evaluations
+    // --- Phase 2: absorb OOD frame, derive constraint coefficients ---
     let ood_evals = merge_ood_evaluations(trace_ood, quotient_ood);
     public_coin.reseed(Hasher::hash_elements(&ood_evals));
 
-    // Draw DEEP composition coefficients (collect these for verification!)
-    // For LINEAR batching (Winterfell's default): one coefficient per column
-    // Same coefficient is used for both z and z*g terms in DEEP composition
-    // Layout: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
+    // Draw constraint composition coefficients (transition + boundary).
+    let mut constraint_coeffs = Vec::with_capacity(num_constraints + 1);
+    for _ in 0..num_constraints {
+        constraint_coeffs.push(
+            public_coin
+                .draw::<BaseElement>()
+                .expect("Failed to draw constraint coeff"),
+        );
+    }
+    constraint_coeffs.push(public_coin.draw::<BaseElement>().unwrap_or(BaseElement::ONE));
+
+    // --- Phase 3: absorb composition commitment, derive DEEP coefficients ---
+    public_coin.reseed(*comp_commitment);
+
+    // Draw DEEP composition coefficients.
+    //
+    // Winterfell samples:
+    // - 2 coefficients per trace column (for the z and z*g quotients)
+    // - 1 coefficient per composition column
     let trace_width = trace_ood.current_row().len();
     let constraint_width = quotient_ood.current_row().len();
-    let num_deep_coeffs = trace_width + constraint_width;
+    let num_deep_coeffs = trace_width * 2 + constraint_width;
     
     let mut deep_coeffs = Vec::with_capacity(num_deep_coeffs);
     for _ in 0..num_deep_coeffs {
         deep_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw DEEP coeff"));
     }
 
-    // Reseed with FRI commitments and draw FRI betas
+    // --- Phase 4: absorb FRI commitments, derive FRI betas ---
     let mut fri_betas = Vec::with_capacity(num_fri_layers);
     for (i, fri_root) in fri_commitments.iter().enumerate() {
         public_coin.reseed(*fri_root);
@@ -343,7 +409,7 @@ where
         }
     }
 
-    // Finally, draw query positions
+    // --- Phase 5: derive query positions ---
     let mut query_positions = public_coin
         .draw_integers(
             proof.options().num_queries(),

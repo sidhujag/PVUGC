@@ -149,25 +149,43 @@ pub struct VerifierPublicInputs {
     /// - num_fri_layers FRI Merkle verifications per query
     /// - terminal_checks: 1 per query for FRI terminal
     pub expected_checkpoint_count: usize,
-    /// Interpreter/formula hash - binds the constraint formula to public input
-    /// For Generic children, this is the hash of the EncodedFormula.
-    pub interpreter_hash: [BaseElement; 4],
+    /// Parameters digest binding the security-relevant STARK options of the proof being verified.
+    ///
+    /// Encoding (4 elements):
+    /// - [0] = trace_len
+    /// - [1] = lde_blowup
+    /// - [2] = num_queries
+    /// - [3] = (fri_folding_factor << 32) | grinding_factor
+    pub params_digest: [BaseElement; 4],
     /// Expected mode counter
     /// 
-    /// Packed encoding: statement_count + 64 * interpreter_count
-    /// For single proof: 1 + 64*1 = 65
-    /// For multi-proof (N children): 1 + 64*N
+    /// Packed encoding: statement_count + 4096 * params_count
+    ///
+    /// - statement_count is incremented on DeepCompose mode 4
+    /// - params_count is incremented on DeepCompose mode 5
+    ///
+    /// For single proof: 1 + 4096*1 = 4097
+    /// For multi-proof (N children): 1 + 4096*N
     pub expected_mode_counter: usize,
 }
 
 impl ToElements<BaseElement> for VerifierPublicInputs {
     fn to_elements(&self) -> Vec<BaseElement> {
-        let mut elements = Vec::with_capacity(24 + self.fri_commitments.len() * 4);
+        // NOTE (Groth16 arming): downstream code expects `pub_inputs.len() >= 22`
+        // so it can always include `stmt[0..4]` and the last 6 elements
+        // (`expected_checkpoint_count`, `expected_mode_counter`, `params_digest[4]`).
+        // When the verified proof has zero FRI layers, `fri_commitments` is empty and we'd end up
+        // with only 18 elements. We pad to at least one commitment (4 elems) deterministically.
+        let fri_commitments_len = self.fri_commitments.len().max(1);
+        let mut elements = Vec::with_capacity(24 + fri_commitments_len * 4);
         elements.extend_from_slice(&self.statement_hash);
         elements.extend_from_slice(&self.trace_commitment);
         elements.extend_from_slice(&self.comp_commitment);
         for commit in &self.fri_commitments {
             elements.extend_from_slice(commit);
+        }
+        if self.fri_commitments.is_empty() {
+            elements.extend_from_slice(&[BaseElement::ZERO; 4]);
         }
         elements.push(BaseElement::new(self.num_queries as u64));
         elements.push(BaseElement::new(self.proof_trace_len as u64));
@@ -175,7 +193,8 @@ impl ToElements<BaseElement> for VerifierPublicInputs {
         elements.push(self.pub_result);
         elements.push(BaseElement::new(self.expected_checkpoint_count as u64));
         elements.push(BaseElement::new(self.expected_mode_counter as u64));
-        elements.extend_from_slice(&self.interpreter_hash);
+        // Kept at end for Groth16 arming extraction.
+        elements.extend_from_slice(&self.params_digest);
         elements
     }
 }
@@ -193,24 +212,24 @@ impl VerifierPublicInputs {
     /// - 1 FRI terminal verification per query (if FRI layers exist)
     pub fn compute_expected_checkpoints(num_queries: usize, num_fri_layers: usize) -> usize {
         if num_fri_layers == 0 {
-            // No FRI: statement hash + OOD + interpreter hash + (trace + comp) Merkle per query
+            // No FRI: statement hash + OOD + params digest + (trace + comp) Merkle per query
             3 + num_queries * 2
         } else {
-            // With FRI: statement hash + OOD + interpreter hash + (trace + comp + DEEP + FRI layers + terminal) per query
+            // With FRI: statement hash + OOD + params digest + (trace + comp + DEEP + FRI layers + terminal) per query
             3 + num_queries * (2 + 1 + num_fri_layers + 1)
         }
     }
     
     /// Compute expected mode counter from number of child proofs
     /// 
-    /// Packed encoding: statement_count + 64 * interpreter_count
+    /// Packed encoding: statement_count + 4096 * params_count
     /// - statement_count: always 1 (one combined statement hash verification)
-    /// - interpreter_count: number of OOD verifications (one per child proof)
-    /// 
-    /// For single proof verification: 1 + 64*1 = 65
-    /// For verifying aggregator (N children): 1 + 64*N
+    /// - params_count: number of child proofs whose options digest is checked (one per child proof)
+    ///
+    /// For single proof verification: 1 + 4096*1 = 4097
+    /// For verifying aggregator (N children): 1 + 4096*N
     pub fn compute_expected_mode_counter(num_child_proofs: usize) -> usize {
-        1 + 64 * num_child_proofs
+        1 + num_child_proofs * 4096
     }
 }
 
@@ -290,12 +309,12 @@ impl Air for VerifierAir {
                 degrees.push(TransitionConstraintDegree::new(7));
             } else {
                 // Columns 0-3: root/statement/interpreter check constraints
-                // Root: op.is_deep(3) * is_root_check(5) * root(1) = degree 9
-                // Statement: op.is_deep(3) * is_statement_check(5) * statement(1) = degree 9
-                // Interpreter: op.is_deep(3) * is_interpreter_check(5) * interpreter(1) = degree 9
+                // Root: op.is_deep(3) * is_root_check(6) * root(1) = degree 10
+                // Statement: op.is_deep(3) * is_statement_check(6) * statement(1) = degree 10
+                // Params: op.is_deep(3) * is_params_check(6) * params(1) = degree 10
                 // Copy: both_not_special(6) * copy(1) = degree 7
-                // Max = 9
-                degrees.push(TransitionConstraintDegree::new(9));
+                // Max = 10
+                degrees.push(TransitionConstraintDegree::new(10));
             }
         }
 
@@ -312,8 +331,8 @@ impl Air for VerifierAir {
             } else if i == 1 {
                 // Mode counter: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 + is_mode_5 * 64)
                 // is_deep = degree 3, is_mode_4/5 = degree 5
-                // Total: 3 + 5 = degree 8
-                degrees.push(TransitionConstraintDegree::new(8));
+                // Total: 3 + 6 = degree 9
+                degrees.push(TransitionConstraintDegree::new(9));
             } else if i == 3 {
                 // Checkpoint counter: aux_next - aux_curr - op.is_deep
                 // op.is_deep = s2 * s1 * (1 - s0) = degree 3
@@ -374,9 +393,9 @@ impl Air for VerifierAir {
         let last_row = self.context.trace_len() - 1;
         
         // Final mode counter must equal expected value
-        // Packed encoding: statement_count + 64 * interpreter_count
-        // For single proof: 1 + 64*1 = 65
-        // For multi-proof (N children): 1 + 64*N
+        // Packed encoding: statement_count + 4096 * params_count
+        // For single proof: 1 + 4096*1 = 4097
+        // For multi-proof (N children): 1 + 4096*N
         assertions.push(Assertion::single(
             24, // aux[1] = mode counter
             last_row,
@@ -428,7 +447,7 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
-            interpreter_hash: [BaseElement::ZERO; 4],
+            params_digest: [BaseElement::ZERO; 4],
             expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 
@@ -457,12 +476,12 @@ mod tests {
             g_trace: BaseElement::new(18446744069414584320u64),
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
-            interpreter_hash: [BaseElement::ZERO; 4],
+            params_digest: [BaseElement::ZERO; 4],
             expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
         };
 
         let elements = pub_inputs.to_elements();
-        // 4 + 4 + 4 + 8 + 1 + 1 + 1 + 1 + 1 + 1 + 4 = 30 elements (added expected_mode_counter)
+        // 4(stmt)+4(trace)+4(comp)+8(fri commitments)+6(meta)+4(params) = 30
         assert_eq!(elements.len(), 30);
     }
     
@@ -472,18 +491,19 @@ mod tests {
         // - 1 statement hash verification
         // - 1 OOD verification  
         // - 1 interpreter hash verification
+        // - 1 params digest verification
         // - 2 queries * (2 Merkle roots + 1 DEEP + 3 FRI Merkle + 1 terminal) = 2 * 7 = 14
-        // Total: 3 + 14 = 17
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 17);
+        // Total: 4 + 14 = 18
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 3), 18);
 
         // With 4 queries and 0 FRI layers:
-        // - 1 statement hash + 1 OOD + 1 interpreter hash = 3
+        // - 1 statement hash + 1 OOD + 1 interpreter hash + 1 params digest = 4
         // - 4 queries * 2 (trace + comp Merkle only, no DEEP/terminal) = 8
-        // Total: 11
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 11);
+        // Total: 12
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(4, 0), 12);
         
         // With 2 queries and 0 FRI layers:
-        // - 3 + 2 * 2 = 7
-        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 0), 7);
+        // - 4 + 2 * 2 = 8
+        assert_eq!(VerifierPublicInputs::compute_expected_checkpoints(2, 0), 8);
     }
 }

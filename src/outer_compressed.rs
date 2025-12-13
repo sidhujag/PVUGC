@@ -10,12 +10,13 @@
 //! faster recursion-friendly parameter generation.
 
 use crate::ppe::PvugcVk;
-use ark_crypto_primitives::snark::BooleanInputVar;
+use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ff::{BigInteger, Field, PrimeField};
-use ark_groth16::constraints::VerifyingKeyVar;
+use ark_groth16::constraints::{Groth16VerifierGadget, ProofVar, VerifyingKeyVar};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
-use ark_r1cs_std::{alloc::AllocVar, pairing::PairingVar as PairingVarTrait};
+use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, pairing::PairingVar as PairingVarTrait};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
 use core::marker::PhantomData;
@@ -151,7 +152,7 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
         self,
         cs: ConstraintSystemRef<OuterScalar<C>>,
     ) -> Result<(), SynthesisError> {
-        let _vk_var = VerifyingKeyVar::<C::InnerE, C::InnerPairingVar>::new_constant(
+        let vk_var = VerifyingKeyVar::<C::InnerE, C::InnerPairingVar>::new_constant(
             cs.clone(),
             &self.vk_inner,
         )?;
@@ -426,18 +427,19 @@ mod tests {
         smoke_test_for_cycle::<Mnt4Mnt6Cycle>();
     }
 
-    /// End-to-end test for PVUGC with Aggregator STARK
+    /// End-to-end test for PVUGC with VerifierAir-only recursion
     /// 
     /// This test proves that the quotient gap is LINEAR because:
-    /// 1. Sample instances use VDF → Aggregator STARK → Groth16
-    /// 2. Runtime instance uses CubicFib → Aggregator STARK → Groth16
-    /// 3. The Aggregator STARK has FIXED structure regardless of the app STARK
-    /// 4. Therefore, q_const computation works for ANY app STARK!
+    /// 1. Sample instances use (app proof) → VerifierAir wrapper → Groth16
+    /// 2. Runtime instance uses a different app AIR → same VerifierAir wrapper → Groth16
+    /// 3. VerifierAir proofs are padded to a fixed trace length to keep the Groth16 circuit shape stable
+    /// 4. Therefore, q_const computation works for heterogeneous app STARKs
     #[test]
     #[ignore]
     fn test_pvugc_on_outer_proof_e2e() {
         use crate::decap::build_commitments;
         use crate::prover_lean::prove_lean_with_randomizers;
+        use crate::stark::AirParams;
         use crate::stark::test_utils::{
             build_vdf_recursive_stark_instance, build_cubic_fib_recursive_stark_instance,
         };
@@ -453,7 +455,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(99999);
         
         println!("\n=== PVUGC E2E Test with Recursive STARK ===");
-        println!("Architecture: App STARK → Aggregator STARK → Verifier STARK → Groth16");
+        println!("Architecture: App STARK → VerifierAir (recursive verifier) → Groth16");
         println!();
         
         // Sample instances: MIXED app STARKs through full recursive STARK pipeline
@@ -465,21 +467,288 @@ mod tests {
             build_cubic_fib_recursive_stark_instance(1, 1, 16),    // CubicFib with 16 steps
         ];
         println!("  Sample instances built in {:?}", sample_start.elapsed());
+        for (i, inst) in sample_instances.iter().enumerate() {
+            println!(
+                "  sample_instances[{i}] circuit: constraints_hint(trace_len={}, fri_layers={}, fri_terminal={:?}, remainder_coeffs_len={})",
+                inst.circuit.air_params.trace_len,
+                inst.circuit.air_params.fri_num_layers,
+                inst.circuit.air_params.fri_terminal,
+                inst.circuit.fri_remainder_coeffs.len(),
+            );
+        }
         
         let runtime_start = Instant::now();
-        let runtime_instance = build_cubic_fib_recursive_stark_instance(12, 20, 8);
+        let runtime_instance = build_vdf_recursive_stark_instance(3, 8);
+
         println!("  Runtime instance built in {:?}", runtime_start.elapsed());
+        println!(
+            "  runtime_instance circuit: constraints_hint(trace_len={}, fri_layers={}, fri_terminal={:?}, remainder_coeffs_len={})",
+            runtime_instance.circuit.air_params.trace_len,
+            runtime_instance.circuit.air_params.fri_num_layers,
+            runtime_instance.circuit.air_params.fri_terminal,
+            runtime_instance.circuit.fri_remainder_coeffs.len(),
+        );
+
+        // Sanity check: Groth16 CRS is circuit-specific. If sample instances don't have the
+        // exact same Verifier-STARK-derived circuit *shape* as the runtime instance, Groth16
+        // proving/verification will fail (typically at verify-time with a stale CRS).
+        fn assert_same_inner_shape(label_a: &str, a: &AirParams, label_b: &str, b: &AirParams) {
+            let mut diffs: Vec<String> = Vec::new();
+
+            macro_rules! check {
+                ($field:ident) => {
+                    if a.$field != b.$field {
+                        diffs.push(format!(
+                            "air_params.{} mismatch: {}={} vs {}={}",
+                            stringify!($field),
+                            label_a,
+                            a.$field,
+                            label_b,
+                            b.$field
+                        ));
+                    }
+                };
+            }
+
+            check!(trace_width);
+            check!(comp_width);
+            check!(trace_len);
+            check!(lde_blowup);
+            check!(num_queries);
+            check!(fri_folding_factor);
+            check!(fri_num_layers);
+            check!(lde_generator);
+            check!(domain_offset);
+            check!(g_lde);
+            check!(g_trace);
+            check!(num_constraint_coeffs);
+            check!(grinding_factor);
+            check!(aggregator_version);
+
+            // Compare enum-ish params via Debug to avoid requiring PartialEq bounds here.
+            if format!("{:?}", a.combiner_kind) != format!("{:?}", b.combiner_kind) {
+                diffs.push(format!(
+                    "air_params.combiner_kind mismatch: {}={:?} vs {}={:?}",
+                    label_a, a.combiner_kind, label_b, b.combiner_kind
+                ));
+            }
+            if format!("{:?}", a.fri_terminal) != format!("{:?}", b.fri_terminal) {
+                diffs.push(format!(
+                    "air_params.fri_terminal mismatch: {}={:?} vs {}={:?}",
+                    label_a, a.fri_terminal, label_b, b.fri_terminal
+                ));
+            }
+
+            if !diffs.is_empty() {
+                panic!(
+                    "Inner Groth16 circuit shape mismatch between {} and {}:\n{}",
+                    label_a,
+                    label_b,
+                    diffs.join("\n")
+                );
+            }
+        }
+
+        // Compare all sample instances against the runtime instance.
+        for (i, inst) in sample_instances.iter().enumerate() {
+            assert_same_inner_shape(
+                &format!("sample_instances[{i}]"),
+                &inst.circuit.air_params,
+                "runtime_instance",
+                &runtime_instance.circuit.air_params,
+            );
+        }
+
+        // Extra diagnostic: even if AirParams match, the Groth16 circuit can still change if
+        // constraint synthesis branches on witness *shape* (vector lengths / emptiness).
+        // If this trips, the "universal" circuit assumption is false as currently encoded.
+        if sample_instances.len() >= 2 {
+            let a = &sample_instances[0].circuit;
+            let b = &sample_instances[1].circuit;
+
+            macro_rules! eq_len {
+                ($name:expr, $x:expr, $y:expr) => {{
+                    let lx = $x.len();
+                    let ly = $y.len();
+                    assert_eq!(
+                        lx, ly,
+                        "Inner circuit witness-shape mismatch for {}: sample[0] len={} vs sample[1] len={}",
+                        $name, lx, ly
+                    );
+                }};
+            }
+
+            eq_len!("stark_pub_inputs", a.stark_pub_inputs, b.stark_pub_inputs);
+            eq_len!("fs_context_seed_gl", a.fs_context_seed_gl, b.fs_context_seed_gl);
+            eq_len!("trace_commitment_le32", a.trace_commitment_le32, b.trace_commitment_le32);
+            eq_len!("fri_commitments_le32", a.fri_commitments_le32, b.fri_commitments_le32);
+            eq_len!("query_positions", a.query_positions, b.query_positions);
+            eq_len!("trace_segments", a.trace_segments, b.trace_segments);
+            eq_len!("comp_queries", a.comp_queries, b.comp_queries);
+            eq_len!("comp_batch_nodes (outer)", a.comp_batch_nodes, b.comp_batch_nodes);
+            eq_len!("comp_batch_indexes", a.comp_batch_indexes, b.comp_batch_indexes);
+            eq_len!("ood_trace_current", a.ood_trace_current, b.ood_trace_current);
+            eq_len!("ood_trace_next", a.ood_trace_next, b.ood_trace_next);
+            eq_len!("ood_comp", a.ood_comp, b.ood_comp);
+            eq_len!("ood_comp_next", a.ood_comp_next, b.ood_comp_next);
+            eq_len!("fri_layers", a.fri_layers, b.fri_layers);
+            eq_len!("fri_remainder_coeffs", a.fri_remainder_coeffs, b.fri_remainder_coeffs);
+
+            // More granular checks on nested shapes (first segment / first layer).
+            if let (Some(sa), Some(sb)) = (a.trace_segments.first(), b.trace_segments.first()) {
+                eq_len!("trace_segments[0].queries", sa.queries, sb.queries);
+                eq_len!("trace_segments[0].batch_nodes", sa.batch_nodes, sb.batch_nodes);
+                assert_eq!(
+                    sa.batch_depth, sb.batch_depth,
+                    "Inner circuit witness-shape mismatch for trace_segments[0].batch_depth: sample[0]={} vs sample[1]={}",
+                    sa.batch_depth, sb.batch_depth
+                );
+                eq_len!("trace_segments[0].batch_indexes", sa.batch_indexes, sb.batch_indexes);
+            }
+            if let (Some(fa), Some(fb)) = (a.fri_layers.first(), b.fri_layers.first()) {
+                eq_len!("fri_layers[0].queries", fa.queries, fb.queries);
+                eq_len!("fri_layers[0].unique_indexes", fa.unique_indexes, fb.unique_indexes);
+                eq_len!("fri_layers[0].unique_values", fa.unique_values, fb.unique_values);
+                eq_len!("fri_layers[0].batch_nodes", fa.batch_nodes, fb.batch_nodes);
+                assert_eq!(
+                    fa.batch_depth, fb.batch_depth,
+                    "Inner circuit witness-shape mismatch for fri_layers[0].batch_depth: sample[0]={} vs sample[1]={}",
+                    fa.batch_depth, fb.batch_depth
+                );
+            }
+        }
 
         let (pk_inner, vk_inner) = get_or_init_inner_crs_keys();
 
         let mut sample_proofs: Vec<(InnerScalar<Cycle>, InnerProof<Cycle>)> = Vec::new();
-        for inst in &sample_instances {
+        let mut baseline_r1cs_shape: Option<(usize, usize, usize)> = None; // (constraints, public_inputs, witnesses)
+        for (i, inst) in sample_instances.iter().enumerate() {
+            // Extra safety: Groth16::prove does not guarantee the witness satisfies constraints.
+            // If the STARK proof parser or in-circuit verifier is inconsistent, the generated
+            // Groth16 proof will fail verification. Catch this explicitly.
+            {
+                use ark_relations::r1cs::ConstraintSystem;
+                let cs = ConstraintSystem::<InnerScalar<Cycle>>::new_ref();
+                inst.circuit
+                    .clone()
+                    .generate_constraints(cs.clone())
+                    .expect("failed to synthesize inner circuit");
+                println!(
+                    "  [shape] sample_instances[{i}] synthesized: constraints={} public_inputs={} witnesses={}",
+                    cs.num_constraints(),
+                    cs.num_instance_variables(),
+                    cs.num_witness_variables(),
+                );
+                assert!(
+                    cs.is_satisfied().expect("failed to check R1CS satisfiability"),
+                    "Inner circuit is unsatisfied for sample_instances[{i}] (statement_hash={:?})",
+                    inst.statement_hash
+                );
+
+                // Also assert that the *shape* of the constraint system is identical across all
+                // instances. Groth16 CRS is circuit-specific; if R1CS shape differs, proofs can
+                // be produced but will not verify under a CRS generated for a different shape.
+                let shape = (
+                    cs.num_constraints(),
+                    cs.num_instance_variables(),
+                    cs.num_witness_variables(),
+                );
+                if let Some(baseline) = baseline_r1cs_shape {
+                    if shape != baseline {
+                        // High-signal diagnostics: locate where witness-dependent branching happens.
+                        let c = &inst.circuit;
+                        eprintln!(
+                            "[e2e][shape-diff] sample_instances[{i}] air_params: trace_len={} num_queries={} fri_layers={} comp_width={}",
+                            c.air_params.trace_len,
+                            c.air_params.num_queries,
+                            c.air_params.fri_num_layers,
+                            c.air_params.comp_width,
+                        );
+                        eprintln!(
+                            "[e2e][shape-diff] delta: constraints(+{}), witnesses(+{}) vs baseline",
+                            shape.0.saturating_sub(baseline.0),
+                            shape.2.saturating_sub(baseline.2),
+                        );
+                        eprintln!(
+                            "[e2e][shape-diff] fri_layers: count={} remainder_coeffs_len={}",
+                            c.fri_layers.len(),
+                            c.fri_remainder_coeffs.len(),
+                        );
+                        for (li, layer) in c.fri_layers.iter().enumerate() {
+                            let first_nodes_len = layer.batch_nodes.first().map(|v| v.len()).unwrap_or(0);
+                            let last_nodes_len = layer.batch_nodes.last().map(|v| v.len()).unwrap_or(0);
+                            eprintln!(
+                                "  [fri][{li}] queries={} unique_indexes={} unique_values={} batch_nodes={} depth={} first_nodes_len={} last_nodes_len={}",
+                                layer.queries.len(),
+                                layer.unique_indexes.len(),
+                                layer.unique_values.len(),
+                                layer.batch_nodes.len(),
+                                layer.batch_depth,
+                                first_nodes_len,
+                                last_nodes_len,
+                            );
+                        }
+                        for (si, seg) in c.trace_segments.iter().enumerate() {
+                            let first_nodes_len = seg.batch_nodes.first().map(|v| v.len()).unwrap_or(0);
+                            let last_nodes_len = seg.batch_nodes.last().map(|v| v.len()).unwrap_or(0);
+                            eprintln!(
+                                "  [trace_seg][{si}] queries={} batch_nodes={} depth={} first_nodes_len={} last_nodes_len={}",
+                                seg.queries.len(),
+                                seg.batch_nodes.len(),
+                                seg.batch_depth,
+                                first_nodes_len,
+                                last_nodes_len,
+                            );
+                        }
+                        eprintln!(
+                            "  [comp] comp_queries={} comp_batch_nodes={} comp_batch_depth={} comp_batch_indexes={}",
+                            c.comp_queries.len(),
+                            c.comp_batch_nodes.len(),
+                            c.comp_batch_depth,
+                            c.comp_batch_indexes.len(),
+                        );
+                        let comp_first_nodes_len = c.comp_batch_nodes.first().map(|v| v.len()).unwrap_or(0);
+                        let comp_last_nodes_len = c.comp_batch_nodes.last().map(|v| v.len()).unwrap_or(0);
+                        eprintln!(
+                            "  [comp] comp_batch_nodes inner lens: first={} last={}",
+                            comp_first_nodes_len,
+                            comp_last_nodes_len,
+                        );
+                    }
+                    assert_eq!(
+                        shape,
+                        baseline,
+                        "Inner R1CS shape mismatch at sample_instances[{i}]. \
+                         baseline=(constraints={}, public_inputs={}, witnesses={}) \
+                         vs this=(constraints={}, public_inputs={}, witnesses={})",
+                        baseline.0,
+                        baseline.1,
+                        baseline.2,
+                        shape.0,
+                        shape.1,
+                        shape.2
+                    );
+                } else {
+                    baseline_r1cs_shape = Some(shape);
+                }
+            }
+
             let proof = Groth16::<<Cycle as RecursionCycle>::InnerE>::prove(
                 &pk_inner,
                 inst.circuit.clone(),
                 &mut rng,
             )
             .unwrap();
+            assert!(
+                Groth16::<<Cycle as RecursionCycle>::InnerE>::verify(
+                    &vk_inner,
+                    &[inst.statement_hash],
+                    &proof,
+                )
+                .unwrap(),
+                "Sample inner proof verification failed for {} (sample_instances[{i}])",
+                Cycle::name(),
+            );
             sample_proofs.push((inst.statement_hash, proof));
         }
         let runtime_inner_proof = Groth16::<<Cycle as RecursionCycle>::InnerE>::prove(
@@ -488,7 +757,17 @@ mod tests {
             &mut rng,
         )
         .unwrap();
-
+        // Verify the runtime inner proof immediately after creation
+        assert!(
+            Groth16::<<Cycle as RecursionCycle>::InnerE>::verify(
+                &vk_inner,
+                &[runtime_instance.statement_hash],
+                &runtime_inner_proof,
+            )
+            .unwrap(),
+            "Runtime inner proof verification failed for {}",
+            Cycle::name()
+        );
         let (pk_outer_raw, vk_outer_raw) =
             setup_outer_params_for::<Cycle>(&vk_inner, 1, &mut rng).unwrap();
         let pk_outer = Arc::new(pk_outer_raw);
@@ -574,23 +853,23 @@ mod tests {
         );
         let col_arms = crate::pvugc_outer::arm_columns_outer_for::<Cycle>(&bases, &rho);
 
-        let decap_start = Instant::now();
-        let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
-        eprintln!(
-            "[timing:{}] decap {:?}",
-            Cycle::name(),
-            decap_start.elapsed()
-        );
+            let decap_start = Instant::now();
+            let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
+            eprintln!(
+                "[timing:{}] decap {:?}",
+                Cycle::name(),
+                decap_start.elapsed()
+            );
 
-        let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
-            &*vk_outer, &pvugc_vk, &public_x,
-        );
-        let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
+            let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
+                &*vk_outer, &pvugc_vk, &public_x,
+            );
+            let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
 
-        assert!(
-            crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
-            "Decapsulated K doesn't match R^ρ!"
-        );
+            assert!(
+                crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
+                "Decapsulated K doesn't match R^ρ!"
+            );
         
         println!("\n✓ RECURSIVE STARK E2E test passed!");
         println!("  This proves: App → Aggregator → Verifier STARK → Groth16 → PVUGC");

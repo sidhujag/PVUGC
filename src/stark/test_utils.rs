@@ -19,23 +19,19 @@ use winter_math::fields::f64::BaseElement;
 use winter_math::{FieldElement, ToElements};
 use winterfell::{Air, Proof, ProofOptions, Prover, Trace};
 
-use super::aggregator_air::{generate_aggregator_proof, generate_verifying_aggregator_proof, AggregatorAir, AggregatorConfig};
 use super::stark_proof_parser::{
     derive_query_positions, parse_proof_for_circuit_with_query_positions,
 };
 use super::verifier_air::proof_parser::parse_proof;
 use super::tests::helpers::cubic_fib::{generate_test_cubic_fib_proof_rpo, CubicFibAir};
 use super::tests::helpers::simple_vdf::{build_vdf_trace, generate_test_vdf_proof_rpo, VdfAir, VdfProver};
+use super::verifier_air::ood_eval::ChildAirType;
+use super::aggregator_air::generate_verifying_aggregator_proof;
+use super::verifier_air::{prover::VerifierProver, VerifierPublicInputs};
 use super::{AirParams, FullStarkVerifierCircuit, StarkInnerFr};
 use crate::stark::gadgets::fri::FriTerminalKind;
 use crate::stark::gadgets::utils::CombinerKind;
 use ark_snark::SNARK;
-
-/// Default Aggregator configuration for tests
-/// Uses test_fast() for speed, but can be overridden for security testing
-pub fn default_aggregator_config() -> AggregatorConfig {
-    AggregatorConfig::test_fast()
-}
 
 const INNER_CRS_CACHE: &str = "inner_crs_pk_vk.bin";
 static INNER_CRS_KEYS: Lazy<
@@ -63,16 +59,122 @@ fn load_or_build_inner_crs_keys() -> (ProvingKey<Bls12_377>, VerifyingKey<Bls12_
         let (pk, vk): (ProvingKey<Bls12_377>, VerifyingKey<Bls12_377>) =
             CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
                 .expect("failed to deserialize inner CRS keys");
-        return (pk, vk);
+
+        // Cache robustness: if the circuit constraints change, the cached CRS becomes stale.
+        // In that case Groth16::prove will still return a proof, but verification will fail.
+        // Detect this early and rebuild the cache automatically.
+        //
+        // IMPORTANT (universality):
+        // We rely on the inner Groth16 circuit being *universal* across supported app proofs
+        // (e.g. VDF, CubicFib, etc.). Constraint COUNTS matching is not enough; the R1CS must be
+        // identical for CRS reuse. So we self-check against multiple representative instances.
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        let vdf_instance = build_vdf_recursive_stark_instance(3, 8);
+        let vdf_proof = Groth16::<Bls12_377>::prove(&pk, vdf_instance.circuit.clone(), &mut rng)
+            .expect("failed to self-check cached inner CRS keys (prove vdf)");
+        let vdf_ok = Groth16::<Bls12_377>::verify(&vk, &[vdf_instance.statement_hash], &vdf_proof)
+            .expect("failed to self-check cached inner CRS keys (verify vdf)");
+
+        let cubic_instance = build_cubic_fib_recursive_stark_instance(3, 5, 8);
+        let cubic_proof =
+            Groth16::<Bls12_377>::prove(&pk, cubic_instance.circuit.clone(), &mut rng)
+                .expect("failed to self-check cached inner CRS keys (prove cubic)");
+        let cubic_ok =
+            Groth16::<Bls12_377>::verify(&vk, &[cubic_instance.statement_hash], &cubic_proof)
+                .expect("failed to self-check cached inner CRS keys (verify cubic)");
+
+        eprintln!(
+            "[inner_crs] cached CRS self-check: vdf_ok={} cubic_ok={}",
+            vdf_ok, cubic_ok
+        );
+        if vdf_ok && cubic_ok {
+            return (pk, vk);
+        }
     }
 
     // Use Aggregator STARK flow for the inner CRS
     // This ensures all app STARKs (VDF, CubicFib, etc.) go through the same Aggregator
     // The Aggregator has FIXED structure, making the quotient gap linear!
-    let instance = build_vdf_recursive_stark_instance(3, 8);
+    // Seed the CRS from a CubicFib instance (different app than VDF), to avoid
+    // accidentally "locking" the cache to a VDF-shaped circuit during development.
+    // If the inner circuit is truly universal, the choice of seed instance does not matter.
+    let instance = build_cubic_fib_recursive_stark_instance(1, 1, 16);
     let mut rng = StdRng::seed_from_u64(42);
     let (pk, vk) =
         Groth16::<Bls12_377>::circuit_specific_setup(instance.circuit.clone(), &mut rng).unwrap();
+
+    // Immediately self-check the freshly built CRS against multiple representative instances,
+    // so we don't persist a stale/unusable cache (and so a single run is sufficient).
+    let mut rng = StdRng::seed_from_u64(12345);
+    let vdf_instance = build_vdf_recursive_stark_instance(3, 8);
+    eprintln!(
+        "[inner_crs] built CRS check (vdf): trace_len={} lde_blowup={} num_queries={} fri_layers={} comp_width={}",
+        vdf_instance.circuit.air_params.trace_len,
+        vdf_instance.circuit.air_params.lde_blowup,
+        vdf_instance.circuit.air_params.num_queries,
+        vdf_instance.circuit.air_params.fri_num_layers,
+        vdf_instance.circuit.air_params.comp_width,
+    );
+    eprintln!(
+        "[inner_crs] built CRS check (vdf): num_constraint_coeffs={} grinding_factor={} fri_terminal={:?}",
+        vdf_instance.circuit.air_params.num_constraint_coeffs,
+        vdf_instance.circuit.air_params.grinding_factor,
+        vdf_instance.circuit.air_params.fri_terminal,
+    );
+    eprintln!(
+        "[inner_crs] built CRS check (vdf): fs_ctx_len={} trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
+        vdf_instance.circuit.fs_context_seed_gl.len(),
+        vdf_instance.circuit.trace_commitment_le32.len(),
+        vdf_instance.circuit.trace_segments.len(),
+        vdf_instance.circuit.fri_commitments_le32.len(),
+        vdf_instance.circuit.fri_layers.len(),
+    );
+
+    let vdf_proof = Groth16::<Bls12_377>::prove(&pk, vdf_instance.circuit.clone(), &mut rng)
+        .expect("failed to self-check built inner CRS keys (prove vdf)");
+    let vdf_ok = Groth16::<Bls12_377>::verify(&vk, &[vdf_instance.statement_hash], &vdf_proof)
+        .expect("failed to self-check built inner CRS keys (verify vdf)");
+
+    let cubic_instance = build_cubic_fib_recursive_stark_instance(1, 1, 16);
+    eprintln!(
+        "[inner_crs] built CRS check (cubic): trace_len={} lde_blowup={} num_queries={} fri_layers={} comp_width={}",
+        cubic_instance.circuit.air_params.trace_len,
+        cubic_instance.circuit.air_params.lde_blowup,
+        cubic_instance.circuit.air_params.num_queries,
+        cubic_instance.circuit.air_params.fri_num_layers,
+        cubic_instance.circuit.air_params.comp_width,
+    );
+    eprintln!(
+        "[inner_crs] built CRS check (cubic): num_constraint_coeffs={} grinding_factor={} fri_terminal={:?}",
+        cubic_instance.circuit.air_params.num_constraint_coeffs,
+        cubic_instance.circuit.air_params.grinding_factor,
+        cubic_instance.circuit.air_params.fri_terminal,
+    );
+    eprintln!(
+        "[inner_crs] built CRS check (cubic): fs_ctx_len={} trace_commitments={} trace_segments={} fri_commitments={} fri_layers_witness={}",
+        cubic_instance.circuit.fs_context_seed_gl.len(),
+        cubic_instance.circuit.trace_commitment_le32.len(),
+        cubic_instance.circuit.trace_segments.len(),
+        cubic_instance.circuit.fri_commitments_le32.len(),
+        cubic_instance.circuit.fri_layers.len(),
+    );
+    let cubic_proof = Groth16::<Bls12_377>::prove(&pk, cubic_instance.circuit.clone(), &mut rng)
+        .expect("failed to self-check built inner CRS keys (prove cubic)");
+    let cubic_ok =
+        Groth16::<Bls12_377>::verify(&vk, &[cubic_instance.statement_hash], &cubic_proof)
+            .expect("failed to self-check built inner CRS keys (verify cubic)");
+
+    eprintln!(
+        "[inner_crs] built CRS self-check: vdf_ok={} cubic_ok={}",
+        vdf_ok, cubic_ok
+    );
+    assert!(
+        vdf_ok && cubic_ok,
+        "built inner CRS keys are not universal (vdf_ok={}, cubic_ok={})",
+        vdf_ok,
+        cubic_ok
+    );
 
     let file = File::create(INNER_CRS_CACHE).expect("failed to create inner CRS cache file");
     let mut writer = BufWriter::new(file);
@@ -109,184 +211,6 @@ pub fn build_cubic_fib_stark_instance(start_a: u64, start_b: u64, steps: usize) 
     let b = BaseElement::new(start_b);
     let (proof, trace) = generate_test_cubic_fib_proof_rpo(a, b, steps);
     build_instance_from_proof::<CubicFibAir>(proof, trace)
-}
-
-// ============================================================================
-// AGGREGATOR STARK FLOW
-// ============================================================================
-
-/// Extract statement hash from an application STARK proof
-/// This binds the application's public inputs and commitments to the Aggregator
-fn extract_app_statement_hash<A: Air<BaseField = BaseElement>>(
-    proof: &Proof,
-    result: BaseElement,
-) -> [BaseElement; 4] {
-    let num_fri_layers = proof
-        .options()
-        .to_fri_options()
-        .num_fri_layers(proof.context.lde_domain_size());
-
-    let (trace_commitments, constraint_commitment, _) = proof
-        .commitments
-        .clone()
-        .parse::<Rp64_256>(proof.context.trace_info().num_segments(), num_fri_layers)
-        .expect("parse commitments");
-
-    let trace_root = trace_commitments[0].as_bytes();
-    let constraint_root = constraint_commitment.as_bytes();
-
-    let mut hash = [BaseElement::ZERO; 4];
-    
-    // Element 0: Application result
-    hash[0] = result;
-    
-    // Elements 1-3: Commitment bytes packed into field elements
-    let mut bytes8 = [0u8; 8];
-    bytes8.copy_from_slice(&trace_root[0..8]);
-    hash[1] = BaseElement::new(u64::from_le_bytes(bytes8));
-    bytes8.copy_from_slice(&trace_root[8..16]);
-    hash[2] = BaseElement::new(u64::from_le_bytes(bytes8));
-    bytes8.copy_from_slice(&constraint_root[0..8]);
-    hash[3] = BaseElement::new(u64::from_le_bytes(bytes8));
-
-    hash
-}
-
-
-/// Build an Aggregator STARK circuit with configurable trace length
-/// 
-/// This is useful for testing different FRI layer configurations.
-/// Returns the circuit directly (not wrapped in VdfStarkInstance).
-pub fn build_aggregator_circuit_with_trace_len(
-    trace_len: usize,
-) -> FullStarkVerifierCircuit {
-    // Create custom config with the specified trace length
-    let mut config = default_aggregator_config();
-    config.trace_len = trace_len;
-    
-    // Scale queries for larger traces to ensure enough FRI layers
-    if trace_len > 64 {
-        config.num_queries = 8;
-    } else if trace_len > 8 {
-        config.num_queries = 4;
-    }
-    
-    build_aggregator_circuit_with_config(&config)
-}
-
-/// Build an Aggregator STARK circuit with custom config
-pub fn build_aggregator_circuit_with_config(
-    config: &AggregatorConfig,
-) -> FullStarkVerifierCircuit {
-    // Create simple app statement hash
-    let app_statement_hash = [
-        BaseElement::new(1),
-        BaseElement::new(2),
-        BaseElement::new(3),
-        BaseElement::new(4),
-    ];
-    
-    let options = config.to_proof_options();
-    
-    let (proof, result, _) = 
-        generate_aggregator_proof(app_statement_hash, config.trace_len, options.clone())
-            .expect("Aggregator proof failed");
-    
-    // Verify Aggregator proof is valid
-    let acceptable = winterfell::AcceptableOptions::OptionSet(vec![options]);
-    winterfell::verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
-        proof.clone(),
-        result,
-        &acceptable,
-    )
-    .expect("Aggregator verification failed");
-    
-    build_aggregator_instance(proof, result).circuit
-}
-
-/// Build a Groth16-ready instance from an Aggregator STARK proof
-pub fn build_aggregator_instance(
-    proof: Proof,
-    pub_inputs: super::aggregator_air::AggregatorPublicInputs,
-) -> VdfStarkInstance {
-    let trace_len = proof.context.trace_info().length();
-    let lde_domain_size = proof.context.lde_domain_size();
-    let num_queries = proof.options().num_queries();
-    let trace_width = proof.context.trace_info().main_trace_width();
-
-    // Public inputs: all 13 elements from AggregatorPublicInputs
-    // Order: result, children_root[4], initial_state[4], final_state[4]
-    let pub_inputs_u64: Vec<u64> = pub_inputs.to_elements()
-        .iter()
-        .map(|e| e.as_int())
-        .collect();
-    
-    // Create AIR to get domain parameters
-    let air = AggregatorAir::new(
-        proof.context.trace_info().clone(),
-        pub_inputs,
-        proof.options().clone(),
-    );
-
-    let lde_generator = air.lde_domain_generator().as_int();
-    let domain_offset = air.domain_offset().as_int();
-    let g_trace = air.trace_domain_generator().as_int();
-
-    let coeffs_len = proof
-        .fri_proof
-        .clone()
-        .parse_remainder::<BaseElement>()
-        .map(|v: Vec<BaseElement>| v.len())
-        .unwrap_or(0);
-    let fri_terminal = if coeffs_len == 0 {
-        FriTerminalKind::Constant
-    } else {
-        FriTerminalKind::Poly {
-            degree: coeffs_len - 1,
-        }
-    };
-
-    use super::AGGREGATOR_VERSION;
-
-    let comp_width = air.context().num_constraint_composition_columns();
-    let num_constraints = proof.context.num_constraints();
-    let fri_num_layers = proof
-        .options()
-        .to_fri_options()
-        .num_fri_layers(lde_domain_size);
-
-    let air_params = AirParams {
-        trace_width,
-        comp_width,
-        trace_len,
-        lde_blowup: lde_domain_size / trace_len,
-        num_queries,
-        fri_folding_factor: 2,
-        fri_num_layers,
-        lde_generator,
-        domain_offset,
-        g_lde: lde_generator,
-        g_trace,
-        combiner_kind: CombinerKind::RandomRho,
-        fri_terminal,
-        num_constraint_coeffs: num_constraints,
-        grinding_factor: proof.options().grinding_factor(),
-        aggregator_version: AGGREGATOR_VERSION,
-    };
-
-    let query_positions = derive_query_positions::<Rp64_256, _>(&proof, &air, &pub_inputs);
-
-    let circuit = parse_proof_for_circuit_with_query_positions::<Rp64_256, MerkleTree<Rp64_256>>(
-        &proof,
-        pub_inputs_u64,
-        air_params,
-        query_positions,
-    );
-
-    VdfStarkInstance {
-        statement_hash: circuit.statement_hash,
-        circuit,
-    }
 }
 
 fn build_instance_from_proof<A>(
@@ -378,22 +302,27 @@ where
 }
 
 // ============================================================================
-// RECURSIVE STARK FLOW (App → Aggregator → Verifier STARK → Groth16)
+// RECURSIVE STARK FLOW (App → VerifierAir leaf wrapper → Groth16)
 // ============================================================================
 
-/// Build a VDF instance using the full recursive STARK pipeline:
-/// VDF STARK → Aggregator STARK → Verifier STARK → Groth16
-///
-/// Uses test configs for speed. For production, use `build_vdf_recursive_stark_instance_production`.
+/// Build a VDF instance using the VerifierAir-only recursive pipeline:
+/// VDF STARK → VerifierAir (verifies VDF proof) → Groth16.
 pub fn build_vdf_recursive_stark_instance(start_value: u64, steps: usize) -> VdfStarkInstance {
-    use super::verifier_air::aggregator_integration::RecursiveConfig;
-    build_vdf_recursive_stark_instance_with_config(start_value, steps, RecursiveConfig::test())
+    build_vdf_recursive_stark_instance_leaf_wrapper(start_value, steps)
+}
+
+/// Helper: build two VDF instances with identical parameters.
+/// Used for checking Groth16 circuit/R1CS shape stability across fresh proofs.
+pub fn build_two_vdf_recursive_stark_instances(
+    start_value: u64,
+    steps: usize,
+) -> (VdfStarkInstance, VdfStarkInstance) {
+    (build_vdf_recursive_stark_instance(start_value, steps), build_vdf_recursive_stark_instance(start_value, steps))
 }
 
 /// Build a VDF instance using production configs (128-bit security)
 pub fn build_vdf_recursive_stark_instance_production(start_value: u64, steps: usize) -> VdfStarkInstance {
-    use super::verifier_air::aggregator_integration::RecursiveConfig;
-    build_vdf_recursive_stark_instance_with_config(start_value, steps, RecursiveConfig::production_128bit())
+    build_vdf_recursive_stark_instance_leaf_wrapper(start_value, steps)
 }
 
 /// Build a VDF instance with meaningful FRI layers for testing FRI verification
@@ -401,17 +330,92 @@ pub fn build_vdf_recursive_stark_instance_production(start_value: u64, steps: us
 /// Uses larger trace (256 rows) to generate actual FRI folding rounds.
 /// This tests the complete FRI verification path in VerifierAir.
 pub fn build_vdf_recursive_stark_instance_with_fri(start_value: u64, steps: usize) -> VdfStarkInstance {
-    use super::verifier_air::aggregator_integration::RecursiveConfig;
-    build_vdf_recursive_stark_instance_with_config(start_value, steps, RecursiveConfig::test_with_fri())
+    build_vdf_recursive_stark_instance_leaf_wrapper(start_value, steps)
 }
 
-/// Build a VDF instance with custom RecursiveConfig
-fn build_vdf_recursive_stark_instance_with_config(
-    start_value: u64, 
-    steps: usize,
-    recursive_config: super::verifier_air::aggregator_integration::RecursiveConfig,
-) -> VdfStarkInstance {
-    use super::verifier_stark_groth16::prove_verifier_stark;
+fn compute_statement_hash_sponge(parsed: &super::verifier_air::prover::ParsedProof) -> [BaseElement; 4] {
+    // Matches the sponge used by VerifierTraceBuilder in the statement-hash check (mode 4):
+    // absorb context + commitments into the rate, permute 7 rounds each chunk, output state[0..3].
+    #[inline]
+    fn sponge_absorb_permute(state: &mut [BaseElement; 12], input: &[BaseElement; 8]) {
+        use winter_crypto::hashers::Rp64_256;
+        for i in 0..8 {
+            state[4 + i] = state[4 + i] + input[i];
+        }
+        for round in 0..7 {
+            Rp64_256::apply_round(state, round);
+        }
+    }
+
+    let mut state = [BaseElement::ZERO; 12];
+
+    for chunk in parsed.context_to_elements().chunks(8) {
+        let mut buf = [BaseElement::ZERO; 8];
+        for (i, &e) in chunk.iter().enumerate() {
+            buf[i] = e;
+        }
+        sponge_absorb_permute(&mut state, &buf);
+    }
+
+    let mut buf = [BaseElement::ZERO; 8];
+    buf[0..4].copy_from_slice(&parsed.trace_commitment);
+    sponge_absorb_permute(&mut state, &buf);
+
+    buf = [BaseElement::ZERO; 8];
+    buf[0..4].copy_from_slice(&parsed.comp_commitment);
+    sponge_absorb_permute(&mut state, &buf);
+
+    for commitment in parsed.fri_commitments.iter() {
+        buf = [BaseElement::ZERO; 8];
+        buf[0..4].copy_from_slice(commitment);
+        sponge_absorb_permute(&mut state, &buf);
+    }
+
+    [state[0], state[1], state[2], state[3]]
+}
+
+fn prove_verifier_air_over_child(
+    child: &super::verifier_air::prover::ParsedProof,
+    child_type: ChildAirType,
+    verifier_options: ProofOptions,
+) -> (Proof, VerifierPublicInputs) {
+    // Build the verifier trace first, then derive the expected counters from its final row.
+    let trace = VerifierProver::new(verifier_options.clone()).build_verification_trace_typed(child, child_type);
+    let last = trace.length() - 1;
+    let expected_mode_counter = trace.get(24, last).as_int() as usize;
+    let expected_checkpoint_count = trace.get(26, last).as_int() as usize;
+
+    let statement_hash = compute_statement_hash_sponge(child);
+    let params_digest = [
+        BaseElement::new(child.trace_len as u64),
+        BaseElement::new(child.lde_blowup as u64),
+        BaseElement::new(child.num_queries as u64),
+        BaseElement::new(((child.fri_folding_factor as u64) << 32) | (child.grinding_factor as u64)),
+    ];
+
+    let pub_inputs = VerifierPublicInputs {
+        statement_hash,
+        trace_commitment: child.trace_commitment,
+        comp_commitment: child.comp_commitment,
+        fri_commitments: child.fri_commitments.clone(),
+        num_queries: child.num_queries,
+        proof_trace_len: child.trace_len,
+        g_trace: child.g_trace,
+        pub_result: child.pub_result,
+        expected_checkpoint_count,
+        params_digest,
+        expected_mode_counter,
+    };
+
+    let proof = VerifierProver::with_pub_inputs(verifier_options, pub_inputs.clone())
+        .prove(trace)
+        .expect("VerifierAir proving failed");
+
+    (proof, pub_inputs)
+}
+
+fn build_vdf_recursive_stark_instance_leaf_wrapper(start_value: u64, steps: usize) -> VdfStarkInstance {
+    use super::verifier_air::VerifierAir;
     
     // Step 1: Generate VDF STARK proof
     let start = BaseElement::new(start_value);
@@ -438,24 +442,32 @@ fn build_vdf_recursive_stark_instance_with_config(
     )
     .expect("VDF verification failed");
     
-    // Step 2: Extract statement hash from VDF proof
-    let app_statement_hash = extract_app_statement_hash::<VdfAir>(&vdf_proof, vdf_result);
+    // Step 2: Parse the app proof and prove a single-child VerifierAir wrapper over it.
+    let parsed = parse_proof::<VdfAir>(&vdf_proof, &vdf_result);
     
-    // Step 3: Generate Aggregator STARK proof (uses config from RecursiveConfig)
-    let agg_config = &recursive_config.aggregator_config;
-    let agg_options = agg_config.to_proof_options();
-    let (agg_proof, agg_pub_inputs, _) = 
-        generate_aggregator_proof(app_statement_hash, agg_config.trace_len, agg_options.clone())
-            .expect("Aggregator proof failed");
+    // VerifierAir options (must satisfy VerifierAir constraints).
+    let verifier_options = ProofOptions::new(
+        2, 64, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+
+    let (verifier_proof, verifier_pub_inputs) =
+        prove_verifier_air_over_child(&parsed, ChildAirType::generic_vdf(), verifier_options.clone());
     
-    // Step 4: Generate Verifier STARK proof (recursive STARK)
-    let verifier_result = prove_verifier_stark(&agg_proof, &agg_pub_inputs, recursive_config)
-        .expect("Verifier STARK proof failed");
-    
-    VdfStarkInstance {
-        statement_hash: verifier_result.statement_hash,
-        circuit: verifier_result.circuit,
-    }
+    // Sanity check: verify the VerifierAir proof natively.
+    let acceptable = winterfell::AcceptableOptions::OptionSet(vec![verifier_options]);
+    winterfell::verify::<VerifierAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+        verifier_proof.clone(),
+        verifier_pub_inputs.clone(),
+        &acceptable,
+    )
+    .expect("VerifierAir leaf wrapper verification failed");
+
+    // Step 3: Convert VerifierAir proof into Groth16-ready circuit.
+    build_verifier_air_instance(verifier_proof, verifier_pub_inputs)
 }
 
 // ============================================================================
@@ -538,7 +550,22 @@ pub fn build_verifying_aggregator_instance(
         winterfell::BatchingMethod::Linear,
     );
     let (agg_proof, agg_pub_inputs, _agg_trace) = 
-        generate_verifying_aggregator_proof(&parsed0, &parsed1, agg_options.clone())
+        generate_verifying_aggregator_proof(
+            &parsed0,
+            crate::stark::verifier_air::ood_eval::ChildAirType::generic_vdf(),
+            &parsed1,
+            crate::stark::verifier_air::ood_eval::ChildAirType::generic_vdf(),
+            // Policy: expected child-proof params digest (must match both children).
+            // NOTE: In production this must be protocol-fixed, not derived from proofs.
+            // For this test helper we keep it derived for now.
+            [
+                BaseElement::new(parsed0.trace_len as u64),
+                BaseElement::new(parsed0.lde_blowup as u64),
+                BaseElement::new(parsed0.num_queries as u64),
+                BaseElement::new(((parsed0.fri_folding_factor as u64) << 32) | (parsed0.grinding_factor as u64)),
+            ],
+            agg_options.clone(),
+        )
             .expect("Verifying Aggregator proof failed");
     
     // Verify the aggregator proof (sanity check)
@@ -549,8 +576,7 @@ pub fn build_verifying_aggregator_instance(
         &acceptable_agg,
     ).expect("Verifying Aggregator verification failed");
     
-    // Step 5: Build the Groth16 circuit
-    // This circuit verifies the VerifierAir proof (NOT VdfAir!)
+    // Step 5: Build the Groth16 circuit directly from the VerifierAir proof.
     build_verifier_air_instance(agg_proof, agg_pub_inputs)
 }
 
@@ -639,30 +665,20 @@ fn build_verifier_air_instance(
     }
 }
 
-/// Build a CubicFib instance using the full recursive STARK pipeline:
-/// CubicFib STARK → Aggregator STARK → Verifier STARK → Groth16
-///
-/// Uses test configs for speed. For production, use `build_cubic_fib_recursive_stark_instance_production`.
+/// Build a CubicFib instance using the VerifierAir-only recursive pipeline:
+/// CubicFib STARK → VerifierAir (verifies CubicFib proof) → Groth16.
 pub fn build_cubic_fib_recursive_stark_instance(a: u64, b: u64, steps: usize) -> VdfStarkInstance {
-    use super::verifier_air::aggregator_integration::RecursiveConfig;
-    build_cubic_fib_recursive_stark_instance_with_config(a, b, steps, RecursiveConfig::test())
+    build_cubic_fib_recursive_stark_instance_leaf_wrapper(a, b, steps)
 }
 
 /// Build a CubicFib instance using production configs (128-bit security)
 pub fn build_cubic_fib_recursive_stark_instance_production(a: u64, b: u64, steps: usize) -> VdfStarkInstance {
-    use super::verifier_air::aggregator_integration::RecursiveConfig;
-    build_cubic_fib_recursive_stark_instance_with_config(a, b, steps, RecursiveConfig::production_128bit())
+    build_cubic_fib_recursive_stark_instance_leaf_wrapper(a, b, steps)
 }
 
-/// Build a CubicFib instance with custom RecursiveConfig
-fn build_cubic_fib_recursive_stark_instance_with_config(
-    a: u64, 
-    b: u64, 
-    steps: usize,
-    recursive_config: super::verifier_air::aggregator_integration::RecursiveConfig,
-) -> VdfStarkInstance {
+fn build_cubic_fib_recursive_stark_instance_leaf_wrapper(a: u64, b: u64, steps: usize) -> VdfStarkInstance {
     use super::tests::helpers::cubic_fib::{build_cubic_fib_trace, CubicFibProver};
-    use super::verifier_stark_groth16::prove_verifier_stark;
+    use super::verifier_air::VerifierAir;
     
     // Step 1: Generate CubicFib STARK proof
     let a_elem = BaseElement::new(a);
@@ -690,22 +706,30 @@ fn build_cubic_fib_recursive_stark_instance_with_config(
     )
     .expect("CubicFib verification failed");
     
-    // Step 2: Extract statement hash from CubicFib proof
-    let app_statement_hash = extract_app_statement_hash::<CubicFibAir>(&fib_proof, fib_result);
+    // Step 2: Parse the app proof and prove a single-child VerifierAir wrapper over it.
+    let parsed = parse_proof::<CubicFibAir>(&fib_proof, &fib_result);
+
+    let verifier_options = ProofOptions::new(
+        2, 64, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+
+    let (verifier_proof, verifier_pub_inputs) = prove_verifier_air_over_child(
+        &parsed,
+        ChildAirType::generic_cubic_fib(),
+        verifier_options.clone(),
+    );
+
+    let acceptable = winterfell::AcceptableOptions::OptionSet(vec![verifier_options]);
+    winterfell::verify::<VerifierAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+        verifier_proof.clone(),
+        verifier_pub_inputs.clone(),
+        &acceptable,
+    )
+    .expect("VerifierAir leaf wrapper verification failed");
     
-    // Step 3: Generate Aggregator STARK proof (uses config from RecursiveConfig)
-    let agg_config = &recursive_config.aggregator_config;
-    let agg_options = agg_config.to_proof_options();
-    let (agg_proof, agg_pub_inputs, _) = 
-        generate_aggregator_proof(app_statement_hash, agg_config.trace_len, agg_options.clone())
-            .expect("Aggregator proof failed");
-    
-    // Step 4: Generate Verifier STARK proof (recursive STARK)
-    let verifier_result = prove_verifier_stark(&agg_proof, &agg_pub_inputs, recursive_config)
-        .expect("Verifier STARK proof failed");
-    
-    VdfStarkInstance {
-        statement_hash: verifier_result.statement_hash,
-        circuit: verifier_result.circuit,
-    }
+    build_verifier_air_instance(verifier_proof, verifier_pub_inputs)
 }

@@ -741,20 +741,98 @@ fn verify_public_only_in_c_and_w_span_separated(
         println!("         Shared rows (first {}): {:?}", show, &shared[..show]);
     }
 
+    // 4) Public-C rows vs ALL published H_{*,*} handles
+    // Published handles: (const×wit), (wit×const), (wit×wit)
+    // For Q_const unreachable, ALL must be zero on every public-C row.
+    println!("\n  [Span] Public-C Rows vs Published Handles");
+    
+    // Build row sets for const (col 0) and witness columns
+    let const_a_rows: HashSet<usize> = extractor.a_cols[0].iter().map(|(r,_)| *r).collect();
+    let const_b_rows: HashSet<usize> = extractor.b_cols[0].iter().map(|(r,_)| *r).collect();
+    
+    let mut wit_a_rows: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.a_cols[col] {
+            wit_a_rows.insert(row);
+        }
+    }
+    let mut wit_b_rows: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.b_cols[col] {
+            wit_b_rows.insert(row);
+        }
+    }
+    
+    // 5) H_{0,0} isolation check: find rows where H_{0,0} has support but ALL published handles = 0
+    // H_{0,0} = const×const, supported where A[r,0]×B[r,0] ≠ 0
+    // Published: const×wit (H_{0,j}), wit×const (H_{i,0}), wit×wit (H_{i,j})
+    //
+    // For H_{0,0} ∉ span(published), need at least ONE row where:
+    // - A[r,0]≠0, B[r,0]≠0 (H_{0,0} support)
+    // - No witness in A (so H_{i,0}=0, H_{i,j}=0)
+    // - No witness in B (so H_{0,j}=0, H_{i,j}=0)
+    println!("\n  [Span] H_{{0,0}} Isolation Check");
+    
+    let const_const_rows: Vec<usize> = const_a_rows.intersection(&const_b_rows).copied().collect();
+    println!("         Rows with H_{{0,0}} support (const×const): {}", const_const_rows.len());
+    
+    let mut isolated_count = 0usize;
+    let mut non_isolated: Vec<(usize, &str)> = Vec::new();
+    
+    for &row in &const_const_rows {
+        let has_wit_a = wit_a_rows.contains(&row);
+        let has_wit_b = wit_b_rows.contains(&row);
+        
+        if !has_wit_a && !has_wit_b {
+            isolated_count += 1;
+        } else if has_wit_a && has_wit_b {
+            non_isolated.push((row, "wit in A+B"));
+        } else if has_wit_a {
+            non_isolated.push((row, "wit in A"));
+        } else {
+            non_isolated.push((row, "wit in B"));
+        }
+    }
+    
+    let h00_isolated = isolated_count > 0;
+    if h00_isolated {
+        println!("  [Span] PASS: {} const×const rows are fully isolated", isolated_count);
+        println!("         → H_{{0,0}} has support where ALL published handles = 0");
+        println!("         → H_{{0,0}} ∉ span(published) by row-support argument (DECISIVE)");
+    } else if const_const_rows.is_empty() {
+        println!("  [Span] INFO: No const×const rows (H_{{0,0}} may be zero)");
+    } else {
+        println!("  [Span] INCONCLUSIVE: All {} const×const rows have witness activity", const_const_rows.len());
+        for (row, reason) in non_isolated.iter().take(3) {
+            println!("         Row {}: {}", row, reason);
+        }
+        println!("         → Need full Gaussian elimination for definitive answer");
+        println!("         → But γ^ρ barrier still provides security");
+    }
+
     let passed = u_pub_nonzero.is_empty()
         && v_pub_nonzero.is_empty()
         && c_pub_missing.is_empty()
         && w_sep;
 
-    if passed {
-        println!("\n  --- Span Membership Verdict ---");
-        println!("  u_pub=0, v_pub=0 ⇒ published H_ij are witness-only (A_wit·B_wit)/Z directions.");
-        println!("  W_pub ⟂ W_wit ⇒ the baked Q_const lives in a disjoint public-C quotient direction.");
-        println!("  Therefore Q_const ∉ span(H_ij), so T_const^ρ is unreachable via e(·, δ^ρ).");
-        println!("[PASS] DECISIVE: Q_const ∉ span(H_{{ij}})");
-        println!("       → Adversary CANNOT synthesize T_const^ρ from e(H_ij, δ^ρ)");
+    if passed && h00_isolated {
+        println!("\n  --- Security Verdict: DECISIVE ---");
+        println!("  ✓ u_pub=0, v_pub=0 (public not in A/B)");
+        println!("  ✓ W_pub ⟂ W_wit (C-row separation)");
+        println!("  ✓ H_{{0,0}} isolated (row-support certificate)");
+        println!("[PASS] H_{{0,0}} ∉ span(published handles)");
+        println!("       → T_const^ρ unreachable without GT-XPDH break");
+    } else if passed {
+        println!("\n  --- Security Verdict: STRUCTURAL PASS ---");
+        println!("  ✓ u_pub=0, v_pub=0 (public not in A/B)");
+        println!("  ✓ W_pub ⟂ W_wit (C-row separation)");
+        println!("  ? H_{{0,0}} isolation: INCONCLUSIVE");
+        println!("");
+        println!("  T_const^ρ barrier: unknown (need full span test)");
+        println!("  γ^ρ barrier: STILL SECURE (independent of T_const)");
+        println!("[PASS] Core security properties hold");
     } else {
-        println!("[FAIL] Span membership check failed - potential security issue!");
+        println!("[FAIL] Structural checks failed!");
     }
 
     passed
@@ -1200,13 +1278,13 @@ impl MatrixExtractor {
                 // Only accumulate barycentric terms when we have not hit a root.
                 // If r == ω_k for some k, the true value is just the sum of coeffs at row k.
                 if root_sum.is_none() {
-                    acc += (val * omega_i) * denom.inverse().unwrap();
-                }
+                acc += (val * omega_i) * denom.inverse().unwrap();
+            }
             }
             if let Some(s) = root_sum {
                 s
             } else {
-                acc * common
+            acc * common
             }
         };
 
@@ -1445,32 +1523,32 @@ fn check_independence_streaming(
         // of the baked trapdoor (α), not as a U_wit direction. We therefore only model
         // these U_wit handles for k >= num_pub (witness columns).
         if k >= num_pub {
-            // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
+        // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
             // Uses BetaDeltaUWit because only witness columns have non-zero A-queries.
-            add_basis_vec(
-                "u_k * D_pub * delta",
-                k,
-                vec![
+        add_basis_vec(
+            "u_k * D_pub * delta",
+            k,
+            vec![
                     (TrapdoorMonomial::BetaDeltaUWit, u_val),
-                    (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
-                ],
-            );
+                (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
+            ],
+        );
 
             // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
             // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
             // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSqUWit
-            add_basis_vec(
-                "u_k * D_delta * delta",
-                k,
+        add_basis_vec(
+            "u_k * D_delta * delta",
+            k,
                 vec![(TrapdoorMonomial::DeltaSqUWit, u_val)],
-            );
+        );
 
-            // 3. u_k * D_j * delta -> u * v_j * delta
-            add_basis_vec(
-                "u_k * D_j * delta",
-                k,
-                vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
-            );
+        // 3. u_k * D_j * delta -> u * v_j * delta
+        add_basis_vec(
+            "u_k * D_j * delta",
+            k,
+            vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
+        );
         }
 
         if k >= num_pub {

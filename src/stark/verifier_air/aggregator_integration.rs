@@ -15,7 +15,7 @@
 //! - The Aggregator STARK can verify ANY application STARK
 
 use winterfell::{
-    math::fields::f64::BaseElement,
+    math::{fields::f64::BaseElement, FieldElement, ToElements},
     Proof,
 };
 
@@ -155,13 +155,22 @@ impl RecursiveVerifier {
             parsed.num_fri_layers,
         );
 
-        // Compute interpreter hash for the Aggregator proof (2-constraint VDF formula)
-        use super::ood_eval::ChildAirType;
-        let child_type = ChildAirType::generic_aggregator_vdf();
-        let interpreter_hash = child_type.compute_formula_hash();
+        // VerifierAir is fixed to verifying Aggregator proofs; we do not bind an interpreter hash
+        // at this layer (app binding happens at the Aggregator leaf layer).
         
         // Mode counter: 1 statement + 1 interpreter (single aggregator proof)
         let expected_mode_counter = VerifierPublicInputs::compute_expected_mode_counter(1);
+
+        // Params digest POLICY for the proof being verified (Aggregator proof).
+        // SECURITY: do NOT derive this from the proof; it must be fixed by protocol config.
+        let cfg = &self.config.aggregator_config;
+        let packed = ((cfg.fri_folding_factor as u64) << 32) | (cfg.grinding_factor as u64);
+        let params_digest = [
+            BaseElement::new(cfg.trace_len as u64),
+            BaseElement::new(cfg.lde_blowup as u64),
+            BaseElement::new(cfg.num_queries as u64),
+            BaseElement::new(packed),
+        ];
         
         VerifierPublicInputs {
             statement_hash: compute_statement_hash_from_parsed(&parsed),
@@ -173,7 +182,7 @@ impl RecursiveVerifier {
             g_trace,
             pub_result: aggregator_pub_inputs.result,
             expected_checkpoint_count: expected_checkpoints,
-            interpreter_hash,
+            params_digest,
             expected_mode_counter,
         }
     }
@@ -261,15 +270,24 @@ fn compute_statement_hash_from_parsed(parsed: &super::prover::ParsedProof) -> Me
     [state[0], state[1], state[2], state[3]]
 }
 
-/// Hash the Aggregator's public inputs into a statement hash (legacy)
-#[allow(dead_code)]
+/// Hash the Aggregator's public inputs into a statement hash.
+///
+/// SECURITY: this must commit to the full `AggregatorPublicInputs`, including the
+/// app-level binding fields (level/span/context/interpreter/params).
 fn hash_aggregator_statement(pub_inputs: &AggregatorPublicInputs) -> MerkleDigest {
-    [
-        pub_inputs.result,
-        pub_inputs.children_root[0],
-        pub_inputs.children_root[1],
-        pub_inputs.children_root[2],
-    ]
+    // Initialize sponge state to zeros (matching init_sponge)
+    let mut state = [BaseElement::ZERO; 12];
+
+    let elements = pub_inputs.to_elements();
+    for chunk in elements.chunks(8) {
+        let mut absorb_buf = [BaseElement::ZERO; 8];
+        for (i, &e) in chunk.iter().enumerate() {
+            absorb_buf[i] = e;
+        }
+        sponge_absorb_permute(&mut state, &absorb_buf);
+    }
+
+    [state[0], state[1], state[2], state[3]]
 }
 
 /// Compute trace domain generator for a given trace length
@@ -426,10 +444,8 @@ mod tests {
         println!("\nRecursive pipeline result:");
         println!("  - Verifier trace length: {}", result.verifier_trace.length());
         println!("  - Statement hash: {:?}", result.statement_hash);
-
-        // Verify the statement hash binds the aggregator's result
-        assert_eq!(result.statement_hash[0], pub_inputs.result);
-        assert_eq!(result.statement_hash[1], pub_inputs.children_root[0]);
+        // Statement hash should be deterministic and non-zero for this non-trivial pub input.
+        assert_ne!(result.statement_hash, [BaseElement::ZERO; 4]);
     }
 
     #[test]
@@ -439,14 +455,20 @@ mod tests {
             children_root: [BaseElement::new(3), BaseElement::new(4), BaseElement::new(5), BaseElement::new(6)],
             initial_state: [BaseElement::new(7), BaseElement::new(8), BaseElement::new(9), BaseElement::new(10)],
             final_state: [BaseElement::new(11), BaseElement::new(12), BaseElement::new(13), BaseElement::new(14)],
+            level: 1,
+            start_idx: 0,
+            end_idx: 1,
+            context_hash: [BaseElement::new(15), BaseElement::new(16), BaseElement::new(17), BaseElement::new(18)],
+            interpreter_hash: [BaseElement::new(19), BaseElement::new(20), BaseElement::new(21), BaseElement::new(22)],
+            params_digest: [BaseElement::new(23), BaseElement::new(24), BaseElement::new(25), BaseElement::new(26)],
         };
 
         let hash = hash_aggregator_statement(&pub_inputs);
 
-        // Statement hash should bind result and children_root
-        assert_eq!(hash[0], pub_inputs.result);
-        assert_eq!(hash[1], pub_inputs.children_root[0]);
-        assert_eq!(hash[2], pub_inputs.children_root[1]);
-        assert_eq!(hash[3], pub_inputs.children_root[2]);
+        // Mutating any field should change the statement hash.
+        let mut tweaked = pub_inputs;
+        tweaked.context_hash[0] = tweaked.context_hash[0] + BaseElement::ONE;
+        let hash2 = hash_aggregator_statement(&tweaked);
+        assert_ne!(hash, hash2);
     }
 }

@@ -130,12 +130,15 @@ pub fn quotient_from_fr_difference(lhs: InnerFr, rhs: InnerFr) -> (u64, u64) {
 /// Convert InnerFr to u64 mod p_GL (canonical reduction)
 #[inline]
 pub fn fr_to_gl_u64(fr: InnerFr) -> u64 {
+    // IMPORTANT: InnerFr is much larger than 128 bits (BLS12-377 scalar field).
+    // We must reduce the full integer modulo p_GL; truncating to low limbs will break
+    // canonicalization at serialization boundaries and can cause digest mismatches.
     let bytes = fr.into_bigint().to_bytes_le();
-    let mut val = 0u128;
-    for (i, &b) in bytes.iter().enumerate().take(16) {
-        val |= (b as u128) << (i * 8);
+    let mut rem: u128 = 0;
+    for &b in bytes.iter().rev() {
+        rem = (rem * 256 + (b as u128)) % P_GL;
     }
-    (val % P_GL) as u64
+    rem as u64
 }
 
 #[cfg(test)]

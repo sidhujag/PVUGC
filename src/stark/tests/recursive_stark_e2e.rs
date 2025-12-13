@@ -4,13 +4,11 @@
 //!
 //! Architecture:
 //! ```text
-//! Application STARK (VDF/CubicFib)
+//! Application STARK (e.g. Add2/VDF)
 //!           ↓
-//!    Aggregator STARK (aggregates N app proofs)
+//!   VerifierAir STARK (verifies child STARK proofs; can be used as an aggregation node)
 //!           ↓
-//!     Verifier STARK (verifies Aggregator)
-//!           ↓
-//!        Groth16 (wraps Verifier STARK for succinctness)
+//!        Groth16 (wraps VerifierAir for succinctness)
 //! ```
 //!
 //! Key Properties:
@@ -27,17 +25,15 @@ use winterfell::{
 use winter_crypto::hashers::Rp64_256;
 
 use crate::stark::{
-    aggregator_air::{
-        AggregatorAir, AggregatorConfig, AggregatorPublicInputs,
-        generate_aggregator_proof_with_config,
-    },
     verifier_air::{
-        aggregator_integration::{RecursiveConfig, RecursiveVerifier, run_recursive_pipeline},
-        prover::VerifierProver,
+        VerifierAir,
         proof_parser::parse_proof,
+        prover::VerifierProver,
+        ood_eval::ChildAirType,
         VERIFIER_TRACE_WIDTH,
     },
-    tests::helpers::simple_vdf::{generate_test_vdf_proof_rpo_with_options, VdfAir},
+    aggregator_air::generate_verifying_aggregator_proof,
+    tests::helpers::add2::{generate_test_add2_proof_rpo_with_options, Add2Air},
 };
 
 type Hasher = Rp64_256;
@@ -47,80 +43,44 @@ type VerifierMerkle = MerkleTree<Hasher>;
 /// Minimal proof options for fast testing
 fn fast_test_options() -> winterfell::ProofOptions {
     winterfell::ProofOptions::new(
-        4,  // num_queries
+        2,  // num_queries
         8,  // blowup_factor
         0,  // grinding_factor
         winterfell::FieldExtension::None,
         2,  // FRI folding factor
-        31, // max FRI layers
+        31, // max FRI remainder size
         winterfell::BatchingMethod::Linear,
         winterfell::BatchingMethod::Linear,
     )
 }
 
 #[test]
-fn test_e2e_vdf_to_aggregator_to_verifier() {
+fn test_e2e_add2_to_verifier_air_single_child() {
 
     // -------------------------------------------------------------------------
-    // Step 1: Generate Application STARK (VDF)
+    // Step 1: Generate Application STARK (Add2)
     // -------------------------------------------------------------------------
-    let start = BaseElement::new(42);
     let steps = 8;
     let options = fast_test_options();
-    let (vdf_proof, vdf_trace) = generate_test_vdf_proof_rpo_with_options(start, steps, options.clone());
-    let vdf_result = vdf_trace.get(1, vdf_trace.length() - 1);
+    let (app_proof, app_trace) =
+        generate_test_add2_proof_rpo_with_options(BaseElement::ZERO, steps, options.clone());
+    let app_result = app_trace.get(1, app_trace.length() - 1);
 
-    // Verify VDF proof off-chain
+    // Verify Add2 proof off-chain
     let acceptable = AcceptableOptions::OptionSet(vec![options.clone()]);
-    winterfell::verify::<VdfAir, Hasher, RandomCoin, VerifierMerkle>(
-        vdf_proof.clone(),
-        vdf_result,
+    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(
+        app_proof.clone(),
+        app_result,
         &acceptable,
     )
-    .expect("VDF proof should be valid");
+    .expect("Add2 proof should be valid");
 
     // -------------------------------------------------------------------------
-    // Step 2: Create Application Statement Hash
+    // Step 2: Build VerifierAir trace (verifying the application proof)
     // -------------------------------------------------------------------------
-
-    // The statement hash binds the VDF result and commitments
-    let app_statement_hash = [
-        vdf_result,                        // Result of computation
-        BaseElement::new(1),               // Placeholder for commitment[0]
-        BaseElement::new(2),               // Placeholder for commitment[1]
-        BaseElement::new(3),               // Placeholder for commitment[2]
-    ];
-
-    // -------------------------------------------------------------------------
-    // Step 3: Generate Aggregator STARK (wraps VDF)
-    // -------------------------------------------------------------------------
-
-    let agg_config = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _agg_trace) = generate_aggregator_proof_with_config(
-        app_statement_hash,
-        &agg_config,
-    )
-    .expect("Aggregator proof generation should succeed");
-
-    // Verify Aggregator proof off-chain
-    let agg_options = AcceptableOptions::OptionSet(vec![agg_config.to_proof_options()]);
-    winterfell::verify::<AggregatorAir, Hasher, RandomCoin, VerifierMerkle>(
-        agg_proof.clone(),
-        agg_pub_inputs.clone(),
-        &agg_options,
-    )
-    .expect("Aggregator proof should be valid");
-
-
-    // -------------------------------------------------------------------------
-    // Step 4: Generate Verifier STARK (verifies Aggregator)
-    // -------------------------------------------------------------------------
-
-    let recursive_config = RecursiveConfig::test();
-    let verifier = RecursiveVerifier::new(recursive_config.clone());
-
-    let verification_trace = verifier.build_verification_trace(&agg_proof, &agg_pub_inputs);
-    let verifier_pub_inputs = verifier.get_verifier_public_inputs(&agg_proof, &agg_pub_inputs);
+    let parsed = parse_proof::<Add2Air>(&app_proof, &app_result);
+    let verifier = VerifierProver::new(options.clone());
+    let verification_trace = verifier.build_verification_trace_typed(&parsed, ChildAirType::generic_add2());
 
 
     // -------------------------------------------------------------------------
@@ -134,93 +94,128 @@ fn test_e2e_vdf_to_aggregator_to_verifier() {
 }
 
 #[test]
-fn test_e2e_full_pipeline_with_run_recursive() {
+fn test_e2e_verifying_aggregator_verifies_two_add2_children() {
+    // Two different Add2 instances (different trace length => different output).
+    let leaf_options = fast_test_options();
+    let acceptable = AcceptableOptions::OptionSet(vec![leaf_options.clone()]);
 
-
-    // Step 1: Create app statement hash
-    let app_statement_hash = [
-        BaseElement::new(100),
-        BaseElement::new(101),
-        BaseElement::new(102),
-        BaseElement::new(103),
-    ];
-
-    // Step 2: Generate Aggregator STARK
-    let agg_config = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _) = generate_aggregator_proof_with_config(
-        app_statement_hash,
-        &agg_config,
-    )
-    .expect("Aggregator proof should succeed");
-
-    // Step 3: Run the full recursive pipeline
-    let result = run_recursive_pipeline(
-        &agg_proof,
-        &agg_pub_inputs,
-        RecursiveConfig::test(),
+    // VerifierAir proof options must satisfy VerifierAir's minimum blowup requirements.
+    let verifier_options = winterfell::ProofOptions::new(
+        2,   // num_queries
+        64,  // blowup_factor (VerifierAir requires large blowup)
+        0,   // grinding_factor
+        winterfell::FieldExtension::None,
+        2,   // FRI folding factor
+        31,  // max FRI layers
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
     );
 
-    // Verify the result
-    assert_eq!(result.verifier_trace.width(), VERIFIER_TRACE_WIDTH);
-    assert!(result.verifier_trace.length().is_power_of_two());
+    let (p0, t0) = generate_test_add2_proof_rpo_with_options(BaseElement::new(0), 8, leaf_options.clone());
+    let out0 = t0.get(1, t0.length() - 1);
+    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(p0.clone(), out0, &acceptable)
+        .expect("child0 should verify");
 
-    // The statement hash should bind the Aggregator's result
-    assert_eq!(result.statement_hash[0], agg_pub_inputs.result);
+    let (p1, t1) = generate_test_add2_proof_rpo_with_options(BaseElement::new(5), 8, leaf_options.clone());
+    let out1 = t1.get(1, t1.length() - 1);
+    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(p1.clone(), out1, &acceptable)
+        .expect("child1 should verify");
 
+    // Parse both and build a *verifying aggregator node* (VerifierAir proof verifying both).
+    let child0 = parse_proof::<Add2Air>(&p0, &out0);
+    let child1 = parse_proof::<Add2Air>(&p1, &out1);
+    // (sanity) parsed proof carries widths/params used by recursive verifier
+
+    let packed = ((child0.fri_folding_factor as u64) << 32) | (child0.grinding_factor as u64);
+    let expected_child_params_digest = [
+        BaseElement::new(child0.trace_len as u64),
+        BaseElement::new(child0.lde_blowup as u64),
+        BaseElement::new(child0.num_queries as u64),
+        BaseElement::new(packed),
+    ];
+    let (agg_proof, agg_pub_inputs, _agg_trace) = generate_verifying_aggregator_proof(
+        &child0,
+        ChildAirType::generic_add2(),
+        &child1,
+        ChildAirType::generic_add2(),
+        expected_child_params_digest,
+        verifier_options.clone(),
+    )
+    .expect("verifying-aggregator proof should succeed");
+
+    // Verify the verifying-aggregator (VerifierAir) proof off-chain.
+    let acceptable_agg = AcceptableOptions::OptionSet(vec![verifier_options]);
+    winterfell::verify::<VerifierAir, Hasher, RandomCoin, VerifierMerkle>(
+        agg_proof,
+        agg_pub_inputs,
+        &acceptable_agg,
+    )
+    .expect("verifying-aggregator should verify");
 }
 
 #[test]
-fn test_e2e_multiple_apps_same_verifier() {
-    // Create multiple different application statement hashes
-    let app_hashes = vec![
-        [BaseElement::new(1), BaseElement::new(2), BaseElement::new(3), BaseElement::new(4)],
-        [BaseElement::new(5), BaseElement::new(6), BaseElement::new(7), BaseElement::new(8)],
-        [BaseElement::new(9), BaseElement::new(10), BaseElement::new(11), BaseElement::new(12)],
-    ];
+fn test_e2e_multiple_add2_instances_same_verifier_trace_width() {
+    let options = fast_test_options();
+    let verifier = VerifierProver::new(options.clone());
+    let child_type = ChildAirType::generic_add2();
 
-    let agg_config = AggregatorConfig::test_fast();
-    let recursive_config = RecursiveConfig::test();
-    let verifier = RecursiveVerifier::new(recursive_config);
-
-    for (i, app_hash) in app_hashes.iter().enumerate() {
-        // Generate Aggregator STARK for each app
-        let (agg_proof, agg_pub_inputs, _) = generate_aggregator_proof_with_config(
-            *app_hash,
-            &agg_config,
-        )
-        .expect("Aggregator proof should succeed");
-
-        // Build verification trace using the SAME verifier
-        let verification_trace = verifier.build_verification_trace(&agg_proof, &agg_pub_inputs);
-
-
-        // All traces should have the same width (universal verifier)
-        assert_eq!(verification_trace.width(), VERIFIER_TRACE_WIDTH);
+    for &steps in &[8usize, 16usize, 32usize] {
+        let (p, t) = generate_test_add2_proof_rpo_with_options(BaseElement::ZERO, steps, options.clone());
+        let out = t.get(1, t.length() - 1);
+        let parsed = parse_proof::<Add2Air>(&p, &out);
+        let trace = verifier.build_verification_trace_typed(&parsed, child_type.clone());
+        assert_eq!(trace.width(), VERIFIER_TRACE_WIDTH);
     }
 }
 
 #[test]
-fn test_e2e_verification_trace_binding() {
-
-    // Generate two different Aggregator proofs
-    let config = AggregatorConfig::test_fast();
-
-    let hash_1 = [BaseElement::new(1); 4];
-    let hash_2 = [BaseElement::new(2); 4];
-
-    let (proof_1, pub_1, _) = generate_aggregator_proof_with_config(hash_1, &config).unwrap();
-    let (proof_2, pub_2, _) = generate_aggregator_proof_with_config(hash_2, &config).unwrap();
-
-    let recursive_config = RecursiveConfig::test();
-
-    // Run pipeline for both
-    let result_1 = run_recursive_pipeline(&proof_1, &pub_1, recursive_config.clone());
-    let result_2 = run_recursive_pipeline(&proof_2, &pub_2, recursive_config);
-
-    // Statement hashes should be DIFFERENT for different inputs
-    assert_ne!(
-        result_1.statement_hash,
-        result_2.statement_hash,
-        "Different inputs should produce different statement hashes!"
+fn test_e2e_verifying_aggregator_statement_hash_differs_for_different_children() {
+    let leaf_options = fast_test_options();
+    let verifier_options = winterfell::ProofOptions::new(
+        2, 64, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
     );
+
+    let (p0, t0) = generate_test_add2_proof_rpo_with_options(BaseElement::new(0), 8, leaf_options.clone());
+    let out0 = t0.get(1, t0.length() - 1);
+    let (p1, t1) = generate_test_add2_proof_rpo_with_options(BaseElement::new(5), 8, leaf_options.clone());
+    let out1 = t1.get(1, t1.length() - 1);
+
+    let child0 = parse_proof::<Add2Air>(&p0, &out0);
+    let child1 = parse_proof::<Add2Air>(&p1, &out1);
+
+    let packed = ((child0.fri_folding_factor as u64) << 32) | (child0.grinding_factor as u64);
+    let expected_child_params_digest = [
+        BaseElement::new(child0.trace_len as u64),
+        BaseElement::new(child0.lde_blowup as u64),
+        BaseElement::new(child0.num_queries as u64),
+        BaseElement::new(packed),
+    ];
+    let (_proof_a, pub_a, _) = generate_verifying_aggregator_proof(
+        &child0,
+        ChildAirType::generic_add2(),
+        &child1,
+        ChildAirType::generic_add2(),
+        expected_child_params_digest,
+        verifier_options.clone(),
+    )
+    .expect("proof A should succeed");
+
+    let (p2, t2) = generate_test_add2_proof_rpo_with_options(BaseElement::new(9), 8, leaf_options);
+    let out2 = t2.get(1, t2.length() - 1);
+    let child2 = parse_proof::<Add2Air>(&p2, &out2);
+    let (_proof_b, pub_b, _) = generate_verifying_aggregator_proof(
+        &child0,
+        ChildAirType::generic_add2(),
+        &child2,
+        ChildAirType::generic_add2(),
+        expected_child_params_digest,
+        verifier_options,
+    )
+    .expect("proof B should succeed");
+
+    assert_ne!(pub_a.statement_hash, pub_b.statement_hash);
 }

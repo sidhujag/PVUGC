@@ -142,7 +142,7 @@ impl Prover for VerifierProver {
                 g_trace: BaseElement::new(18446744069414584320u64),
                 pub_result: BaseElement::ZERO,
                 expected_checkpoint_count: 0, // Will fail boundary assertion if used
-                interpreter_hash: [BaseElement::ZERO; 4],
+                params_digest: [BaseElement::ZERO; 4],
                 expected_mode_counter: 0, // Will fail boundary assertion if used
             }
         })
@@ -252,32 +252,58 @@ pub fn append_proof_verification_with_options(
     // === Sanity Checks (like R1CS) ===
     // Check required data is present
 
-    if proof_data.trace_queries.is_empty() { 
-        all_valid = false; 
+    if proof_data.trace_queries.is_empty() {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!("[verifier] sanity: trace_queries empty");
+        all_valid = false;
     }
-    if proof_data.comp_queries.is_empty() { 
-        all_valid = false; 
+    if proof_data.comp_queries.is_empty() {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!("[verifier] sanity: comp_queries empty");
+        all_valid = false;
     }
-    if proof_data.trace_queries.len() != proof_data.comp_queries.len() { 
-        all_valid = false; 
+    if proof_data.trace_queries.len() != proof_data.comp_queries.len() {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!(
+            "[verifier] sanity: trace/comp query count mismatch (trace={}, comp={})",
+            proof_data.trace_queries.len(),
+            proof_data.comp_queries.len()
+        );
+        all_valid = false;
     }
     
     // FRI layers: 0 is valid for small proofs (num_fri_layers determines expected count)
-    if proof_data.fri_layers.len() != proof_data.num_fri_layers { 
-        all_valid = false; 
+    if proof_data.fri_layers.len() != proof_data.num_fri_layers {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!(
+            "[verifier] sanity: fri_layers len mismatch (got={}, expected={})",
+            proof_data.fri_layers.len(),
+            proof_data.num_fri_layers
+        );
+        all_valid = false;
     }
     
-    if !proof_data.ood_trace_current.is_empty() 
-        && proof_data.ood_trace_current.len() != proof_data.trace_width 
-    { 
-        all_valid = false; 
+    if !proof_data.ood_trace_current.is_empty() && proof_data.ood_trace_current.len() != proof_data.trace_width {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!(
+            "[verifier] sanity: ood_trace_current width mismatch (got={}, expected={})",
+            proof_data.ood_trace_current.len(),
+            proof_data.trace_width
+        );
+        all_valid = false;
     }
     
-    // Winterfell DEEP uses same gamma for both z and z*g terms:
-    // Coefficients: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
+    // Winterfell DEEP uses the same gamma for both z and z*g terms.
+    // Layout: [γ_trace_0.., γ_comp_0..]
     let expected_deep_coeffs = proof_data.trace_width + proof_data.comp_width;
-    if proof_data.deep_coeffs.len() < expected_deep_coeffs { 
-        all_valid = false; 
+    if proof_data.deep_coeffs.len() < expected_deep_coeffs {
+        #[cfg(any(test, debug_assertions))]
+        eprintln!(
+            "[verifier] sanity: deep_coeffs too short (got={}, expected>={})",
+            proof_data.deep_coeffs.len(),
+            expected_deep_coeffs
+        );
+        all_valid = false;
     }
     
     for layer in proof_data.fri_layers.iter() {
@@ -354,35 +380,69 @@ pub fn append_proof_verification_with_options(
             proof_data.ood_comp_next.clone(),
         );
         
-        // Use constraint coefficients from Fiat-Shamir
-        // Need at least num_constraints + 1 (for boundary)
+        // Use constraint coefficients from Fiat-Shamir.
+        // For VerifierAir children we need 27 transition + 8 boundary coefficients.
         let num_constraints = child_type.num_constraints();
-        let coeffs: Vec<BaseElement> = if proof_data.constraint_coeffs.len() >= num_constraints + 1 {
-            proof_data.constraint_coeffs[..num_constraints + 1].to_vec()
+        let needed_coeffs = if matches!(child_type, super::ood_eval::ChildAirType::VerifierAir) {
+            num_constraints + 8
         } else {
-            vec![BaseElement::ONE; num_constraints + 1]
+            num_constraints + 1
+        };
+        let coeffs: Vec<BaseElement> = if proof_data.constraint_coeffs.len() >= needed_coeffs {
+            proof_data.constraint_coeffs[..needed_coeffs].to_vec()
+        } else {
+            vec![BaseElement::ONE; needed_coeffs]
         };
         
-        let ood_valid = builder.verify_ood_constraints_typed(
-            &ood_frame,
-            proof_data.z,
-            proof_data.g_trace,
-            proof_data.trace_len,
-            &coeffs,
-            proof_data.pub_result,
-            child_type.clone(),
-        );
+        let ood_valid = if matches!(child_type, super::ood_eval::ChildAirType::VerifierAir) {
+            builder.verify_ood_constraints_verifier_air_child(
+                &ood_frame,
+                proof_data.z,
+                proof_data.g_trace,
+                proof_data.trace_len,
+                &coeffs,
+                proof_data.trace_commitment,
+                proof_data.comp_commitment,
+                &proof_data.fri_commitments,
+                proof_data.num_queries,
+                proof_data.trace_len,
+                proof_data.pub_result,
+                proof_data.verifier_expected_checkpoint_count,
+                proof_data.verifier_expected_mode_counter,
+                &proof_data.verifier_statement_hash,
+                &proof_data.verifier_params_digest,
+            )
+        } else {
+            builder.verify_ood_constraints_typed(
+                &ood_frame,
+                proof_data.z,
+                proof_data.g_trace,
+                proof_data.trace_len,
+                &coeffs,
+                proof_data.pub_result,
+                child_type.clone(),
+            )
+        };
         
         if !ood_valid {
+            #[cfg(any(test, debug_assertions))]
+            eprintln!("[verifier] OOD verification failed");
             all_valid = false;
         }
         
-        // === Interpreter/Formula Hash Binding ===
-        // Verify that the constraint formula used matches the public input interpreter_hash
-        // This prevents attackers from using a simpler formula that trivially satisfies
-        let formula_hash = child_type.compute_formula_hash();
-        let interpreter_ok = builder.verify_interpreter_hash(formula_hash);
-        if !interpreter_ok {
+        // === Params Digest Binding ===
+        // Bind the security-relevant STARK options of the proof being verified.
+        let packed = ((proof_data.fri_folding_factor as u64) << 32) | (proof_data.grinding_factor as u64);
+        let params_digest = [
+            BaseElement::new(proof_data.trace_len as u64),
+            BaseElement::new(proof_data.lde_blowup as u64),
+            BaseElement::new(proof_data.num_queries as u64),
+            BaseElement::new(packed),
+        ];
+        let params_ok = builder.verify_params_digest(params_digest);
+        if !params_ok {
+            #[cfg(any(test, debug_assertions))]
+            eprintln!("[verifier] params-digest binding failed");
             all_valid = false;
         }
     }
@@ -404,6 +464,8 @@ pub fn append_proof_verification_with_options(
         // AIR constraint enforces hash_state[0..3] == fri[0..3] (expected root)
         let root_ok = builder.verify_root(proof_data.trace_commitment);
         if !root_ok {
+            #[cfg(any(test, debug_assertions))]
+            eprintln!("[verifier] trace Merkle root check failed at position={}", query.position);
             all_valid = false;
         }
     }
@@ -421,6 +483,8 @@ pub fn append_proof_verification_with_options(
         // Verify computed root matches composition commitment
         let root_ok = builder.verify_root(proof_data.comp_commitment);
         if !root_ok {
+            #[cfg(any(test, debug_assertions))]
+            eprintln!("[verifier] comp Merkle root check failed at position={}", query.position);
             all_valid = false;
         }
     }
@@ -477,6 +541,8 @@ pub fn append_proof_verification_with_options(
             // This ensures the DEEP composition polynomial was computed correctly
             let deep_ok = builder.verify_deep_value(prover_deep, expected_deep);
             if !deep_ok {
+                #[cfg(any(test, debug_assertions))]
+                eprintln!("[verifier] DEEP check failed at query index {}", q_idx);
                 all_valid = false;
             }
         }
@@ -524,6 +590,8 @@ pub fn append_proof_verification_with_options(
             // Verify computed root matches FRI layer commitment
             let root_ok = builder.verify_root(layer_commitment);
             if !root_ok {
+                #[cfg(any(test, debug_assertions))]
+                eprintln!("[verifier] FRI Merkle root failed at layer={}, query={}", layer_idx, q_idx);
                 all_valid = false;
             }
             
@@ -576,6 +644,8 @@ pub fn append_proof_verification_with_options(
             for &final_val in final_folded_values[1..].iter() {
                 let terminal_ok = builder.verify_fri_terminal(final_val, first_val);
                 if !terminal_ok {
+                    #[cfg(any(test, debug_assertions))]
+                    eprintln!("[verifier] FRI terminal(constant) failed");
                     all_valid = false;
                 }
             }
@@ -607,6 +677,8 @@ pub fn append_proof_verification_with_options(
                 
                 let terminal_ok = builder.verify_fri_terminal(final_val, expected);
                 if !terminal_ok {
+                    #[cfg(any(test, debug_assertions))]
+                    eprintln!("[verifier] FRI terminal(poly) failed");
                     all_valid = false;
                 }
             }
@@ -678,8 +750,9 @@ fn compute_statement_hash(
 /// - t1_num = Σ(T(x)-T(z))*γ for trace + Σ(C(x)-C(z))*γ for comp
 /// - t2_num = Σ(T(x)-T(z*g))*γ for trace + Σ(C(x)-C(z*g))*γ for comp
 /// 
-/// Same gamma is used for BOTH z and z*g terms for each column!
-/// Coefficient layout: [γ_trace_0, γ_trace_1, ..., γ_comp_0, γ_comp_1, ...]
+/// Coefficient layout:
+/// - [γ_trace_0..γ_trace_{w-1}]
+/// - [γ_comp_0..γ_comp_{c-1}]
 fn compute_deep_value(
     x: BaseElement,
     trace_values: &[BaseElement],  // T(x) for all trace columns
@@ -690,7 +763,7 @@ fn compute_deep_value(
     ood_comp_next: &[BaseElement],     // C(z·g) - from quotient OOD next row
     z: BaseElement,
     g_trace: BaseElement,
-    deep_coeffs: &[BaseElement],  // γ coefficients: [trace_gammas..., comp_gammas...]
+    deep_coeffs: &[BaseElement],  // γ coefficients: [trace..., comp...]
 ) -> BaseElement {
     // Compute denominators
     let den_z = x - z;           // x - z
@@ -710,13 +783,15 @@ fn compute_deep_value(
     let mut t2_num = BaseElement::ZERO; // sum for z*g terms
     
     let mut coeff_idx = 0;
-    
+
     // Process trace columns - SAME gamma for both z and z*g terms
     for col in 0..trace_w {
-        if coeff_idx >= deep_coeffs.len() { break; }
+        if coeff_idx >= deep_coeffs.len() {
+            break;
+        }
         let gamma = deep_coeffs[coeff_idx];
         coeff_idx += 1;
-        
+
         let t_x = trace_values[col];
         
         // z term: (T(x) - T(z)) * γ
@@ -726,7 +801,7 @@ fn compute_deep_value(
             t1_num = t1_num + (diff_z * gamma);
         }
         
-        // z*g term: (T(x) - T(z*g)) * γ (SAME gamma!)
+        // z*g term: (T(x) - T(z*g)) * γ (same gamma!)
         if col < ood_trace_next.len() {
             let t_zg = ood_trace_next[col];
             let diff_zg = t_x - t_zg;
@@ -737,7 +812,9 @@ fn compute_deep_value(
     // Process composition columns - SAME gamma for both z and z*g terms
     // Winterfell uses ood_quotient_frame.next_row() for z*g, NOT current!
     for col in 0..comp_w {
-        if coeff_idx >= deep_coeffs.len() { break; }
+        if coeff_idx >= deep_coeffs.len() {
+            break;
+        }
         let gamma = deep_coeffs[coeff_idx];
         coeff_idx += 1;
         
@@ -813,6 +890,16 @@ pub struct ParsedProof {
     /// Public result/boundary value for verification
     pub pub_result: BaseElement,
 
+    // VerifierAir-specific public-input tail (needed to verify VerifierAir proofs recursively)
+    //
+    // When the child proof is itself a VerifierAir proof, its AIR has boundary constraints
+    // that depend on these public inputs (final aux counters + params digest + statement hash).
+    // These are extracted from `VerifierPublicInputs::to_elements()` by the parser.
+    pub verifier_statement_hash: [BaseElement; 4],
+    pub verifier_params_digest: [BaseElement; 4],
+    pub verifier_expected_checkpoint_count: usize,
+    pub verifier_expected_mode_counter: usize,
+
     // Query data
     pub trace_queries: Vec<QueryData>,
     pub comp_queries: Vec<QueryData>,
@@ -840,6 +927,8 @@ pub struct ParsedProof {
     pub num_queries: usize,
     pub num_constraints: usize,
     pub num_fri_layers: usize,
+    pub fri_folding_factor: usize,
+    pub grinding_factor: u32,
 }
 
 impl ParsedProof {
@@ -931,6 +1020,10 @@ mod tests {
             g_trace: BaseElement::get_root_of_unity(3), // trace_len=8, so log2=3
             constraint_coeffs: vec![BaseElement::ONE, BaseElement::ONE, BaseElement::ONE],
             pub_result: BaseElement::ZERO,
+            verifier_statement_hash: [BaseElement::ZERO; 4],
+            verifier_params_digest: [BaseElement::ZERO; 4],
+            verifier_expected_checkpoint_count: 0,
+            verifier_expected_mode_counter: 0,
             // Query data
             trace_queries: vec![],
             comp_queries: vec![],
@@ -950,6 +1043,8 @@ mod tests {
             num_queries: 2,
             num_constraints: 2,
             num_fri_layers: 2,
+            fri_folding_factor: 2,
+            grinding_factor: 0,
         }
     }
 
