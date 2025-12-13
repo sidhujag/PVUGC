@@ -762,6 +762,62 @@ fn verify_public_only_in_c_and_w_span_separated(
             wit_b_rows.insert(row);
         }
     }
+
+    // === NEW: Public-C binding row diagnostics (const×wit touching public rows) ===
+    //
+    // This is the specific failure mode you were worried about:
+    // witness columns appearing in B on the same row where public inputs appear in C.
+    //
+    // After the OuterCircuit refactor, each public input should have exactly ONE such
+    // witness column (`x_wit`) on its binding row (1 * x_wit = x_pub). All bit-witness
+    // columns should be confined to witness-only rows.
+    println!("\n  [Span] Public-C Row B-Witness Diagnostics");
+    if w_pub_rows.is_empty() {
+        println!("         INFO: No public-C rows (w_pub_rows empty) — statement binding missing?");
+    } else {
+        let mut pub_rows_sorted: Vec<usize> = w_pub_rows.iter().copied().collect();
+        pub_rows_sorted.sort_unstable();
+
+        let mut all_b_wit_cols: HashSet<usize> = HashSet::new();
+        for &row in &pub_rows_sorted {
+            let mut cols_on_row: Vec<usize> = Vec::new();
+            for col in num_pub..num_vars {
+                if extractor.b_cols[col].iter().any(|(r, _)| *r == row) {
+                    cols_on_row.push(col);
+                    all_b_wit_cols.insert(col);
+                }
+            }
+            cols_on_row.sort_unstable();
+            let show = cols_on_row.len().min(8);
+            if cols_on_row.is_empty() {
+                println!("         Row {}: B has no witness columns (good; no const×wit on public row)", row);
+            } else {
+                println!(
+                    "         Row {}: B witness cols = {} (showing first {}): {:?}",
+                    row,
+                    cols_on_row.len(),
+                    show,
+                    &cols_on_row[..show]
+                );
+            }
+        }
+        let mut uniq: Vec<usize> = all_b_wit_cols.into_iter().collect();
+        uniq.sort_unstable();
+        let show = uniq.len().min(12);
+        println!(
+            "         Summary: {} distinct witness columns appear in B on public-C rows (showing first {}): {:?}",
+            uniq.len(),
+            show,
+            &uniq[..show]
+        );
+        if uniq.len() == 1 {
+            println!("         PASS: exactly one B-witness column touches public-C rows (expected: x_wit binding).");
+        } else if uniq.is_empty() {
+            println!("         INFO: no B-witness columns touch public-C rows (stronger than expected).");
+        } else {
+            println!("         WARN: multiple B-witness columns touch public-C rows (reintroduces const×bit-style risk).");
+        }
+    }
     
     // 5) H_{0,0} isolation check: find rows where H_{0,0} has support but ALL published handles = 0
     // H_{0,0} = const×const, supported where A[r,0]×B[r,0] ≠ 0

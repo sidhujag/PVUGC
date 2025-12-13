@@ -161,35 +161,49 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
 
         // SECURE SPAN-SEPARATED PUBLIC INPUT BINDING
         //
-        // Goal: Public inputs in B only (for span separation) while ensuring
-        // the verifier uses the SAME values (for soundness).
+        // Goal:
+        // - Keep true public inputs out of A and B (u_pub = v_pub = 0),
+        // - Bind the verifier's witness bit-decomposition to the public input,
+        // - Avoid placing many bit-witness variables on the *single* public-C row.
         //
-        // Approach:
-        // 1. Allocate public input as simple scalar (span-separated)
-        // 2. BooleanInputVar as WITNESS (for verifier's scalar mult)
-        // 3. Constrain: x_pub = reconstructed_from_bits(input_var)
-        //    This links them cryptographically
+        // Construction (per public input element):
+        // 1) Allocate x_pub as an input variable (public, appears only in C)
+        // 2) Allocate x_wit as a witness scalar
+        // 3) Constrain: 1 * reconstruct(bits) = x_wit        (witness-only row)
+        // 4) Constrain: 1 * x_wit            = x_pub         (single public-C row)
+        //
+        // This ensures only ONE witness column (x_wit) touches the public-C row,
+        // and we can omit the corresponding (0, x_wit) quotient basis from the
+        // published Lean CRS and bake it via the standard–lean C-gap machinery.
         
         let one_lc = LinearCombination::from((OuterScalar::<C>::one(), Variable::One));
         
-        // Step 1: Allocate span-separated public inputs
+        // Step 1: Allocate public inputs x_pub and corresponding witness scalars x_wit.
+        // We keep the outer-field value around so both allocations are consistent.
         let mut x_pub_vars = Vec::new();
+        let mut x_wit_vars = Vec::new();
         for x_val in &self.x_inner {
             let x_outer: OuterScalar<C> = convert_inner_to_outer::<C>(*x_val);
             let x_pub = cs.new_input_variable(|| Ok(x_outer))?;
+            let x_wit = cs.new_witness_variable(|| Ok(x_outer))?;
             x_pub_vars.push(x_pub);
+            x_wit_vars.push(x_wit);
         }
         
-        // Step 2: BooleanInputVar as WITNESS (for verifier's scalar multiplication)
+        // Step 2: BooleanInputVar as WITNESS (for verifier's scalar multiplication).
         let input_var =
             BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_witness(cs.clone(), || {
                 Ok(self.x_inner.clone())
             })?;
 
-        // Step 3: Link public scalars to input_var bits via BINDING constraints
-        // Each element in input_var.into_iter() gives us a Vec<Boolean> for one inner input
-        // We reconstruct the scalar and constrain it to equal x_pub
-        for (x_pub, bits) in x_pub_vars.iter().zip(input_var.clone().into_iter()) {
+        // Step 3: Link public scalars to input_var bits via binding constraints.
+        // For each input element, reconstruct the scalar from bits and bind it to x_wit,
+        // then bind x_wit to x_pub in a single public-C row.
+        for ((x_pub, x_wit), bits) in x_pub_vars
+            .iter()
+            .zip(x_wit_vars.iter())
+            .zip(input_var.clone().into_iter())
+        {
             // bits is Vec<Boolean<OuterScalar<C>>> for this input
             // Build linear combination: sum of bit_i * 2^i
             let mut reconstructed_lc = LinearCombination::<OuterScalar<C>>::zero();
@@ -205,27 +219,28 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
                 power_of_two = power_of_two + power_of_two;
             }
             
-            // Enforce: 1 * reconstructed = x_pub
-            // This puts x_pub in C (output) instead of B (multiplicative)
-            // Benefits:
-            //   - Eliminates (wit, pub) pairs in h_query_wit (v_pub = 0 now)
-            //   - Cleaner security argument (no public in B-side)
-            // Public input binding is now through W-polynomial (w_pub ≠ 0)
-            let mut lc_c = LinearCombination::<OuterScalar<C>>::zero();
-            lc_c += (OuterScalar::<C>::one(), *x_pub);
-            
-            cs.enforce_constraint(one_lc.clone(), reconstructed_lc, lc_c)?;
+            // 3a) Enforce: 1 * reconstructed(bits) = x_wit  (witness-only row)
+            let mut lc_c_wit = LinearCombination::<OuterScalar<C>>::zero();
+            lc_c_wit += (OuterScalar::<C>::one(), *x_wit);
+            cs.enforce_constraint(one_lc.clone(), reconstructed_lc, lc_c_wit)?;
+
+            // 3b) Enforce: 1 * x_wit = x_pub  (single public-C row; public input appears only in C)
+            let mut lc_b = LinearCombination::<OuterScalar<C>>::zero();
+            lc_b += (OuterScalar::<C>::one(), *x_wit);
+            let mut lc_c_pub = LinearCombination::<OuterScalar<C>>::zero();
+            lc_c_pub += (OuterScalar::<C>::one(), *x_pub);
+            cs.enforce_constraint(one_lc.clone(), lc_b, lc_c_pub)?;
         }
         
         // Step 4: Use witness input_var in verifier (now bound to x_pub!)
-       /*let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+       let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
             Ok(self.proof_inner)
         })?;
 
         let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;*/
+        ok.enforce_equal(&Boolean::TRUE)?;
         Ok(())
     }
 }
