@@ -65,8 +65,9 @@ use winterfell::{
 /// - 3 selector columns
 /// - 12 hash state columns (RPO-256)
 /// - 8 FRI/DEEP working columns
+/// - 1 dedicated Merkle index register column
 /// - 4 auxiliary columns
-pub const VERIFIER_TRACE_WIDTH: usize = 27;
+pub const VERIFIER_TRACE_WIDTH: usize = 32;
 
 /// Number of hash state columns (RPO-256 state)
 pub const HASH_STATE_WIDTH: usize = 12;
@@ -159,13 +160,14 @@ pub struct VerifierPublicInputs {
     pub params_digest: [BaseElement; 4],
     /// Expected mode counter
     /// 
-    /// Packed encoding: statement_count + 4096 * params_count
+    /// Packed encoding: statement_count + 4096 * params_count + 2^32 * root_count
     ///
+    /// - root_count is incremented on DeepCompose mode 0 (Merkle root checks)
     /// - statement_count is incremented on DeepCompose mode 4
     /// - params_count is incremented on DeepCompose mode 5
     ///
-    /// For single proof: 1 + 4096*1 = 4097
-    /// For multi-proof (N children): 1 + 4096*N
+    /// For single proof: (roots<<32) + 1 + 4096*1
+    /// For multi-proof (N children): (roots<<32) + 1 + 4096*N
     pub expected_mode_counter: usize,
 }
 
@@ -222,14 +224,19 @@ impl VerifierPublicInputs {
     
     /// Compute expected mode counter from number of child proofs
     /// 
-    /// Packed encoding: statement_count + 4096 * params_count
+    /// Packed encoding: statement_count + 4096 * params_count + 2^32 * root_count
     /// - statement_count: always 1 (one combined statement hash verification)
     /// - params_count: number of child proofs whose options digest is checked (one per child proof)
-    ///
-    /// For single proof verification: 1 + 4096*1 = 4097
-    /// For verifying aggregator (N children): 1 + 4096*N
-    pub fn compute_expected_mode_counter(num_child_proofs: usize) -> usize {
-        1 + num_child_proofs * 4096
+    /// - root_count: number of Merkle root checks (trace + comp + FRI layers) across all queries
+    /// 
+    /// For single proof verification: (roots<<32) + 1 + 4096*1
+    pub fn compute_expected_mode_counter(
+        num_child_proofs: usize,
+        num_queries: usize,
+        num_fri_layers: usize,
+    ) -> usize {
+        let root_count = num_queries * (2 + num_fri_layers);
+        (root_count << 32) + 1 + num_child_proofs * 4096
     }
 }
 
@@ -294,24 +301,23 @@ impl Air for VerifierAir {
                 // Column 4 participates in:
                 // - FRI folding: op.is_fri(3) * fold(2) ≈ degree 5
                 // - copy constraints on non-special transitions: both_not_special(6) * copy(1) = degree 7
-                // - capture binding on Nop rows: op.is_nop(3) * is_capture(7) * (fri4-hash0)(1) = degree 11
-                // Max = 11
-                degrees.push(TransitionConstraintDegree::new(11));
+                // With QueryGen/Distinct/ZeroCheck implemented as Nop sub-modes and aux[2] restricted on Nop rows,
+                // the gating/selectors are low-degree; the copy term tops out around degree 13.
+                // Nop sub-mode selectors now range over {0,6..13}, increasing selector degree.
+                degrees.push(TransitionConstraintDegree::new(18));
             } else if i == 6 {
                 // Equality constraint on all DeepCompose rows:
                 // op.is_deep(3) * (fri[6]-fri[7])(1) = degree 4
-                // Copy term remains degree 7.
-                degrees.push(TransitionConstraintDegree::new(7));
+                degrees.push(TransitionConstraintDegree::new(18));
             } else if i == 5 {
                 // Column 5 is scratch and is copied on non-special transitions:
-                // both_not_special(6) * copy(1) = degree 7
+                // both_not_special(6) * copy(1) = degree 7 (but raised by QueryGen gating)
                 // Additionally, for Init kind 11 we enforce dir bit binary:
                 // op.is_init(3) * l11(3) * binary(2) = degree 8
-                degrees.push(TransitionConstraintDegree::new(8));
+                degrees.push(TransitionConstraintDegree::new(18));
             } else if i == 7 {
                 // Column 7: copy constraint only
-                // both_not_special(6) * copy(1) = degree 7
-                degrees.push(TransitionConstraintDegree::new(7));
+                degrees.push(TransitionConstraintDegree::new(18));
             } else {
                 // Columns 0-3: root/statement/interpreter check constraints
                 // Root: op.is_deep(3) * is_root_check(6) * root(1) = degree 10
@@ -321,6 +327,27 @@ impl Air for VerifierAir {
                 // Max = 10
                 degrees.push(TransitionConstraintDegree::new(10));
             }
+        }
+
+        // Dedicated index register column (1):
+        // - root check: op.is_deep(3) * is_root_check(6) * idx(1) = degree 10
+        // - merkle idx update: op.is_init(3) * l11(3) * (idx - (2*idx_next+dir))(1) = degree 7
+        // - export: is_export_nop (deg 11) * (idx_next - acc)(1) = degree 12
+        // - export sequencing: next_is_export_nop (11) * (1 - is_zerocheck_nop) (11) = degree 22
+        // - copy: (1 - op.is_init*l11 - is_export_nop) * (idx_next-idx)(1) ≈ degree 12
+        degrees.push(TransitionConstraintDegree::new(22));
+
+        // Expected-root register columns (4):
+        // These bind Merkle root checks to the same digest value used elsewhere in the trace.
+        // Each column enforces:
+        // - copy by default
+        // - update on Init(kind=LOAD_ROOT4) rows: root_next = fri_curr[i]
+        // - used on DeepCompose root-check rows: hash_state[i] == root_curr
+        //
+        // Degree is dominated by the root-load gating:
+        // is_load_root = op.is_init(3) * l12(4) = 7, then * linear = 8.
+        for _ in 0..4 {
+            degrees.push(TransitionConstraintDegree::new(8));
         }
 
         // Auxiliary constraints (4):
@@ -343,8 +370,9 @@ impl Air for VerifierAir {
                 // op.is_deep = s2 * s1 * (1 - s0) = degree 3
                 degrees.push(TransitionConstraintDegree::new(3));
             } else {
-                // aux[2]: mode value - unconstrained
-                degrees.push(TransitionConstraintDegree::new(1));
+                // aux[2]: mode value. On Nop rows, constrained to {0,6,7,8,9,10,11,12,13}.
+                // op.is_nop(3) * degree-9 product = degree 12
+                degrees.push(TransitionConstraintDegree::new(12));
             }
         }
 
@@ -380,17 +408,17 @@ impl Air for VerifierAir {
         }
 
         // Initial mode counter must be 0
-        // aux[1] is at column 24
+        // aux[1] is at column 29 (idx_reg + root_reg added)
         assertions.push(Assertion::single(
-            24, // aux[1] = mode counter
+            29, // aux[1] = mode counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
 
         // Initial checkpoint counter must be 0
-        // aux[3] is at column 26
+        // aux[3] is at column 31 (idx_reg + root_reg added)
         assertions.push(Assertion::single(
-            26, // aux[3] = checkpoint counter
+            31, // aux[3] = checkpoint counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
@@ -402,7 +430,7 @@ impl Air for VerifierAir {
         // For single proof: 1 + 4096*1 = 4097
         // For multi-proof (N children): 1 + 4096*N
         assertions.push(Assertion::single(
-            24, // aux[1] = mode counter
+            29, // aux[1] = mode counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_mode_counter as u64),
         ));
@@ -410,7 +438,7 @@ impl Air for VerifierAir {
         // Final checkpoint count must equal expected value
         // This ensures all verification steps were executed (not skipped).
         assertions.push(Assertion::single(
-            26, // aux[3] = checkpoint counter
+            31, // aux[3] = checkpoint counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64),
         ));
@@ -453,7 +481,7 @@ mod tests {
             pub_result: BaseElement::ZERO,
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             params_digest: [BaseElement::ZERO; 4],
-            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1, 2, 2),
         };
 
         let trace_info = TraceInfo::new(VERIFIER_TRACE_WIDTH, 64);
@@ -482,7 +510,7 @@ mod tests {
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             params_digest: [BaseElement::ZERO; 4],
-            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1, 2, 2),
         };
 
         let elements = pub_inputs.to_elements();

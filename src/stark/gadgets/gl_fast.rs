@@ -23,8 +23,7 @@
 //! Use for internal arithmetic. Canonicalize only when comparing to proof bytes.
 
 use crate::stark::StarkInnerFr as InnerFr;
-use ark_ff::{BigInteger, PrimeField};
-use ark_r1cs_std::{fields::fp::FpVar, prelude::*, uint8::UInt8};
+use ark_r1cs_std::{fields::fp::FpVar, prelude::*};
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
 
 const P_U64: u64 = 0xFFFF_FFFF_0000_0001;
@@ -37,28 +36,8 @@ fn fp_p() -> FpVar<InnerFr> {
     FpVar::constant(InnerFr::from(P_U64 as u128))
 }
 
-/// Allocate u64 as 8 bytes
-fn alloc_u64(
-    cs: ConstraintSystemRef<InnerFr>,
-    hint: Option<u64>,
-) -> Result<(FpVar<InnerFr>, [UInt8<InnerFr>; 8]), SynthesisError> {
-    let w = hint.unwrap_or(0);
-    let bytes: [UInt8<InnerFr>; 8] = core::array::from_fn(|i| {
-        UInt8::new_witness(cs.clone(), move || Ok(w.to_le_bytes()[i])).unwrap()
-    });
-
-    // Manual pack
-    let mut v = FpVar::constant(InnerFr::from(0u64));
-    let mut pow = FpVar::constant(InnerFr::from(1u64));
-    for byte in &bytes {
-        v = &v + &(&byte.to_fp()? * &pow);
-        pow = &pow * &FpVar::constant(InnerFr::from(256u64));
-    }
-    Ok((v, bytes))
-}
-
 /// Pack a UInt64 gadget into an `FpVar` by bit decomposition.
-fn u64_var_to_fp(cs: ConstraintSystemRef<InnerFr>, u: &UInt64<InnerFr>) -> Result<FpVar<InnerFr>, SynthesisError> {
+fn u64_var_to_fp(u: &UInt64<InnerFr>) -> Result<FpVar<InnerFr>, SynthesisError> {
     let bits = u.to_bits_le()?;
     let one = FpVar::constant(InnerFr::from(1u64));
     let zero = FpVar::constant(InnerFr::from(0u64));
@@ -126,7 +105,7 @@ pub fn gl_mul(
         Ok(gl_mul_u64(av, bv))
     })?;
     enforce_lt_p_gl(&result_u)?;
-    let result_fp = u64_var_to_fp(cs.clone(), &result_u)?;
+    let result_fp = u64_var_to_fp(&result_u)?;
     let result = GlVar(result_fp.clone());
 
     // Witness k such that: a*b = result + k*p (in the outer field).
@@ -137,7 +116,7 @@ pub fn gl_mul(
         let res_u128 = gl_mul_u64(av, bv) as u128;
         Ok(((prod_u128 - res_u128) / (P_U64 as u128)) as u64)
     })?;
-    let k_fp = u64_var_to_fp(cs.clone(), &k_u)?;
+    let k_fp = u64_var_to_fp(&k_u)?;
 
     // Verify: a * b == result + k * p
     let p = FpVar::constant(InnerFr::from(P_U64 as u128));
@@ -158,7 +137,7 @@ pub fn gl_inv(cs: ConstraintSystemRef<InnerFr>, v: &GlVar) -> Result<GlVar, Synt
         Ok(gl_inv(fr_to_gl_u64(v_fr)))
     })?;
     enforce_lt_p_gl(&inv_u)?;
-    let inv_fp = u64_var_to_fp(cs.clone(), &inv_u)?;
+    let inv_fp = u64_var_to_fp(&inv_u)?;
     let inv = GlVar(inv_fp);
 
     // Enforce: v * inv = 1 (gl_mul returns canonical GL, so plain equality works)

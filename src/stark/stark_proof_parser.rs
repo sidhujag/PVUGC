@@ -793,23 +793,6 @@ fn compute_ood_commitment<H: ElementHasher<BaseField = GL>>(
     digest.as_bytes()
 }
 
-/// Poseidon commit to positions (off-chain, matches in-circuit)
-fn poseidon_commit_positions_offchain(positions: &[usize]) -> InnerFr {
-    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
-    use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, CryptographicSponge};
-
-    let mut sponge = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
-    for &pos in positions {
-        let b = (pos as u64).to_le_bytes();
-        let mut val = 0u64;
-        for (i, &byte) in b.iter().enumerate() {
-            val |= (byte as u64) << (8 * i);
-        }
-        sponge.absorb(&InnerFr::from(val));
-    }
-    sponge.squeeze_field_elements::<InnerFr>(1)[0]
-}
-
 /// Compute the arming-friendly statement hash for Groth16.
 ///
 /// Expected layout is `VerifierPublicInputs::to_elements()`:
@@ -826,36 +809,4 @@ fn compute_armed_statement_hash_from_verifier_pub_inputs(pub_inputs: &[u64]) -> 
         sponge.absorb(&InnerFr::from(v));
     }
     sponge.squeeze_field_elements::<InnerFr>(1)[0]
-}
-
-/// Compute Poseidon hash of all air_params (must match in-circuit computation exactly!)
-fn compute_air_params_hash(air_params: &super::inner_stark_full::AirParams) -> InnerFr {
-    use super::crypto::poseidon_fr377_t3::POSEIDON377_PARAMS_T3_V1;
-    use ark_crypto_primitives::sponge::poseidon::PoseidonSponge;
-    use ark_crypto_primitives::sponge::CryptographicSponge;
-
-    let mut params_hasher = PoseidonSponge::new(&POSEIDON377_PARAMS_T3_V1);
-
-    // Domain separator for AIR params binding (must match circuit!)
-    params_hasher.absorb(&InnerFr::from(0xA1A1u64));
-
-    // Absorb all structural params in exact same order as circuit
-    params_hasher.absorb(&InnerFr::from(air_params.trace_width as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.comp_width as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.trace_len as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.lde_blowup as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.num_queries as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.fri_folding_factor as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.fri_num_layers as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.lde_generator));
-    params_hasher.absorb(&InnerFr::from(air_params.domain_offset));
-    params_hasher.absorb(&InnerFr::from(air_params.g_lde));
-    params_hasher.absorb(&InnerFr::from(air_params.g_trace));
-    params_hasher.absorb(&InnerFr::from(air_params.num_constraint_coeffs as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.grinding_factor as u64));
-    params_hasher.absorb(&InnerFr::from(air_params.combiner_kind.to_u64()));
-    params_hasher.absorb(&InnerFr::from(air_params.fri_terminal.to_u64()));
-    params_hasher.absorb(&InnerFr::from(air_params.aggregator_version));
-
-    params_hasher.squeeze_field_elements::<InnerFr>(1)[0]
 }

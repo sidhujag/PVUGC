@@ -44,11 +44,11 @@ fn full_stark_verifier_smoke() {
     let cs = ConstraintSystem::new_ref();
     let subscriber = Registry::default().with(ConstraintLayer::default());
     tracing::subscriber::with_default(subscriber, || {
-        instance
-            .circuit
-            .clone()
-            .generate_constraints(cs.clone())
-            .expect("generate constraints");
+    instance
+        .circuit
+        .clone()
+        .generate_constraints(cs.clone())
+        .expect("generate constraints");
     });
     
     println!("Circuit Statistics:");
@@ -129,11 +129,11 @@ fn verifying_aggregator_smoke() {
     let cs = ConstraintSystem::new_ref();
     let subscriber = Registry::default().with(ConstraintLayer::default());
     tracing::subscriber::with_default(subscriber, || {
-        instance
-            .circuit
-            .clone()
-            .generate_constraints(cs.clone())
-            .expect("generate constraints");
+    instance
+        .circuit
+        .clone()
+        .generate_constraints(cs.clone())
+        .expect("generate constraints");
     });
     
     println!("Verifying Aggregator Circuit Statistics:");

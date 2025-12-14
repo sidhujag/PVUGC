@@ -7,12 +7,11 @@ mod tests {
     use winterfell::math::{fields::f64::BaseElement, FieldElement};
 
     use crate::stark::verifier_air::{
-        fri::{fold_evaluation, FriConfig},
-        merkle::{MerkleDigest, MerklePath, MerkleTree, rpo_compress},
-        ood_eval::{evaluate_aggregator_constraints, OodFrame},
+        fri::fold_evaluation,
+        merkle::{MerkleDigest, MerkleTree, rpo_compress},
+        ood_eval::evaluate_aggregator_constraints,
         transcript::{derive_challenges, Transcript},
         trace::VerifierTraceBuilder,
-        HASH_STATE_WIDTH,
     };
 
     /// Helper to create a test digest
@@ -259,7 +258,7 @@ mod tests {
         // 2. Derive challenges from transcript
         let mut transcript = Transcript::new();
         transcript.absorb_digest(&trace_tree.root());
-        let z = transcript.squeeze_extension();
+        let _z = transcript.squeeze_extension();
         
         // 3. Simulate OOD evaluation
         let ood_current = vec![BaseElement::new(5), BaseElement::new(7)];

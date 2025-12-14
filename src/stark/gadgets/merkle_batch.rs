@@ -43,7 +43,7 @@ pub fn verify_batch_merkle_root_gl(
     }
     if nodes_bytes.len() < leaves.len() {
         return Err(SynthesisError::Unsatisfiable);
-    }
+        }
 
     // Convert expected root bytes to 4 GL limbs once.
     let expected_fp = digest32_to_gl4(expected_root_bytes)?;
@@ -72,10 +72,10 @@ pub fn verify_batch_merkle_root_gl(
 
     // Verify each opening with a fixed-depth authentication path.
     for (i, leaf) in leaves.iter().enumerate() {
-        let node_vec = nodes_bytes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
+                let node_vec = nodes_bytes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
         if node_vec.len() < depth {
-            return Err(SynthesisError::Unsatisfiable);
-        }
+                    return Err(SynthesisError::Unsatisfiable);
+                }
         let idx_u64 = indexes.get(i).ok_or(SynthesisError::Unsatisfiable)?;
         let idx_bits = idx_u64.to_bits_le()?;
 
@@ -100,7 +100,7 @@ pub fn verify_batch_merkle_root_gl(
                 parent[2].clone(),
                 parent[3].clone(),
             ];
-        }
+    }
 
         // Root must match expected commitment.
         for j in 0..4 {

@@ -28,6 +28,14 @@ fn build_circuit() -> crate::stark::inner_stark_full::FullStarkVerifierCircuit {
 fn test_recursive_verification_with_steps(steps: usize) -> bool {
     eprintln!("\n=== Testing Recursive STARK Pipeline (VDF steps={}) ===", steps);
 
+    // Enable constraint tracing so `which_is_unsatisfied()` can report a helpful label.
+    // Keep the guard alive for the whole test.
+    use ark_relations::r1cs::ConstraintLayer;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+    let subscriber = Registry::default().with(ConstraintLayer::default());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
     let circuit = build_recursive_circuit_with_steps(steps);
 
     eprintln!("  Trace width: {}", circuit.air_params.trace_width);
@@ -102,19 +110,20 @@ fn test_adversarial_tamper_trace_nodes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
     // Flip one byte in first trace batch node if exists
+    let mut mutated = false;
     if let Some(segment) = circuit.trace_segments.get_mut(0) {
         if let Some(first_vec) = segment.batch_nodes.get_mut(0) {
             if let Some(first) = first_vec.get_mut(0) {
                 first[0] ^= 0x01;
+                mutated = true;
             }
         }
     }
+    assert!(mutated, "test did not mutate any trace batch node (unexpected empty witness)");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if res.is_ok() {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
-    // Err is also acceptable (detected early as Unsatisfiable)
 }
 
 #[test]
@@ -141,14 +150,20 @@ fn test_adversarial_tamper_fri_nodes() {
 fn test_adversarial_omit_trace_batch_nodes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut had_nodes = false;
     for segment in &mut circuit.trace_segments {
+        had_nodes |= !segment.batch_nodes.is_empty();
         segment.batch_nodes.clear();
     }
+    assert!(had_nodes, "test did not actually omit any trace batch nodes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    // Either the circuit rejects the witness during synthesis, or constraints become unsatisfied.
+    if res.is_ok() {
         assert!(!cs.is_satisfied().unwrap_or(true));
-    } // Err is acceptable (Unsatisfiable)
+    } else {
+        // rejected early (acceptable)
+    }
 }
 
 #[test]
@@ -156,10 +171,12 @@ fn test_adversarial_omit_trace_batch_nodes() {
 fn test_adversarial_omit_comp_batch_nodes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let had_nodes = !circuit.comp_batch_nodes.is_empty();
     circuit.comp_batch_nodes.clear();
+    assert!(had_nodes, "test did not actually omit any comp batch nodes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    if res.is_ok() {
         assert!(!cs.is_satisfied().unwrap_or(true));
     }
 }
@@ -169,9 +186,12 @@ fn test_adversarial_omit_comp_batch_nodes() {
 fn test_adversarial_omit_fri_batch_nodes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut had_nodes = false;
     if let Some(layer) = circuit.fri_layers.get_mut(0) {
+        had_nodes = !layer.batch_nodes.is_empty();
         layer.batch_nodes.clear();
     }
+    assert!(had_nodes, "test did not actually omit any FRI batch nodes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
     if let Ok(_) = res {
@@ -184,9 +204,12 @@ fn test_adversarial_omit_fri_batch_nodes() {
 fn test_adversarial_omit_fri_unique_values() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut had_values = false;
     if let Some(layer) = circuit.fri_layers.get_mut(0) {
+        had_values = !layer.unique_values.is_empty();
         layer.unique_values.clear();
     }
+    assert!(had_values, "test did not actually omit any FRI unique values");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
     if let Ok(_) = res {
@@ -199,9 +222,12 @@ fn test_adversarial_omit_fri_unique_values() {
 fn test_adversarial_omit_fri_unique_indexes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut had_indexes = false;
     if let Some(layer) = circuit.fri_layers.get_mut(0) {
+        had_indexes = !layer.unique_indexes.is_empty();
         layer.unique_indexes.clear();
     }
+    assert!(had_indexes, "test did not actually omit any FRI unique indexes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
     if let Ok(_) = res {
@@ -248,16 +274,18 @@ fn test_adversarial_low_pow_nonce() {
 fn test_adversarial_tamper_comp_nodes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(first_vec) = circuit.comp_batch_nodes.get_mut(0) {
         if let Some(first) = first_vec.get_mut(0) {
             first[0] ^= 0x01;
+            mutated = true;
         }
     }
+    assert!(mutated, "test did not mutate any comp batch node");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -265,18 +293,20 @@ fn test_adversarial_tamper_comp_nodes() {
 fn test_adversarial_tamper_trace_row_value() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(segment) = circuit.trace_segments.get_mut(0) {
         if let Some(query) = segment.queries.get_mut(0) {
             if let Some(value) = query.values.get_mut(0) {
                 *value ^= 1;
+                mutated = true;
             }
         }
     }
+    assert!(mutated, "test did not mutate any trace query value");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -284,16 +314,18 @@ fn test_adversarial_tamper_trace_row_value() {
 fn test_adversarial_tamper_comp_row_value() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(q) = circuit.comp_queries.get_mut(0) {
         if let Some(v) = q.values.get_mut(0) {
             *v ^= 1;
+            mutated = true;
         }
     }
+    assert!(mutated, "test did not mutate any comp query value");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -301,17 +333,20 @@ fn test_adversarial_tamper_comp_row_value() {
 fn test_adversarial_tamper_ood_values() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(v) = circuit.ood_trace_current.get_mut(0) {
         *v ^= 1;
+        mutated = true;
     }
     if let Some(v) = circuit.ood_comp.get_mut(0) {
         *v ^= 1;
+        mutated = true;
     }
+    assert!(mutated, "test did not mutate any OOD value");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -319,14 +354,16 @@ fn test_adversarial_tamper_ood_values() {
 fn test_adversarial_tamper_trace_root_bytes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(root) = circuit.trace_commitment_le32.get_mut(0) {
         root[0] ^= 1;
+        mutated = true;
     }
+    assert!(mutated, "test did not mutate any trace root bytes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -334,14 +371,16 @@ fn test_adversarial_tamper_trace_root_bytes() {
 fn test_adversarial_tamper_comp_root_bytes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(b) = circuit.comp_commitment_le32.get_mut(0) {
         *b ^= 1;
+        mutated = true;
     }
+    assert!(mutated, "test did not mutate any comp root bytes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
@@ -349,30 +388,32 @@ fn test_adversarial_tamper_comp_root_bytes() {
 fn test_adversarial_tamper_fri_root_bytes() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
     let mut circuit = build_circuit();
+    let mut mutated = false;
     if let Some(root) = circuit.fri_commitments_le32.get_mut(0) {
         root[0] ^= 1;
+        mutated = true;
     }
+    assert!(mutated, "test did not mutate any FRI root bytes");
     let cs = ConstraintSystem::new_ref();
     let res = circuit.generate_constraints(cs.clone());
-    if let Ok(_) = res {
+    assert!(res.is_ok(), "synthesis should succeed; we want constraints to catch tampering");
         assert!(!cs.is_satisfied().unwrap_or(true));
-    }
 }
 
 #[test]
 #[serial]
 fn test_adversarial_missing_fri_layers() {
     use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
-    let mut circuit = build_circuit();
-    // Check if we actually have FRI layers to clear
-    let original_count = circuit.fri_layers.len();
-    if original_count > 0 && circuit.air_params.fri_num_layers > 0 {
+    // Build a circuit which MUST have FRI layers.
+    // Using 64 steps guarantees non-trivial FRI in this pipeline.
+    let mut circuit = build_recursive_circuit_with_steps(64);
+    assert!(circuit.air_params.fri_num_layers > 0, "test requires FRI layers");
+    assert!(!circuit.fri_layers.is_empty(), "test requires witness FRI layers");
+
         // Remove FRI layers from witness to attempt bypass
         circuit.fri_layers.clear();
         let cs = ConstraintSystem::new_ref();
         let res = circuit.generate_constraints(cs.clone());
         // With enforced layer count, this should error out during synthesis
         assert!(res.is_err(), "Missing FRI layers should be rejected");
-    }
-    // If no FRI layers expected, the test doesn't apply
 }

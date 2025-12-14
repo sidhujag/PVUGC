@@ -70,7 +70,7 @@ impl VerifierProver {
     }
     
     /// Generate a verification trace and return the verification result with explicit child type.
-    ///
+    /// 
     /// SECURITY: callers must specify the child AIR type being verified.
     pub fn build_verification_trace_with_result(
         &self,
@@ -106,7 +106,7 @@ impl Prover for VerifierProver {
 
     fn get_pub_inputs(&self, _trace: &Self::Trace) -> VerifierPublicInputs {
         // Use the pre-set public inputs if available
-        self.pub_inputs.clone().unwrap_or_else(|| {
+        let pub_inputs = self.pub_inputs.clone().unwrap_or_else(|| {
             // Fallback to dummy values (should not be used in production)
             VerifierPublicInputs {
                 statement_hash: [BaseElement::ZERO; 4],
@@ -121,7 +121,8 @@ impl Prover for VerifierProver {
                 params_digest: [BaseElement::ZERO; 4],
                 expected_mode_counter: 0, // Will fail boundary assertion if used
             }
-        })
+        });
+        pub_inputs
     }
 
     fn options(&self) -> &ProofOptions {
@@ -228,35 +229,35 @@ pub fn append_proof_verification_with_options(
     // === Sanity Checks (like R1CS) ===
     // Check required data is present
 
-    if proof_data.trace_queries.is_empty() {
+    if proof_data.trace_queries.is_empty() { 
         #[cfg(any(test, debug_assertions))]
         eprintln!("[verifier] sanity: trace_queries empty");
-        all_valid = false;
+        all_valid = false; 
     }
-    if proof_data.comp_queries.is_empty() {
+    if proof_data.comp_queries.is_empty() { 
         #[cfg(any(test, debug_assertions))]
         eprintln!("[verifier] sanity: comp_queries empty");
-        all_valid = false;
+        all_valid = false; 
     }
-    if proof_data.trace_queries.len() != proof_data.comp_queries.len() {
+    if proof_data.trace_queries.len() != proof_data.comp_queries.len() { 
         #[cfg(any(test, debug_assertions))]
         eprintln!(
             "[verifier] sanity: trace/comp query count mismatch (trace={}, comp={})",
             proof_data.trace_queries.len(),
             proof_data.comp_queries.len()
         );
-        all_valid = false;
+        all_valid = false; 
     }
     
     // FRI layers: 0 is valid for small proofs (num_fri_layers determines expected count)
-    if proof_data.fri_layers.len() != proof_data.num_fri_layers {
+    if proof_data.fri_layers.len() != proof_data.num_fri_layers { 
         #[cfg(any(test, debug_assertions))]
         eprintln!(
             "[verifier] sanity: fri_layers len mismatch (got={}, expected={})",
             proof_data.fri_layers.len(),
             proof_data.num_fri_layers
         );
-        all_valid = false;
+        all_valid = false; 
     }
     
     if !proof_data.ood_trace_current.is_empty() && proof_data.ood_trace_current.len() != proof_data.trace_width {
@@ -266,20 +267,20 @@ pub fn append_proof_verification_with_options(
             proof_data.ood_trace_current.len(),
             proof_data.trace_width
         );
-        all_valid = false;
+        all_valid = false; 
     }
     
     // Winterfell DEEP uses the same gamma for both z and z*g terms.
     // Layout: [γ_trace_0.., γ_comp_0..]
     let expected_deep_coeffs = proof_data.trace_width + proof_data.comp_width;
-    if proof_data.deep_coeffs.len() < expected_deep_coeffs {
+    if proof_data.deep_coeffs.len() < expected_deep_coeffs { 
         #[cfg(any(test, debug_assertions))]
         eprintln!(
             "[verifier] sanity: deep_coeffs too short (got={}, expected>={})",
             proof_data.deep_coeffs.len(),
             expected_deep_coeffs
         );
-        all_valid = false;
+        all_valid = false; 
     }
     
     for layer in proof_data.fri_layers.iter() {
@@ -357,7 +358,7 @@ pub fn append_proof_verification_with_options(
         );
         
         // Use constraint coefficients from Fiat-Shamir.
-        // For VerifierAir children we need 27 transition + 8 boundary coefficients.
+        // For VerifierAir children we need 32 transition + 8 boundary coefficients.
         let num_constraints = child_type.num_constraints();
         let needed_coeffs = if matches!(child_type, super::ood_eval::ChildAirType::VerifierAir) {
             num_constraints + 8
@@ -390,13 +391,13 @@ pub fn append_proof_verification_with_options(
             )
         } else {
             builder.verify_ood_constraints_typed(
-                &ood_frame,
-                proof_data.z,
-                proof_data.g_trace,
-                proof_data.trace_len,
-                &coeffs,
-                proof_data.pub_result,
-                child_type.clone(),
+            &ood_frame,
+            proof_data.z,
+            proof_data.g_trace,
+            proof_data.trace_len,
+            &coeffs,
+            proof_data.pub_result,
+            child_type.clone(),
             )
         };
         
@@ -423,24 +424,172 @@ pub fn append_proof_verification_with_options(
         }
     }
 
+    // === Phase 3.5: Derive Fiat–Shamir seed + PoW IN-TRACE (recursion-friendly) ===
+    //
+    // SECURITY: Verifier randomness (query positions) must be transcript-derived, not prover-chosen.
+    // We replicate Winterfell's DefaultRandomCoin flow:
+    //   seed0 = hash_elements(context.to_elements() || pub_inputs.to_elements())
+    //   seed  = merge(seed, trace_root)
+    //   seed  = merge(seed, comp_root)
+    //   seed  = merge(seed, hash_elements(merge_ood_evaluations))
+    //   seed  = merge(seed, fri_root_i) for all commitments
+    //   check_leading_zeros(pow_nonce) >= grinding_factor   (on current seed)
+    //   seed_nonce = merge_with_int(seed, pow_nonce)
+    //   draws: digest_i = merge_with_int(seed_nonce, i+1) (DefaultRandomCoin::next increments counter first)
+    //   pos_i = u64(digest_i[0]) & (lde_domain_size - 1)
+    //
+    // We use the raw draw order (no sort) and rely on the parser to have reordered openings
+    // into this order (and to enforce uniqueness by requiring dedup to be a no-op).
+    let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
+    let domain_bits = if lde_domain_size == 0 || !lde_domain_size.is_power_of_two() {
+        all_valid = false;
+        0usize
+    } else {
+        let bits = lde_domain_size.trailing_zeros() as usize;
+        if bits > 32 {
+            // This recursion pipeline assumes LDE domain size <= 2^32.
+            all_valid = false;
+            0usize
+        } else {
+            bits
+        }
+    };
+
+    // seed0 = hash_elements(context.to_elements() || pub_inputs.to_elements()).
+    //
+    // SECURITY: do not accept `context_elems` / `pub_inputs_elems` as free witness vectors.
+    // We reconstruct the exact Winterfell seed material deterministically from:
+    // - parsed proof context fields (trace widths/len/options),
+    // - and the child public inputs implied by `child_type`.
+    fn reconstruct_context_to_elements_exact(p: &ParsedProof) -> Vec<BaseElement> {
+        // Matches winter-air `Context::to_elements()` exactly (no metadata case):
+        // - trace_info.to_elements(): [layout_pack, trace_len]
+        // - field modulus bytes split into 2 elements (Goldilocks): [1, 0xFFFF_FFFF]
+        // - num_constraints (u32)
+        // - proof_options.to_elements(): [packed, grinding_factor, num_queries]
+
+        // TraceInfo layout pack:
+        // buf = main_width; buf = (buf<<8)|num_aux_segments; if aux present: (buf<<8)|aux_width; (buf<<8)|num_aux_rands
+        let mut trace_info_pack = p.trace_width as u32;
+        let num_aux_segments: u32 = if p.aux_trace_width > 0 { 1 } else { 0 };
+        trace_info_pack = (trace_info_pack << 8) | num_aux_segments;
+        if num_aux_segments == 1 {
+            trace_info_pack = (trace_info_pack << 8) | (p.aux_trace_width as u32);
+            trace_info_pack = (trace_info_pack << 8) | (p.num_aux_segment_rands as u32);
+        }
+
+        vec![
+            BaseElement::new(trace_info_pack as u64),
+            BaseElement::new(p.trace_len as u64),
+            // Goldilocks modulus bytes LE: 0xFFFFFFFF00000001 => halves: 0x00000001, 0xFFFFFFFF
+            BaseElement::new(1u64),
+            BaseElement::new(0xFFFF_FFFFu64),
+            BaseElement::new(p.num_constraints as u64),
+            BaseElement::new(p.proof_options_packed),
+            BaseElement::new(p.grinding_factor as u64),
+            BaseElement::new(p.num_queries as u64),
+        ]
+    }
+
+    fn reconstruct_pub_inputs_to_elements_exact(
+        p: &ParsedProof,
+        child_type: &super::ood_eval::ChildAirType,
+    ) -> Vec<BaseElement> {
+        use super::VerifierPublicInputs;
+        use winter_math::ToElements as _;
+
+        match child_type {
+            super::ood_eval::ChildAirType::VerifierAir => {
+                // Reconstruct `VerifierPublicInputs::to_elements()` deterministically from the parsed fields.
+                // NOTE: `VerifierPublicInputs::to_elements()` pads fri_commitments to at least 1.
+                let fri_commitments_len = p.fri_commitments.len().max(1);
+                let mut fri_commitments: Vec<[BaseElement; 4]> = Vec::with_capacity(fri_commitments_len);
+                for c in p.fri_commitments.iter() {
+                    fri_commitments.push(*c);
+                }
+                if p.fri_commitments.is_empty() {
+                    fri_commitments.push([BaseElement::ZERO; 4]);
+                }
+
+                let pub_inputs = VerifierPublicInputs {
+                    statement_hash: p.verifier_statement_hash,
+                    trace_commitment: p.trace_commitment,
+                    comp_commitment: p.comp_commitment,
+                    fri_commitments,
+                    num_queries: p.num_queries,
+                    proof_trace_len: p.trace_len,
+                    g_trace: p.g_trace,
+                    pub_result: p.pub_result,
+                    expected_checkpoint_count: p.verifier_expected_checkpoint_count,
+                    params_digest: p.verifier_params_digest,
+                    expected_mode_counter: p.verifier_expected_mode_counter,
+                };
+                pub_inputs.to_elements()
+            }
+            _ => {
+                // For the generic app proofs in this repo, the Winterfell public input is a single BaseElement.
+                vec![p.pub_result]
+            }
+        }
+    }
+
+    let mut seed_material = reconstruct_context_to_elements_exact(proof_data);
+    seed_material.extend_from_slice(&reconstruct_pub_inputs_to_elements_exact(proof_data, &child_type));
+    let mut seed = builder.hash_elements_digest(&seed_material);
+
+    // reseeds
+    seed = builder.merge_digest(seed, proof_data.trace_commitment);
+    seed = builder.merge_digest(seed, proof_data.comp_commitment);
+    // IMPORTANT: bind OOD digest in-trace (no host-chosen FS knobs).
+    // Winterfell merge_ood_evaluations order: [trace_current, comp_current, trace_next, comp_next]
+    let mut ood_elems = Vec::new();
+    ood_elems.extend_from_slice(&proof_data.ood_trace_current);
+    ood_elems.extend_from_slice(&proof_data.ood_comp_current);
+    ood_elems.extend_from_slice(&proof_data.ood_trace_next);
+    ood_elems.extend_from_slice(&proof_data.ood_comp_next);
+    let ood_digest = builder.hash_elements_digest(&ood_elems);
+    seed = builder.merge_digest(seed, ood_digest);
+    for fri_root in &proof_data.fri_commitments {
+        seed = builder.merge_digest(seed, *fri_root);
+    }
+
+    // PoW/grinding check on current seed with nonce.
+    // Enforce pow_nonce is a 32-bit integer (u32) in-trace.
+    builder.qgen_assert_u32(proof_data.pow_nonce);
+    let pow_digest = builder.merge_digest_with_int(seed, proof_data.pow_nonce);
+    // Enforce PoW and canonical u64 extraction in-trace from pow_digest[0].
+    builder.capture_fri4_equals_hash0();
+    builder.decompose_fri4_u64_canonical(proof_data.grinding_factor as usize, 0);
+    let seed_nonce = pow_digest;
+
     // === Phase 4: Verify trace Merkle paths ===
     // AIR constraints enforce:
     // 1. merkle_step correctness (hash(left || right) with correct direction)
     // 2. Root verification (hash_state[0..3] == trace_commitment)
-    for query in &proof_data.trace_queries {
+    // Load the expected root digest for the trace commitment tree.
+    builder.set_expected_root(proof_data.trace_commitment);
+    for (q_idx, query) in proof_data.trace_queries.iter().enumerate() {
+        // Derive and bind the query index IN-TRACE, and export it into the next row's idx register.
+        // This closes the "derive honestly then choose any opening index" attack.
+        if domain_bits > 0 {
+            let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
+            builder.capture_fri4_equals_hash0();
+            let _pos = builder.decompose_fri4_u64_canonical(0, domain_bits);
+            builder.export_fri6_to_next_idx_reg();
+        } else {
+            // Invalid domain; keep idx at 0 (will fail elsewhere).
+            builder.set_merkle_index(0);
+        }
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
-        // Bind Merkle directions to the leaf index.
-        builder.set_merkle_index(query.position);
-
+        
         // Process Merkle authentication path
         for step in &query.merkle_path.steps {
             builder.merkle_step_from_index(step.sibling);
         }
         
-        // Verify computed root matches trace commitment
-        // AIR constraint enforces hash_state[0..3] == fri[0..3] (expected root)
-        let root_ok = builder.verify_root(proof_data.trace_commitment);
+        // Verify computed root matches the loaded expected trace commitment root.
+        let root_ok = builder.verify_root();
         if !root_ok {
             #[cfg(any(test, debug_assertions))]
             eprintln!("[verifier] trace Merkle root check failed at position={}", query.position);
@@ -449,18 +598,28 @@ pub fn append_proof_verification_with_options(
     }
 
     // === Phase 5: Verify composition Merkle paths ===
-    for query in &proof_data.comp_queries {
+    // Load the expected root digest for the composition commitment tree.
+    builder.set_expected_root(proof_data.comp_commitment);
+    for (q_idx, query) in proof_data.comp_queries.iter().enumerate() {
+        // Derive/bind the same query index for the composition commitment tree.
+        if domain_bits > 0 {
+            let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
+            builder.capture_fri4_equals_hash0();
+            let _pos = builder.decompose_fri4_u64_canonical(0, domain_bits);
+            builder.export_fri6_to_next_idx_reg();
+        } else {
+            builder.set_merkle_index(0);
+        }
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
-        builder.set_merkle_index(query.position);
         
         // Process Merkle authentication path
         for step in &query.merkle_path.steps {
             builder.merkle_step_from_index(step.sibling);
         }
         
-        // Verify computed root matches composition commitment
-        let root_ok = builder.verify_root(proof_data.comp_commitment);
+        // Verify computed root matches the loaded expected composition commitment root.
+        let root_ok = builder.verify_root();
         if !root_ok {
             #[cfg(any(test, debug_assertions))]
             eprintln!("[verifier] comp Merkle root check failed at position={}", query.position);
@@ -489,8 +648,8 @@ pub fn append_proof_verification_with_options(
         let comp_query = proof_data.comp_queries.get(q_idx);
         
         if let (Some(trace_q), Some(comp_q)) = (trace_query, comp_query) {
-            // Use fri_query.x which is already computed from the original LDE domain position
-            let position = proof_data.query_positions.get(q_idx).copied().unwrap_or(0);
+            // Use the proof-provided query position (should match transcript-derived position).
+            let position = trace_q.position;
             let x = fri_query.x;  // Already: offset * g_lde^position
             
             let expected_deep = compute_deep_value(
@@ -509,7 +668,9 @@ pub fn append_proof_verification_with_options(
             // For upper-half positions, the query is at the HIGH position
             // so actual f(x) = f_neg_x, not f_x
             let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
-            let is_upper_half = position >= lde_domain_size / 2;
+            // Upper-half test depends only on the top bit within the domain size (power of two).
+            let half = lde_domain_size / 2;
+            let is_upper_half = (position & half) != 0;
             let prover_deep = if is_upper_half {
                 fri_query.f_neg_x  // Upper half: actual f(x) is at high position
             } else {
@@ -536,7 +697,11 @@ pub fn append_proof_verification_with_options(
     // Track positions through FRI layers (like R1CS does)
     // Each layer halves the domain, so position folds: new_pos = old_pos % (domain_size / 2)
     let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
-    let mut folded_positions: Vec<usize> = proof_data.query_positions.clone();
+    let mut folded_positions: Vec<usize> = proof_data
+        .trace_queries
+        .iter()
+        .map(|q| q.position)
+        .collect();
     let mut current_domain_size = lde_domain_size;
     
     // NOTE: Length checks here are defense-in-depth. The REAL security is:
@@ -556,27 +721,33 @@ pub fn append_proof_verification_with_options(
             .copied()
             .unwrap_or([BaseElement::ZERO; 4]);  // Merkle verify_root will fail against zeros
             
+        // Load the expected root digest for this FRI layer's commitment tree.
+        builder.set_expected_root(layer_commitment);
         for (q_idx, query) in layer.queries.iter().enumerate() {
-            // Initialize hash state with the FRI layer values being committed
-            // For folding factor 2: the leaf is (val_low, val_high) pair = (f_x, f_neg_x)
-            builder.init_leaf(&[query.f_x, query.f_neg_x]);
-
-            // Merkle tree for this layer uses index u_j = pos % (domain_size/2).
-            let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
-            let u_j = if pos >= current_domain_size / 2 {
-                pos - (current_domain_size / 2)
+            // Derive and bind the FRI Merkle index u_j IN-TRACE.
+            // For folding factor 2, the Merkle index at layer `layer_idx` is the original position
+            // with the top (layer_idx+1) bits cleared, i.e. mask low (domain_bits-1-layer_idx) bits.
+            if domain_bits > 0 {
+                let bits_for_layer = domain_bits.saturating_sub(layer_idx + 1);
+                let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
+                builder.capture_fri4_equals_hash0();
+                let _u_j = builder.decompose_fri4_u64_canonical(0, bits_for_layer);
+                builder.export_fri6_to_next_idx_reg();
             } else {
-                pos
-            };
-            builder.set_merkle_index(u_j);
+                builder.set_merkle_index(0);
+            }
+
+            // Initialize hash state with the FRI layer values being committed.
+            // For folding factor 2: the leaf is (val_low, val_high) pair = (f_x, f_neg_x).
+            builder.init_leaf(&[query.f_x, query.f_neg_x]);
             
             // Verify Merkle path for this FRI layer
             for step in &query.merkle_path.steps {
                 builder.merkle_step_from_index(step.sibling);
             }
             
-            // Verify computed root matches FRI layer commitment
-            let root_ok = builder.verify_root(layer_commitment);
+            // Verify computed root matches the loaded expected FRI layer commitment root.
+            let root_ok = builder.verify_root();
             if !root_ok {
                 #[cfg(any(test, debug_assertions))]
                 eprintln!("[verifier] FRI Merkle root failed at layer={}, query={}", layer_idx, q_idx);
@@ -771,7 +942,7 @@ fn compute_deep_value(
     let mut t2_num = BaseElement::ZERO; // sum for z*g terms
     
     let mut coeff_idx = 0;
-
+    
     // Process trace columns - SAME gamma for both z and z*g terms
     for col in 0..trace_w {
         if coeff_idx >= deep_coeffs.len() {
@@ -779,7 +950,7 @@ fn compute_deep_value(
         }
         let gamma = deep_coeffs[coeff_idx];
         coeff_idx += 1;
-
+        
         let t_x = trace_values[col];
         
         // z term: (T(x) - T(z)) * γ
@@ -857,6 +1028,9 @@ fn evaluate_polynomial(coeffs: &[BaseElement], x: BaseElement) -> BaseElement {
 /// Parsed proof data ready for verification trace generation
 #[derive(Clone, Debug)]
 pub struct ParsedProof {
+    /// Proof-specific PoW nonce used by Winterfell for query position derivation.
+    pub pow_nonce: u64,
+
     // Commitments
     pub trace_commitment: MerkleDigest,
     pub comp_commitment: MerkleDigest,
@@ -867,6 +1041,8 @@ pub struct ParsedProof {
     pub ood_trace_next: Vec<BaseElement>,
     pub ood_comp_current: Vec<BaseElement>,  // C(z)
     pub ood_comp_next: Vec<BaseElement>,     // C(z*g) - needed for DEEP composition!
+    /// Digest of `merge_ood_evaluations(trace_ood_frame, comp_ood_frame)` used to reseed the public coin.
+    pub ood_evals_digest: MerkleDigest,
 
     // OOD verification parameters
     /// OOD challenge point z (derived from Fiat-Shamir)
@@ -898,7 +1074,10 @@ pub struct ParsedProof {
     pub fri_remainder_coeffs: Vec<BaseElement>,
     /// Whether FRI uses constant terminal (all values equal) vs polynomial
     pub fri_terminal_is_constant: bool,
-    /// Query positions in LDE domain (derived from Fiat-Shamir)
+    /// Query positions in LDE domain as parsed from the proof (Fiat–Shamir output).
+    ///
+    /// NOTE: VerifierAir should *re-derive and bind* these positions inside the trace, and then
+    /// use the derived positions to drive Merkle/FRI verification. This field is kept for parsing.
     pub query_positions: Vec<usize>,
     /// DEEP composition coefficients from Fiat-Shamir
     pub deep_coeffs: Vec<BaseElement>,
@@ -909,6 +1088,7 @@ pub struct ParsedProof {
 
     // Parameters
     pub trace_width: usize,
+    pub aux_trace_width: usize,
     pub comp_width: usize,
     pub trace_len: usize,
     pub lde_blowup: usize,
@@ -917,6 +1097,13 @@ pub struct ParsedProof {
     pub num_fri_layers: usize,
     pub fri_folding_factor: usize,
     pub grinding_factor: u32,
+    pub num_trace_segments: usize,
+    /// Proof-options encoding used by Winterfell in `ProofContext::to_elements()`.
+    /// This is the packed u32 stored as a field element:
+    ///   (field_extension<<24)|(fri_folding_factor<<16)|(fri_remainder_max_degree<<8)|blowup_factor
+    pub proof_options_packed: u64,
+    /// Number of auxiliary random elements encoded into `TraceInfo::to_elements()` when aux segment exists.
+    pub num_aux_segment_rands: usize,
 }
 
 impl ParsedProof {
@@ -996,6 +1183,7 @@ mod tests {
     fn make_test_proof() -> ParsedProof {
         use winterfell::math::StarkField;
         ParsedProof {
+            pow_nonce: 0,
             trace_commitment: [BaseElement::new(1); 4],
             comp_commitment: [BaseElement::new(2); 4],
             fri_commitments: vec![[BaseElement::new(3); 4], [BaseElement::new(4); 4]],
@@ -1003,6 +1191,7 @@ mod tests {
             ood_trace_next: vec![BaseElement::new(12), BaseElement::new(13)],
             ood_comp_current: vec![BaseElement::new(20)],
             ood_comp_next: vec![BaseElement::new(21)],
+            ood_evals_digest: [BaseElement::new(9); 4],
             // OOD verification parameters
             z: BaseElement::new(42), // Test OOD challenge point
             g_trace: BaseElement::get_root_of_unity(3), // trace_len=8, so log2=3
@@ -1025,6 +1214,7 @@ mod tests {
             g_lde: BaseElement::get_root_of_unity(6), // lde_domain_size=64, log2=6
             // Parameters
             trace_width: 2,
+            aux_trace_width: 0,
             comp_width: 1,
             trace_len: 8,
             lde_blowup: 8,
@@ -1033,6 +1223,9 @@ mod tests {
             num_fri_layers: 2,
             fri_folding_factor: 2,
             grinding_factor: 0,
+            num_trace_segments: 1,
+            proof_options_packed: (1u64 << 24) | (2u64 << 16) | (31u64 << 8) | 8u64,
+            num_aux_segment_rands: 0,
         }
     }
 

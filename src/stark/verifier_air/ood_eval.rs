@@ -560,7 +560,7 @@ impl OodFrame {
 /// (VDF, Fib, Bitcoin light client, etc.) without hardcoding their constraints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildAirType {
-    /// 27-column Verifier/Aggregator AIR
+    /// 32-column Verifier/Aggregator AIR
     /// Full STARK verification constraints (hash, Merkle, FRI, OOD)
     /// Used for recursive verification (VerifierAir verifying VerifierAir)
     VerifierAir,
@@ -579,7 +579,7 @@ impl ChildAirType {
     /// Number of columns for this AIR type
     pub fn trace_width(&self) -> usize {
         match self {
-            ChildAirType::VerifierAir => 27,
+            ChildAirType::VerifierAir => 32,
             ChildAirType::Generic { formula, .. } => formula.trace_width,
         }
     }
@@ -587,7 +587,7 @@ impl ChildAirType {
     /// Number of transition constraints for this AIR type
     pub fn num_constraints(&self) -> usize {
         match self {
-            ChildAirType::VerifierAir => 27,
+            ChildAirType::VerifierAir => 32,
             ChildAirType::Generic { formula, .. } => formula.constraints.len(),
         }
     }
@@ -742,9 +742,9 @@ pub fn evaluate_aggregator_constraints(
     evaluate_formula(&formula, trace_current, trace_next)
 }
 
-/// Verifier AIR constraints (27 columns)
+/// Verifier AIR constraints (32 columns)
 /// 
-/// This evaluates all 27 transition constraints for the Verifier/Aggregator AIR.
+/// This evaluates all 32 transition constraints for the Verifier/Aggregator AIR.
 /// The constraints check RPO hash rounds, Merkle paths, FRI folding, and OOD verification.
 fn evaluate_verifier_constraints(
     trace_current: &[BaseElement],
@@ -843,7 +843,7 @@ pub fn verify_ood_constraint_equation(
 /// 
 /// # Child Types
 /// 
-/// - `VerifierAir`: 27-column Verifier/Aggregator constraints (recursive verification)
+/// - `VerifierAir`: 32-column Verifier/Aggregator constraints (recursive verification)
 /// - `Generic`: Formula-as-witness for truly generic verification (apps like VDF, Fib, etc.)
 pub fn verify_ood_constraint_equation_typed(
     ood_frame: &OodFrame,
@@ -907,7 +907,10 @@ pub fn verify_ood_constraint_equation_typed(
     // BOUNDARY CONSTRAINT
     // Assertion: column 1, step (trace_len - 1), equals pub_result
     // ==============================================================
-    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) { 26 } else { 1 };
+    // For VerifierAir children we use aux[3] (checkpoint counter) as the boundary column in the
+    // multiply-through OOD equation (mirrors `ood_eval_r1cs`). With the dedicated idx_reg column,
+    // aux[3] moved from col 26 -> col 31 (idx_reg + root_reg added).
+    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) { 27 } else { 1 };
     let boundary_value = ood_frame.trace_current.get(boundary_col)
         .copied()
         .unwrap_or(BaseElement::ZERO) - params.pub_result;
@@ -1183,11 +1186,15 @@ mod tests {
             next[i] = val; // Copy constraint
         }
         
-        // Aux columns (23-26)
-        current[23] = BaseElement::new(7); // Round counter = 7 (Nop/Squeeze state)
-        next[23] = BaseElement::new(7);
+        // idx_reg column (23)
+        current[23] = BaseElement::ZERO;
+        next[23] = BaseElement::ZERO;
+
+        // Aux columns (24-27)
+        current[24] = BaseElement::new(7); // Round counter = 7 (Nop/Squeeze state)
+        next[24] = BaseElement::new(7);
         
-        for i in 24..27 {
+        for i in 25..28 {
             current[i] = BaseElement::ZERO;
             next[i] = BaseElement::ZERO;
         }

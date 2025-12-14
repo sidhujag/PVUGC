@@ -14,7 +14,7 @@ use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
 use once_cell::sync::Lazy;
 use winter_crypto::hashers::Rp64_256;
-use winter_crypto::{DefaultRandomCoin, Digest, MerkleTree};
+use winter_crypto::{DefaultRandomCoin, MerkleTree};
 use winter_math::fields::f64::BaseElement;
 use winter_math::{FieldElement, ToElements};
 use winterfell::{Air, Proof, ProofOptions, Prover, Trace};
@@ -89,7 +89,7 @@ fn load_or_build_inner_crs_keys() -> (ProvingKey<Bls12_377>, VerifyingKey<Bls12_
             vdf_ok, cubic_ok
         );
         if vdf_ok && cubic_ok {
-            return (pk, vk);
+        return (pk, vk);
         }
     }
 
@@ -377,8 +377,10 @@ fn prove_verifier_air_over_child(
     // Build the verifier trace first, then derive the expected counters from its final row.
     let trace = VerifierProver::new(verifier_options.clone()).build_verification_trace(child, child_type);
     let last = trace.length() - 1;
-    let expected_mode_counter = trace.get(24, last).as_int() as usize;
-    let expected_checkpoint_count = trace.get(26, last).as_int() as usize;
+    // NOTE: with the dedicated idx_reg column, aux columns shifted by +1:
+    // aux[1] (mode counter) is at col 29, aux[3] (checkpoint counter) at col 31.
+    let expected_mode_counter = trace.get(29, last).as_int() as usize;
+    let expected_checkpoint_count = trace.get(31, last).as_int() as usize;
 
     let statement_hash = compute_statement_hash_sponge(child);
     let params_digest = [

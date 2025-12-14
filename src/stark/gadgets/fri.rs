@@ -203,9 +203,9 @@ pub fn verify_fri_layers_gl(
                 let pos_bits = pos_prev.to_bits_le()?;
                 let half_bit_idx = ilog2_pow2(row_length);
                 let sel = pos_bits.get(half_bit_idx).ok_or(SynthesisError::Unsatisfiable)?;
-                let expected_value_fp =
+                    let expected_value_fp =
                     FpVar::<InnerFr>::conditionally_select(sel, &v_hi_fp, &v_lo_fp)?;
-                enforce_gl_eq(&current[j], &expected_value_fp)?;
+                    enforce_gl_eq(&current[j], &expected_value_fp)?;
             }
 
             // Fold to next layer using Merkle-checked pairs

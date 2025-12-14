@@ -39,7 +39,7 @@
 //! This represents a hash-chain-like accumulation over the child hashes.
 
 use winterfell::{
-    math::{fields::f64::BaseElement, FieldElement, StarkField},
+    math::{fields::f64::BaseElement, FieldElement},
     Air, AirContext, Assertion, EvaluationFrame, ProofOptions, TraceInfo,
     TransitionConstraintDegree,
 };
@@ -871,7 +871,7 @@ pub fn build_verifying_aggregator_trace(
     let total_len = (child0_len + child1_len + binding_rows).next_power_of_two();
     
     let mut builder = VerifierTraceBuilder::new(total_len);
-
+    
     // SECURITY / API NOTE:
     // This function is used to build a *verifying aggregator* node which verifies 2 child proofs.
     // The child AIR type (and for Generic mode: the interpreter/formula) must be supplied by the
@@ -977,7 +977,7 @@ use super::verifier_air::{VerifierPublicInputs, prover::VerifierProver};
 /// Generate a Verifying Aggregator STARK proof
 /// 
 /// This creates a STARK proof that verifies 2 child proofs.
-/// Uses the 27-column VerifierAir structure.
+/// Uses the 32-column VerifierAir structure.
 /// 
 /// # Architecture
 /// 
@@ -1026,8 +1026,10 @@ pub fn generate_verifying_aggregator_proof(
     //
     // aux[1] is the mode counter, aux[3] is the checkpoint counter.
     let last = trace.length() - 1;
-    let expected_mode_counter = trace.get(24, last).as_int() as usize;
-    let total_checkpoints = trace.get(26, last).as_int() as usize;
+    // NOTE: with the dedicated idx_reg column, aux columns shifted by +1:
+    // aux[1] (mode counter) is at col 29, aux[3] (checkpoint counter) at col 31.
+    let expected_mode_counter = trace.get(29, last).as_int() as usize;
+    let total_checkpoints = trace.get(31, last).as_int() as usize;
     
     // Compute interpreter hash for the child proofs.
     //
@@ -1073,6 +1075,7 @@ pub fn generate_verifying_aggregator_proof(
 /// 
 /// This creates a unique hash that binds both child proofs together.
 /// Uses RPO sponge to match what the trace builder computes.
+#[allow(dead_code)]
 fn compute_combined_statement_hash(
     result0: &VerificationResult,
     result1: &VerificationResult,

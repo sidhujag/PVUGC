@@ -18,6 +18,7 @@ const INIT_KIND_RESET_WITH_LEN: u64 = 8;
 const INIT_KIND_LOAD_CAPACITY4: u64 = 9;
 const INIT_KIND_COPY_DIGEST_FROM_RATE: u64 = 10;
 const INIT_KIND_MERKLE_PREP_MERGE8: u64 = 11;
+const INIT_KIND_LOAD_ROOT4: u64 = 12;
 
 // ============================================================================
 // TRACE BUILDER
@@ -33,6 +34,10 @@ pub struct VerifierTraceBuilder {
     hash_state: [BaseElement; HASH_STATE_WIDTH],
     /// Current FRI working state
     fri_state: [BaseElement; 8],
+    /// Dedicated Merkle index register (persists across hash plumbing ops).
+    idx_reg: BaseElement,
+    /// Expected-root register (4 elements): Merkle root digest being verified against.
+    root_reg: [BaseElement; 4],
     /// Current auxiliary state
     /// aux[0]: round counter (0-6 during permute, 7 otherwise)
     /// aux[1]: reserved for flags
@@ -53,6 +58,8 @@ impl VerifierTraceBuilder {
             trace,
             hash_state: [BaseElement::ZERO; HASH_STATE_WIDTH],
             fri_state: [BaseElement::ZERO; 8],
+            idx_reg: BaseElement::ZERO,
+            root_reg: [BaseElement::ZERO; 4],
             aux_state: [BaseElement::ZERO; 4],
         }
     }
@@ -81,9 +88,17 @@ impl VerifierTraceBuilder {
             self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + i].push(self.fri_state[i]);
         }
 
+        // Write idx register column
+        self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 8].push(self.idx_reg);
+
+        // Write expected-root register columns
+        for j in 0..4 {
+            self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 9 + j].push(self.root_reg[j]);
+        }
+
         // Write auxiliary columns
         for i in 0..4 {
-            self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 8 + i].push(self.aux_state[i]);
+            self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 13 + i].push(self.aux_state[i]);
         }
 
         self.row += 1;
@@ -100,6 +115,7 @@ impl VerifierTraceBuilder {
             // Packed encoding:
             // - statement_count contributes +1 (mode 4)
             // - params_count contributes +4096 (mode 5)
+            // - root_count contributes +2^32 (mode 0)
             //
             // This prevents a prover from skipping specific binding steps.
             let mode = self.aux_state[2].as_int();
@@ -107,6 +123,8 @@ impl VerifierTraceBuilder {
                 self.aux_state[1] = self.aux_state[1] + BaseElement::ONE;
             } else if mode == 5 {
                 self.aux_state[1] = self.aux_state[1] + BaseElement::new(4096);
+            } else if mode == 0 {
+                self.aux_state[1] = self.aux_state[1] + BaseElement::new(1u64 << 32);
             }
         }
     }
@@ -175,10 +193,11 @@ impl VerifierTraceBuilder {
     /// The row shows the state BEFORE absorption.
     /// The next row (typically Permute or Nop) shows the post-absorption state.
     pub fn absorb(&mut self, input: &[BaseElement; 8]) {
-        self.aux_state[0] = BaseElement::new(7); // Not in permute
-        // Provide absorbed block to the AIR via fri[0..8].
-        self.fri_state = [BaseElement::ZERO; 8];
-        self.fri_state.copy_from_slice(input);
+        // Provide absorbed block to the AIR via fri[0..7]. The dedicated Merkle index register
+        // is now `idx_reg`, so there is no need to special-case any absorbed limb.
+        self.fri_state = *input;
+        // Keep aux[0]=7 (not in permute) on Absorb rows.
+        self.aux_state[0] = BaseElement::new(7);
         
         // Emit row BEFORE modifying (shows pre-absorption state)
         self.emit_row(VerifierOp::Absorb);
@@ -208,6 +227,8 @@ impl VerifierTraceBuilder {
         
         // Reset round counter for non-permute operations
         self.aux_state[0] = BaseElement::new(7); // 7 indicates "not in permute"
+        // Padding Nop row must use a valid Nop sub-mode.
+        self.aux_state[2] = BaseElement::ZERO;
         
         // Padding row for cycle alignment (shows final state after all rounds)
         self.emit_row(VerifierOp::Nop);
@@ -232,15 +253,343 @@ impl VerifierTraceBuilder {
         ]
     }
 
+    // ============================================================================
+    // DEFAULT-RANDOM-COIN HELPERS (Winterfell-compatible)
+    // ============================================================================
+    //
+    // Winterfell's DefaultRandomCoin is counter-based and uses Rp64_256 as:
+    // - seed := hash_elements(context.to_elements() || pub_inputs.to_elements())
+    // - reseed := merge(seed, digest)
+    // - draw  := merge_with_int(seed, counter).first_limb (seed unchanged)
+    //
+    // We implement the required hash primitives using the already-constrained sponge ops:
+    // reset_hash_with_len(len) + absorb(blocks) + permute() + copy_digest_from_rate_to_capacity().
+
+    /// Constrained Rp64_256 hash of field elements, returning a 4-limb digest.
+    ///
+    /// This mirrors `Hasher::hash_elements(elements)` for BaseElement inputs.
+    pub(crate) fn hash_elements_digest(&mut self, elements: &[BaseElement]) -> [BaseElement; 4] {
+        let len = elements.len();
+        self.reset_hash_with_len(len);
+
+        for chunk in elements.chunks(8) {
+            let mut block = [BaseElement::ZERO; 8];
+            for (i, &e) in chunk.iter().enumerate() {
+                block[i] = e;
+            }
+            self.absorb(&block);
+            self.permute();
+        }
+
+        // `hash_elements` returns digest from rate[0..3] after permutation(s).
+        self.copy_digest_from_rate_to_capacity();
+        [self.hash_state[0], self.hash_state[1], self.hash_state[2], self.hash_state[3]]
+    }
+
+    /// Constrained `merge(seed, digest)` where both are 4-limb digests.
+    pub(crate) fn merge_digest(&mut self, seed: [BaseElement; 4], digest: [BaseElement; 4]) -> [BaseElement; 4] {
+        let mut block = [BaseElement::ZERO; 8];
+        block[0..4].copy_from_slice(&seed);
+        block[4..8].copy_from_slice(&digest);
+        self.hash_elements_digest(&block)
+    }
+
+    /// Constrained `merge_with_int(seed, x)` as `hash_elements([seed0..3, x])`.
+    pub(crate) fn merge_digest_with_int(&mut self, seed: [BaseElement; 4], x: u64) -> [BaseElement; 4] {
+        let mut block = [BaseElement::ZERO; 5];
+        block[0..4].copy_from_slice(&seed);
+        block[4] = BaseElement::new(x);
+        self.hash_elements_digest(&block)
+    }
+
+    /// Bind `fri[4] == hash_state[0]` on a dedicated Nop row (aux[2] = 11).
+    ///
+    /// This uses the existing capture constraint in `constraints.rs` and lets us
+    /// “export” a transcript-derived u64 limb into the Merkle index register.
+    pub(crate) fn capture_fri4_equals_hash0(&mut self) {
+        self.fri_state[4] = self.hash_state[0];
+        // Anchor QueryGen state for the subsequent decomposition block.
+        // This prevents "pow2=0, acc=anything" bypasses.
+        self.fri_state[6] = BaseElement::ZERO; // acc
+        self.fri_state[7] = BaseElement::ONE;  // pow2
+        self.aux_state[2] = BaseElement::new(11);
+        self.emit_row(VerifierOp::Nop);
+        self.aux_state[2] = BaseElement::ZERO;
+    }
+
+    /// Export the current accumulator in `fri[6]` into the *next row's* Merkle index register `idx_reg`.
+    ///
+    /// SECURITY: this is a cross-row binding enforced in AIR:
+    /// on the export row (aux[2]=12): `next.idx_reg == cur.fri[6]`.
+    pub(crate) fn export_fri6_to_next_idx_reg(&mut self) {
+        let v = self.fri_state[6];
+        self.aux_state[0] = BaseElement::new(7);
+        self.aux_state[2] = BaseElement::new(12);
+        self.emit_row(VerifierOp::Nop);
+        // Prepare next row to actually carry the index.
+        self.idx_reg = v;
+        self.aux_state[2] = BaseElement::ZERO;
+    }
+
+    /// Fully decompose the current `fri[4]` (which must already be bound to the transcript via `capture_fri4_equals_hash0`)
+    /// into a canonical 64-bit integer, while optionally:
+    /// - enforcing PoW trailing-zero condition on the lowest `pow_zero_bits` bits (<= 32), and
+    /// - returning the low `capture_bits` bits (<= 32) as a `u32` (for query positions).
+    ///
+    /// SECURITY:
+    /// - We range-bind by shifting out *all 64 bits* and enforcing terminal quotient == 0 (mode 8).
+    /// - We enforce Goldilocks canonicality via a dedicated check row (mode 9) using the (hi32,low32) limbs.
+    /// - PoW: for the first `pow_zero_bits` steps, we use mode 10 which forces `bit==0` in-circuit.
+    pub fn decompose_fri4_u64_canonical(
+        &mut self,
+        pow_zero_bits: usize,
+        capture_bits: usize,
+    ) -> u32 {
+        assert!(pow_zero_bits <= 32, "pow_zero_bits must be <= 32");
+        assert!(capture_bits <= 32, "capture_bits must be <= 32");
+
+        // Phase A: shift out 32 bits to obtain hi32, while accumulating the low `capture_bits` bits.
+        //
+        // We use three Nop sub-modes:
+        // - aux[2]=10 (PoWShift): shift with bit forced to 0 (for pow_zero_bits)
+        // - aux[2]=6  (QueryGen): shift + accumulate (for capture_bits)
+        // - aux[2]=13 (Freeze):   shift but keep accumulator constant (after capture_bits)
+        let mut x_cur = self.fri_state[4].as_int();
+        self.aux_state[0] = BaseElement::new(7);
+        self.fri_state[6] = BaseElement::ZERO; // acc (masked low bits)
+        // Always start pow2 at 1 and satisfy the enforced pow2 doubling constraints.
+        self.fri_state[7] = BaseElement::ONE;
+
+        let mut captured: u32 = 0;
+        let mut acc_u64: u64 = 0;
+        let mut pow2_u64: u64 = 1;
+
+        for i in 0..32 {
+            let bit = x_cur & 1;
+            let x_next = x_cur >> 1;
+
+            // Host-side tracking of the masked accumulator.
+            if i < capture_bits {
+                if bit == 1 {
+                    acc_u64 = acc_u64.wrapping_add(pow2_u64);
+                }
+                pow2_u64 = pow2_u64.wrapping_mul(2);
+                if i + 1 == capture_bits {
+                    captured = acc_u64 as u32;
+                }
+            }
+
+            // Witness for in-trace accumulator/pow2.
+            let acc_cur = self.fri_state[6];
+            let pow2_cur = self.fri_state[7];
+            let (acc_next, pow2_next, mode) = if i < pow_zero_bits {
+                // PoW shift: bit must be 0 (enforced by constraints). Keep acc unchanged.
+                // pow2 still must follow doubling constraints.
+                (acc_cur, pow2_cur + pow2_cur, BaseElement::new(10))
+            } else if i < capture_bits {
+                // Accumulate the first `capture_bits` bits.
+                let acc_next = if bit == 1 { acc_cur + pow2_cur } else { acc_cur };
+                let pow2_next = pow2_cur + pow2_cur;
+                (acc_next, pow2_next, BaseElement::new(6))
+            } else {
+                // Freeze accumulator for remaining shifts.
+                (acc_cur, pow2_cur, BaseElement::new(13))
+            };
+
+            self.aux_state[2] = mode;
+            self.fri_state[5] = BaseElement::new(bit);
+            self.qgen_step(x_next, acc_next, pow2_next);
+            x_cur = x_next;
+        }
+
+        // After 32 shifts:
+        // - fri[4] is now hi32 (as field element)
+        // - fri[6] is the masked accumulator (pos)
+        let hi32_u64 = self.fri_state[4].as_int();
+
+        // Canonicality check row (mode 9): enforce hi32 != 0xFFFF_FFFF by requiring an inverse witness.
+        let all_ones = 0xFFFF_FFFFu64;
+        let diff = BaseElement::new(hi32_u64) - BaseElement::new(all_ones);
+        let w = if diff == BaseElement::ZERO { BaseElement::ZERO } else { diff.inv() };
+        self.aux_state[2] = BaseElement::new(9);
+        // Keep fri[4]=hi32 and fri[6]=acc intact; fri[5] carries the inverse witness.
+        self.fri_state[4] = BaseElement::new(hi32_u64);
+        self.fri_state[5] = w;
+        self.emit_row(VerifierOp::Nop);
+
+        // Phase B: range-bind hi32 by shifting 32 more times; keep accumulator constant by setting pow2=0.
+        self.aux_state[2] = BaseElement::new(6);
+        self.fri_state[7] = BaseElement::ZERO; // pow2=0 => acc_update keeps acc unchanged
+        let mut hi_cur = hi32_u64;
+        for _ in 0..32 {
+            let bit = hi_cur & 1;
+            let hi_next = hi_cur >> 1;
+            self.fri_state[5] = BaseElement::new(bit);
+            self.qgen_step(hi_next, self.fri_state[6], BaseElement::ZERO);
+            hi_cur = hi_next;
+        }
+
+        // Terminal quotient must be zero (mode 8): fri[4] == 0.
+        self.aux_state[2] = BaseElement::new(8);
+        self.fri_state[4] = BaseElement::new(self.fri_state[4].as_int());
+        self.emit_row(VerifierOp::Nop);
+
+        self.aux_state[2] = BaseElement::ZERO;
+        captured
+    }
+
+    // ============================================================================
+    // QUERY-GENERATION BIT GADGETS (aux[2] = 6 on Nop rows)
+    // ============================================================================
+
+    /// Start a QueryGen block for bit/shift arithmetic.
+    ///
+    /// Layout (current row values shown to constraints):
+    /// - fri[4] = x (shift register)
+    /// - fri[5] = bit (LSB of x)
+    /// - fri[6] = acc
+    /// - fri[7] = pow2
+    ///
+    /// Constraints (on Nop rows with aux[2]=6) enforce:
+    /// - x_cur = 2*x_next + bit_cur
+    /// - bit binary
+    /// - acc_next = acc_cur + bit_cur * pow2_cur
+    /// - pow2_next = 2 * pow2_cur
+    fn qgen_begin(&mut self, x: u64) {
+        self.aux_state[0] = BaseElement::new(7);
+        self.aux_state[2] = BaseElement::new(6);
+        self.fri_state[4] = BaseElement::new(x);
+        self.fri_state[5] = BaseElement::new(x & 1);
+        self.fri_state[6] = BaseElement::ZERO; // acc
+        self.fri_state[7] = BaseElement::ONE;  // pow2
+    }
+
+    /// Advance one QueryGen step by emitting a Nop row and updating the registers to the next state.
+    fn qgen_step(&mut self, x_next: u64, acc_next: BaseElement, pow2_next: BaseElement) {
+        // Caller must set fri[5] for the current row (bit).
+        self.emit_row(VerifierOp::Nop);
+
+        // Update registers for next row.
+        self.fri_state[4] = BaseElement::new(x_next);
+        self.fri_state[6] = acc_next;
+        self.fri_state[7] = pow2_next;
+        // fri[5] will be set from the new x on the next step.
+    }
+
+    /// Enforce PoW/grinding: low `g` bits of `x` are zero, by repeatedly shifting with bit=0.
+    pub fn qgen_enforce_trailing_zeros(&mut self, x: u64, g: usize) {
+        self.qgen_begin(x);
+        for _ in 0..g {
+            // Require bit=0 by choosing x_next = x_cur >> 1 and letting the constraint fail if odd.
+            let x_cur = self.fri_state[4].as_int();
+            let x_next = x_cur >> 1;
+            let acc_next = self.fri_state[6];
+            let pow2_next = self.fri_state[7] + self.fri_state[7]; // *2
+            // Force bit=0 in witness for this step.
+            self.fri_state[5] = BaseElement::ZERO;
+            self.qgen_step(x_next, acc_next, pow2_next);
+        }
+        // Handoff row: make the final qgen step's `next` values explicit.
+        // (Transition constraints reference `fri_next`.)
+        self.aux_state[2] = BaseElement::ZERO;
+        self.emit_row(VerifierOp::Nop);
+    }
+
+    /// Mask `x` to the low `bits` bits by extracting bits via shift, and accumulating.
+    /// Returns the masked value as a BaseElement.
+    pub fn qgen_mask_low_bits(&mut self, x: u64, bits: usize) -> BaseElement {
+        self.qgen_begin(x);
+        for _ in 0..bits {
+            let x_cur = self.fri_state[4].as_int();
+            let bit = x_cur & 1;
+            let x_next = x_cur >> 1;
+            let acc_cur = self.fri_state[6];
+            let pow2_cur = self.fri_state[7];
+            let acc_next = if bit == 1 { acc_cur + pow2_cur } else { acc_cur };
+            let pow2_next = pow2_cur + pow2_cur;
+            self.fri_state[5] = BaseElement::new(bit);
+            self.qgen_step(x_next, acc_next, pow2_next);
+        }
+        let out = self.fri_state[6];
+        // Same handoff row rationale as above: expose final `next` values.
+        self.aux_state[2] = BaseElement::ZERO;
+        self.emit_row(VerifierOp::Nop);
+        out
+    }
+
+    /// Enforce that `x` fits in 32 bits (i.e. x < 2^32), by shifting out 32 bits and
+    /// then asserting the remaining high part is zero.
+    ///
+    /// This avoids Winterfell's `merge_with_int` branch for `value >= MODULUS` and ensures
+    /// `pow_nonce` is an actual integer knob rather than an arbitrary field element.
+    pub fn qgen_assert_u32(&mut self, x: u64) {
+        // Shift-right 32 times using QueryGen gadget (aux[2]=6).
+        self.qgen_begin(x);
+        for _ in 0..32 {
+            let x_cur = self.fri_state[4].as_int();
+            let bit = x_cur & 1;
+            let x_next = x_cur >> 1;
+            // Must satisfy the QueryGen accumulator constraints even if we don't use it.
+            let acc_cur = self.fri_state[6];
+            let pow2_cur = self.fri_state[7];
+            let acc_next = if bit == 1 { acc_cur + pow2_cur } else { acc_cur };
+            let pow2_next = pow2_cur + pow2_cur;
+            self.fri_state[5] = BaseElement::new(bit);
+            self.qgen_step(x_next, acc_next, pow2_next);
+        }
+
+        // Now fri[4] == x >> 32. Enforce it is zero on a dedicated Nop row (aux[2]=8).
+        self.aux_state[0] = BaseElement::new(7);
+        self.aux_state[2] = BaseElement::new(8);
+        self.fri_state[4] = BaseElement::new(self.fri_state[4].as_int()); // keep current value
+        self.emit_row(VerifierOp::Nop);
+
+        // Return to default.
+        self.aux_state[2] = BaseElement::ZERO;
+    }
+
+    /// Enforce that two derived query positions are distinct by adding a single Nop row
+    /// with aux[2]=7 and the constraint (pos_i - pos_j) * inv = 1.
+    pub fn enforce_distinct_positions(&mut self, pos_i: usize, pos_j: usize) {
+        use winterfell::math::FieldElement;
+
+        // Insert a "special" barrier row so the preceding normal row doesn't enforce copy constraints
+        // into our distinctness check (which reuses fri scratch columns arbitrarily).
+        //
+        // We use an Absorb row with an all-zero absorbed block so the hash state is unchanged.
+        self.aux_state[2] = BaseElement::ZERO;
+        self.absorb(&[BaseElement::ZERO; 8]);
+
+        self.aux_state[0] = BaseElement::new(7);
+        self.aux_state[2] = BaseElement::new(7);
+
+        let a = BaseElement::new(pos_i as u64);
+        let b = BaseElement::new(pos_j as u64);
+        let diff = a - b;
+        // If diff == 0, inverse is undefined; use 0 and let constraints fail (no panic).
+        let inv = if diff == BaseElement::ZERO { BaseElement::ZERO } else { diff.inv() };
+
+        // Place values into fri scratch columns, leaving fri[4] (idx register) untouched.
+        // Distinctness constraint uses (fri[5] - fri[6]) * fri[7] = 1.
+        self.fri_state[5] = a;
+        self.fri_state[6] = b;
+        self.fri_state[7] = inv;
+
+        self.emit_row(VerifierOp::Nop);
+
+        // Clear mode back to default.
+        self.aux_state[2] = BaseElement::ZERO;
+    }
+
     /// Verify a single Merkle path step
     /// 
     /// Matches Winterfell's merge function: parent = hash_elements(left || right)
     /// Output is from rate portion (indices 4-7), copied to capacity (0-3) for next step.
     pub fn set_merkle_index(&mut self, idx: usize) {
-        self.fri_state[4] = BaseElement::new(idx as u64);
+        self.idx_reg = BaseElement::new(idx as u64);
     }
 
-    /// Merkle path step using the current index in fri[4].
+    /// Merkle path step using the current index in `idx_reg`.
     ///
     /// This enforces direction bits are consistent with the index:
     /// dir = idx & 1; idx_next = idx >> 1.
@@ -248,7 +597,7 @@ impl VerifierTraceBuilder {
         // Current digest must be in capacity[0..3].
         let current_digest = [self.hash_state[0], self.hash_state[1], self.hash_state[2], self.hash_state[3]];
 
-        let idx_u64 = self.fri_state[4].as_int();
+        let idx_u64 = self.idx_reg.as_int();
         let dir_bit_u64 = idx_u64 & 1;
         let idx_next_u64 = idx_u64 >> 1;
 
@@ -276,21 +625,17 @@ impl VerifierTraceBuilder {
             }
         }
 
-        // Update index for next level (this is constrained by Init-kind 11 via fri[4] transition).
-        self.fri_state[4] = BaseElement::new(idx_next_u64);
+        // Update index for next level (this is constrained by Init-kind 11 via idx_reg transition).
+        self.idx_reg = BaseElement::new(idx_next_u64);
 
         // Reset aux[0] back to 7 for normal operations.
         self.aux_state[0] = BaseElement::new(7);
 
         // Permute to compute the merge hash.
         self.permute();
-
+        
         // `hash_elements` output digest is in rate[0..3] after permutation.
         self.copy_digest_from_rate_to_capacity();
-
-        // Preserve the Merkle index for the next step.
-        // NOTE: copy_digest_from_rate_to_capacity() clears fri_state, so we must restore it here.
-        self.fri_state[4] = BaseElement::new(idx_next_u64);
     }
 
     /// Perform FRI folding step
@@ -393,14 +738,14 @@ impl VerifierTraceBuilder {
     }
 
     /// Verify security-parameter digest binding (num_queries/blowup/grinding/folding/trace_len).
-    ///
+    /// 
     /// The AIR constraint will verify hash_state[0..3] == pub_inputs.params_digest when aux[2]=5.
     pub fn verify_params_digest(&mut self, params_digest: [BaseElement; 4]) -> bool {
         // Constrained load: move the computed digest into hash_state[0..3].
         // This is modeled as an Init(kind=LOAD_CAPACITY4) transition to avoid
         // any "out of band" hash_state mutation between rows.
         self.load_capacity4_from_fri(params_digest);
-
+        
         // Set mode = PARAMS VERIFICATION (aux[2] = 5)
         self.aux_state[2] = BaseElement::new(5u64);
         // Equality constraint on DeepCompose is unconditional; keep fri[6..7] equal here.
@@ -408,6 +753,25 @@ impl VerifierTraceBuilder {
         self.fri_state[7] = BaseElement::ZERO;
         self.emit_row(VerifierOp::DeepCompose);
         true
+    }
+
+    /// Constrained load of the expected Merkle root digest into `root_reg`.
+    ///
+    /// This must be called before verifying Merkle paths for a commitment tree.
+    /// It is implemented via Init(kind=LOAD_ROOT4), which updates `root_reg`
+    /// from `fri[0..3]` in the transition constraints, while leaving `hash_state`
+    /// unchanged (copy).
+    pub fn set_expected_root(&mut self, expected_root: [BaseElement; 4]) {
+        self.fri_state = [BaseElement::ZERO; 8];
+        self.fri_state[0..4].copy_from_slice(&expected_root);
+        self.aux_state[0] = BaseElement::new(INIT_KIND_LOAD_ROOT4);
+        self.emit_row(VerifierOp::Init);
+
+        // Apply the root_reg update for subsequent rows.
+        self.root_reg = expected_root;
+
+        // Reset aux[0] back to 7 (not in permute) for normal operations.
+        self.aux_state[0] = BaseElement::new(7);
     }
 
     /// Verify DEEP composition value
@@ -495,7 +859,7 @@ impl VerifierTraceBuilder {
     ///
     /// # Child Types
     ///
-    /// - `VerifierAir`: 27-column Verifier/Aggregator constraints (recursive verification)
+    /// - `VerifierAir`: 32-column Verifier/Aggregator constraints (recursive verification)
     /// - `Generic`: Formula-as-witness for app proofs (VDF, Fib, Bitcoin, etc.)
     pub fn verify_ood_constraints_typed(
         &mut self,
@@ -626,7 +990,7 @@ impl VerifierTraceBuilder {
         let zerofier_num = z_pow_n - BaseElement::ONE;
         let z_minus_1 = z - BaseElement::ONE;
 
-        // 27 transition constraints (VerifierAir) evaluated with *child* public inputs.
+        // 32 transition constraints (VerifierAir) evaluated with *child* public inputs.
         // We must supply these so statement/params/root checks are evaluated correctly at OOD.
         use super::constraints::evaluate_all;
         use super::VerifierPublicInputs;
@@ -653,12 +1017,12 @@ impl VerifierTraceBuilder {
         let mut constraints = vec![BaseElement::ZERO; super::VERIFIER_TRACE_WIDTH];
         evaluate_all(&frame, &periodic_values, &mut constraints, &pub_inputs);
 
-        if constraint_coeffs.len() < 27 + 8 || constraints.len() < 27 {
+        if constraint_coeffs.len() < 32 + 8 || constraints.len() < 32 {
             return false;
         }
 
         let mut transition_sum = BaseElement::ZERO;
-        for i in 0..27 {
+        for i in 0..32 {
             transition_sum += constraint_coeffs[i] * constraints[i];
         }
 
@@ -675,18 +1039,18 @@ impl VerifierTraceBuilder {
         // capacity[0..3] at columns 3..6 are zero at row 0
         for j in 0..4 {
             let col = 3 + j;
-            initial_sum += constraint_coeffs[27 + j] * ood_frame.trace_current[col];
+            initial_sum += constraint_coeffs[32 + j] * ood_frame.trace_current[col];
         }
-        // aux[1] initial = 0 (col 24)
-        initial_sum += constraint_coeffs[31] * ood_frame.trace_current[24];
-        // aux[3] initial = 0 (col 26)
-        initial_sum += constraint_coeffs[32] * ood_frame.trace_current[26];
+        // aux[1] initial = 0 (col 29; idx_reg + root_reg added)
+        initial_sum += constraint_coeffs[36] * ood_frame.trace_current[29];
+        // aux[3] initial = 0 (col 31)
+        initial_sum += constraint_coeffs[37] * ood_frame.trace_current[31];
 
         let expected_mode = BaseElement::new(expected_mode_counter as u64);
         let expected_ckpt = BaseElement::new(expected_checkpoint_count as u64);
-        let final_aux1 = ood_frame.trace_current[24] - expected_mode;
-        let final_aux3 = ood_frame.trace_current[26] - expected_ckpt;
-        let final_term = constraint_coeffs[33] * final_aux1 + constraint_coeffs[34] * final_aux3;
+        let final_aux1 = ood_frame.trace_current[29] - expected_mode;
+        let final_aux3 = ood_frame.trace_current[31] - expected_ckpt;
+        let final_term = constraint_coeffs[38] * final_aux1 + constraint_coeffs[39] * final_aux3;
 
         // Multiply-through equation:
         // transition_sum * exemption^2 * (z-1) + initial_sum * (z^n-1) * exemption + final_term * (z^n-1) * (z-1)
@@ -719,29 +1083,25 @@ impl VerifierTraceBuilder {
     /// Verify Merkle root in AIR (enforced by transition constraints)
     /// 
     /// This emits a DeepCompose row that the AIR constraint verifies:
-    /// hash_state[0..3] == fri_state[0..3]
+    /// hash_state[0..3] == root_reg[0..3]
     /// 
-    /// The expected root is stored in fri_state, computed root is in hash_state.
+    /// The expected root is stored in root_reg, computed root is in hash_state.
     /// Mode aux[2]=0 tells the AIR to check root verification.
     /// 
     /// Returns true if local check passes (AIR constraint will also enforce).
-    pub fn verify_root(&mut self, expected_root: [BaseElement; 4]) -> bool {
-        // Store expected root in FRI columns for AIR verification
-        for i in 0..4 {
-            self.fri_state[i] = expected_root[i];
-        }
+    pub fn verify_root(&mut self) -> bool {
         // Equality constraint on DeepCompose is unconditional; keep fri[6..7] equal here.
         self.fri_state[6] = BaseElement::ZERO;
         self.fri_state[7] = BaseElement::ZERO;
-        
+
         // Set mode = ROOT VERIFICATION (aux[2] = 0)
         self.aux_state[2] = BaseElement::ZERO;
         
-        // Emit DeepCompose row - AIR will verify hash_state[0..3] == fri_state[0..3]
+        // Emit DeepCompose row - AIR will verify hash_state[0..3] == root_reg[0..3]
         self.emit_row(VerifierOp::DeepCompose);
         
         // Return local check result for caller to track
-        self.check_root(&expected_root)
+        self.check_root(&self.root_reg)
     }
     
     /// Get current hash state
@@ -762,7 +1122,7 @@ impl VerifierTraceBuilder {
     pub fn init_leaf(&mut self, leaf_data: &[BaseElement]) {
         // Reset sponge with domain-separation length.
         self.reset_hash_with_len(leaf_data.len());
-
+        
         // Absorb leaf data in 8-element blocks (rate width).
         // This matches `hash_elements` behavior.
         for chunk in leaf_data.chunks(8) {
@@ -771,7 +1131,7 @@ impl VerifierTraceBuilder {
                 block[i] = e;
             }
             self.absorb(&block);
-            self.permute();
+                self.permute();
         }
 
         if leaf_data.is_empty() {
@@ -780,7 +1140,7 @@ impl VerifierTraceBuilder {
             self.absorb(&block);
             self.permute();
         }
-
+        
         // Output digest lives in rate[0..3] after permutation.
         self.copy_digest_from_rate_to_capacity();
     }
@@ -791,6 +1151,7 @@ impl VerifierTraceBuilder {
         // Accept encodes the same as Nop (111), and Nop constraints require aux[0] = 7
         // After Merkle steps or other ops, aux[0] may be a direction bit (0 or 1)
         self.aux_state[0] = BaseElement::new(7);
+        self.aux_state[2] = BaseElement::ZERO;
         
         // NOTE: We no longer set aux_state[3] here.
         // aux_state[3] is now the checkpoint counter, NOT the acceptance flag.
@@ -809,6 +1170,8 @@ impl VerifierTraceBuilder {
         // Reset aux[0] to 7 for Nop padding
         // Nop constraints require aux[0] = 7, but previous ops may have set it differently
         self.aux_state[0] = BaseElement::new(7);
+        // Nop padding must use a valid Nop sub-mode.
+        self.aux_state[2] = BaseElement::ZERO;
 
         // Pad with Nop rows
         while self.row < target_len {
@@ -865,7 +1228,7 @@ mod tests {
         builder.init_sponge();
         builder.absorb(&[BaseElement::ONE; 8]);
         builder.permute();
-        let digest = builder.squeeze();
+        let _digest = builder.squeeze();
 
         assert_eq!(builder.len(), 1 + 1 + 8 + 1); // init + absorb + 7 permute + 1 nop + squeeze
 
@@ -889,7 +1252,7 @@ mod tests {
             pub_result: BaseElement::new(42),
             expected_checkpoint_count: VerifierPublicInputs::compute_expected_checkpoints(2, 2),
             params_digest: [BaseElement::ZERO; 4],
-            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1),
+            expected_mode_counter: VerifierPublicInputs::compute_expected_mode_counter(1, 2, 2),
         };
 
         // We don't have a real Proof here, but we can test the trace building logic

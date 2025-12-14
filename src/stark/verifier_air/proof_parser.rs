@@ -14,7 +14,7 @@
 //! This enables true recursive STARK verification where the Verifier STARK
 //! cryptographically verifies the inner proof.
 
-use winter_crypto::{Digest, ElementHasher, RandomCoin};
+use winter_crypto::{Digest, ElementHasher};
 use winterfell::{
     math::{fields::f64::BaseElement, FieldElement, StarkField, ToElements},
     Air, Proof,
@@ -66,6 +66,12 @@ where
     let num_fri_layers = options.to_fri_options().num_fri_layers(lde_domain_size);
     let grinding_factor = options.grinding_factor();
     let num_trace_segments = trace_info.num_segments();
+    let num_aux_segment_rands = trace_info.get_num_aux_segment_rand_elements();
+    // Packed proof-options element used by Winterfell in ProofContext::to_elements().
+    // See winter-air `ProofOptions::to_elements()`.
+    let proof_options_packed =
+        <winterfell::ProofOptions as winter_math::ToElements<BaseElement>>::to_elements(options)[0]
+            .as_int();
 
     // ========================================================================
     // PARSE ACTUAL COMMITMENTS FROM PROOF
@@ -123,8 +129,13 @@ where
     use winter_air::proof::merge_ood_evaluations;
     use winter_math::ToElements as _;
 
-    let mut public_coin_seed = proof.context.to_elements();
-    public_coin_seed.append(&mut pub_inputs.to_elements());
+    // Fiat–Shamir seed material used by Winterfell: context.to_elements() || pub_inputs.to_elements().
+    // We reconstruct these deterministically inside VerifierAir; here we use them only for
+    // off-circuit verifier replay (parsing/sorting openings).
+    let context_elems = proof.context.to_elements();
+    let pub_inputs_elems = pub_inputs.to_elements();
+    let mut public_coin_seed = context_elems.clone();
+    public_coin_seed.extend_from_slice(&pub_inputs_elems);
     let mut public_coin = DefaultRandomCoin::<Hasher>::new(&public_coin_seed);
 
     for trace_root in &trace_commitments_raw {
@@ -142,7 +153,9 @@ where
 
     // Absorb OOD frame and derive DEEP coefficients.
     let ood_evals = merge_ood_evaluations(&trace_ood_frame, &comp_ood_frame);
-    public_coin.reseed(Hasher::hash_elements(&ood_evals));
+    let ood_evals_digest_raw = Hasher::hash_elements(&ood_evals);
+    let ood_evals_digest = digest_to_merkle_digest(&ood_evals_digest_raw);
+    public_coin.reseed(ood_evals_digest_raw);
     let deep_coeffs_obj = air
         .get_deep_composition_coefficients::<BaseElement, _>(&mut public_coin)
         .expect("draw DEEP coeffs");
@@ -158,14 +171,26 @@ where
         }
     }
 
-    let mut query_positions = public_coin
+    // Draw raw query positions (unsorted; duplicates possible).
+    let raw_query_positions = public_coin
         .draw_integers(proof.options().num_queries(), lde_domain_size, proof.pow_nonce)
         .expect("draw query positions");
+
+    // Canonical verifier order is sorted unique.
+    let mut query_positions = raw_query_positions.clone();
+    // Keep Winterfell's canonical ordering: the proof provides openings for unique, sorted queries.
+    // Under our strict policy, the prover retries nonce until this dedup step is a no-op.
     query_positions.sort_unstable();
     query_positions.dedup();
-
     let actual_num_queries = query_positions.len();
-    let num_constraints = proof.context.num_constraints().saturating_sub(1);
+    // strict policy: require exact number of distinct positions.
+    // An honest prover retries/grinds `pow_nonce` until this holds.
+    assert_eq!(
+        actual_num_queries, num_queries,
+        "Fiat–Shamir query collisions: got {} unique, expected {} (retry pow_nonce)",
+        actual_num_queries, num_queries
+    );
+    let num_constraints = proof.context.num_constraints();
     
     // Compute trace domain generator
     let g_trace = compute_trace_generator(trace_len);
@@ -189,14 +214,14 @@ where
     // PARSE ACTUAL QUERY OPENINGS FROM PROOF
     // ========================================================================
     
-    let trace_queries = parse_trace_queries_real(
+    let trace_queries_sorted = parse_trace_queries_real(
         proof, 
         actual_num_queries, 
         trace_width, 
         lde_domain_size,
         &query_positions,
     );
-    let comp_queries = parse_comp_queries_real(
+    let comp_queries_sorted = parse_comp_queries_real(
         proof, 
         actual_num_queries, 
         comp_width, 
@@ -208,7 +233,7 @@ where
     // PARSE ACTUAL FRI LAYER DATA FROM PROOF
     // ========================================================================
     
-    let fri_layers = parse_fri_layers_real(
+    let fri_layers_sorted = parse_fri_layers_real(
         proof, 
         num_fri_layers, 
         actual_num_queries,
@@ -217,6 +242,36 @@ where
         &query_positions,
         &fri_betas,
     );
+
+    // Reorder openings into raw draw order so the recursive verifier can avoid in-AIR sorting.
+    // This does not change the checked set; it only changes evaluation order.
+    let mut idx_by_pos = std::collections::HashMap::<usize, usize>::new();
+    for (i, &p) in query_positions.iter().enumerate() {
+        idx_by_pos.insert(p, i);
+    }
+    let mut trace_queries = Vec::with_capacity(actual_num_queries);
+    let mut comp_queries = Vec::with_capacity(actual_num_queries);
+    for &p in raw_query_positions.iter() {
+        let i = *idx_by_pos.get(&p).expect("raw position not in sorted positions");
+        trace_queries.push(trace_queries_sorted[i].clone());
+        comp_queries.push(comp_queries_sorted[i].clone());
+    }
+    // Rewrite positions to the raw order positions.
+    for (q, &p) in trace_queries.iter_mut().zip(raw_query_positions.iter()) {
+        q.position = p;
+    }
+    for (q, &p) in comp_queries.iter_mut().zip(raw_query_positions.iter()) {
+        q.position = p;
+    }
+    let mut fri_layers = Vec::with_capacity(fri_layers_sorted.len());
+    for layer in fri_layers_sorted.into_iter() {
+        let mut queries = Vec::with_capacity(layer.queries.len());
+        for &p in raw_query_positions.iter() {
+            let i = *idx_by_pos.get(&p).expect("raw position not in sorted positions");
+            queries.push(layer.queries[i].clone());
+        }
+        fri_layers.push(FriLayerData { beta: layer.beta, queries });
+    }
 
     // Parse FRI remainder coefficients from proof
     // For Constant terminal: empty
@@ -258,6 +313,7 @@ where
     };
     
     ParsedProof {
+        pow_nonce: proof.pow_nonce,
         trace_commitment,
         comp_commitment,
         fri_commitments,
@@ -265,6 +321,7 @@ where
         ood_trace_next,
         ood_comp_current,
         ood_comp_next,
+        ood_evals_digest,
         // OOD verification parameters
         z,
         g_trace,
@@ -281,12 +338,13 @@ where
         // FRI verification data
         fri_remainder_coeffs,
         fri_terminal_is_constant,
-        query_positions,
+        query_positions: raw_query_positions,
         deep_coeffs,
         domain_offset,
         g_lde,
         // Parameters
         trace_width,
+        aux_trace_width,
         comp_width,
         trace_len,
         lde_blowup,
@@ -295,6 +353,9 @@ where
         num_fri_layers,
         fri_folding_factor: folding_factor,
         grinding_factor,
+        num_trace_segments,
+        proof_options_packed,
+        num_aux_segment_rands,
     }
 }
 
@@ -312,122 +373,6 @@ fn digest_to_merkle_digest<D: Digest>(digest: &D) -> MerkleDigest {
         BaseElement::new(u64::from_le_bytes(bytes[16..24].try_into().unwrap())),
         BaseElement::new(u64::from_le_bytes(bytes[24..32].try_into().unwrap())),
     ]
-}
-
-// ============================================================================
-// FIAT-SHAMIR DERIVATION (OOD PARAMETERS + QUERY POSITIONS)
-// ============================================================================
-
-/// Result of Fiat-Shamir transcript derivation
-struct FiatShamirResult {
-    /// OOD challenge point z
-    z: BaseElement,
-    /// Constraint mixing coefficients
-    constraint_coeffs: Vec<BaseElement>,
-    /// DEEP composition coefficients
-    deep_coeffs: Vec<BaseElement>,
-    /// FRI folding betas (one per FRI layer)
-    fri_betas: Vec<BaseElement>,
-    /// Query positions (deduplicated)
-    query_positions: Vec<usize>,
-}
-
-/// Derive OOD parameters and query positions using the Fiat-Shamir transcript
-///
-/// This replicates the verifier's Fiat-Shamir exactly, extracting:
-/// - z: OOD challenge point
-/// - constraint_coeffs: mixing coefficients for AIR constraints  
-/// - query_positions: positions for Merkle/FRI queries
-fn derive_fiat_shamir_params<A: Air<BaseField = BaseElement>>(
-    proof: &Proof,
-    pub_inputs: &A::PublicInputs,
-    lde_domain_size: usize,
-    num_fri_layers: usize,
-    num_constraints: usize,
-    trace_commitments: &[<Hasher as winter_crypto::Hasher>::Digest],
-    comp_commitment: &<Hasher as winter_crypto::Hasher>::Digest,
-    fri_commitments: &[<Hasher as winter_crypto::Hasher>::Digest],
-    trace_ood: &winter_air::proof::TraceOodFrame<BaseElement>,
-    quotient_ood: &winter_air::proof::QuotientOodFrame<BaseElement>,
-) -> FiatShamirResult
-where
-    A::PublicInputs: ToElements<BaseElement>,
-{
-    use winter_crypto::DefaultRandomCoin;
-    use winter_air::proof::merge_ood_evaluations;
-
-    // Seed public coin with context + public inputs (matches Winterfell verifier)
-    let mut public_coin_seed = proof.context.to_elements();
-    public_coin_seed.append(&mut pub_inputs.to_elements());
-    let mut public_coin = DefaultRandomCoin::<Hasher>::new(&public_coin_seed);
-
-    // --- Phase 1: absorb trace commitments, derive OOD point z ---
-    for trace_root in trace_commitments {
-        public_coin.reseed(*trace_root);
-    }
-    let z = public_coin.draw::<BaseElement>().expect("Failed to draw z");
-
-    // --- Phase 2: absorb OOD frame, derive constraint coefficients ---
-    let ood_evals = merge_ood_evaluations(trace_ood, quotient_ood);
-    public_coin.reseed(Hasher::hash_elements(&ood_evals));
-
-    // Draw constraint composition coefficients (transition + boundary).
-    let mut constraint_coeffs = Vec::with_capacity(num_constraints + 1);
-    for _ in 0..num_constraints {
-        constraint_coeffs.push(
-            public_coin
-                .draw::<BaseElement>()
-                .expect("Failed to draw constraint coeff"),
-        );
-    }
-    constraint_coeffs.push(public_coin.draw::<BaseElement>().unwrap_or(BaseElement::ONE));
-
-    // --- Phase 3: absorb composition commitment, derive DEEP coefficients ---
-    public_coin.reseed(*comp_commitment);
-
-    // Draw DEEP composition coefficients.
-    //
-    // Winterfell samples:
-    // - 2 coefficients per trace column (for the z and z*g quotients)
-    // - 1 coefficient per composition column
-    let trace_width = trace_ood.current_row().len();
-    let constraint_width = quotient_ood.current_row().len();
-    let num_deep_coeffs = trace_width * 2 + constraint_width;
-    
-    let mut deep_coeffs = Vec::with_capacity(num_deep_coeffs);
-    for _ in 0..num_deep_coeffs {
-        deep_coeffs.push(public_coin.draw::<BaseElement>().expect("Failed to draw DEEP coeff"));
-    }
-
-    // --- Phase 4: absorb FRI commitments, derive FRI betas ---
-    let mut fri_betas = Vec::with_capacity(num_fri_layers);
-    for (i, fri_root) in fri_commitments.iter().enumerate() {
-        public_coin.reseed(*fri_root);
-        if i < num_fri_layers {
-            let beta = public_coin.draw::<BaseElement>().expect("Failed to draw FRI beta");
-            fri_betas.push(beta);
-        }
-    }
-
-    // --- Phase 5: derive query positions ---
-    let mut query_positions = public_coin
-        .draw_integers(
-            proof.options().num_queries(),
-            lde_domain_size,
-            proof.pow_nonce,
-        )
-        .expect("Failed to draw query positions");
-    
-    query_positions.sort_unstable();
-    query_positions.dedup();
-    
-    FiatShamirResult {
-        z,
-        constraint_coeffs,
-        deep_coeffs,
-        fri_betas,
-        query_positions,
-    }
 }
 
 /// Compute trace domain generator for given trace length

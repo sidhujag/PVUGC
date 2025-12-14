@@ -160,8 +160,14 @@ impl RecursiveVerifier {
         // VerifierAir is fixed to verifying Aggregator proofs; we do not bind an interpreter hash
         // at this layer (app binding happens at the Aggregator leaf layer).
         
-        // Mode counter: 1 statement + 1 interpreter (single aggregator proof)
-        let expected_mode_counter = VerifierPublicInputs::compute_expected_mode_counter(1);
+        // Mode counter includes:
+        // - root_count (trace+comp+fri roots) in the high 32 bits,
+        // - statement_count (+1) and params_count (+4096 per child) in the low bits.
+        let expected_mode_counter = VerifierPublicInputs::compute_expected_mode_counter(
+            1,
+            parsed.num_queries,
+            parsed.num_fri_layers,
+        );
 
         // Params digest POLICY for the proof being verified (Aggregator proof).
         // SECURITY: do NOT derive this from the proof; it must be fixed by protocol config.
