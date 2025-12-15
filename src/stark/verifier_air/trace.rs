@@ -38,6 +38,10 @@ pub struct VerifierTraceBuilder {
     idx_reg: BaseElement,
     /// Expected-root register (4 elements): Merkle root digest being verified against.
     root_reg: [BaseElement; 4],
+    /// QueryGen step counter (used to force the capture→64-step qgen→export microprogram in AIR).
+    qgen_ctr: BaseElement,
+    /// Root-kind selector (used to bind root_reg to the committed public-input roots).
+    root_kind: BaseElement,
     /// Current auxiliary state
     /// aux[0]: round counter (0-6 during permute, 7 otherwise)
     /// aux[1]: reserved for flags
@@ -60,6 +64,8 @@ impl VerifierTraceBuilder {
             fri_state: [BaseElement::ZERO; 8],
             idx_reg: BaseElement::ZERO,
             root_reg: [BaseElement::ZERO; 4],
+            qgen_ctr: BaseElement::ZERO,
+            root_kind: BaseElement::ZERO,
             aux_state: [BaseElement::ZERO; 4],
         }
     }
@@ -96,9 +102,13 @@ impl VerifierTraceBuilder {
             self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 9 + j].push(self.root_reg[j]);
         }
 
+        // Write qgen_ctr and root_kind columns
+        self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 13].push(self.qgen_ctr);
+        self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 14].push(self.root_kind);
+
         // Write auxiliary columns
         for i in 0..4 {
-            self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 13 + i].push(self.aux_state[i]);
+            self.trace[NUM_SELECTORS + HASH_STATE_WIDTH + 15 + i].push(self.aux_state[i]);
         }
 
         self.row += 1;
@@ -312,6 +322,7 @@ impl VerifierTraceBuilder {
         // This prevents "pow2=0, acc=anything" bypasses.
         self.fri_state[6] = BaseElement::ZERO; // acc
         self.fri_state[7] = BaseElement::ONE;  // pow2
+        self.qgen_ctr = BaseElement::ZERO;
         self.aux_state[2] = BaseElement::new(11);
         self.emit_row(VerifierOp::Nop);
         self.aux_state[2] = BaseElement::ZERO;
@@ -469,6 +480,12 @@ impl VerifierTraceBuilder {
         // Caller must set fri[5] for the current row (bit).
         self.emit_row(VerifierOp::Nop);
 
+        // Count qgen micro-steps (used by AIR to force capture→64-step qgen→export).
+        let mode = self.aux_state[2].as_int();
+        if mode == 6 || mode == 10 || mode == 13 {
+            self.qgen_ctr = self.qgen_ctr + BaseElement::ONE;
+        }
+
         // Update registers for next row.
         self.fri_state[4] = BaseElement::new(x_next);
         self.fri_state[6] = acc_next;
@@ -545,39 +562,6 @@ impl VerifierTraceBuilder {
         self.emit_row(VerifierOp::Nop);
 
         // Return to default.
-        self.aux_state[2] = BaseElement::ZERO;
-    }
-
-    /// Enforce that two derived query positions are distinct by adding a single Nop row
-    /// with aux[2]=7 and the constraint (pos_i - pos_j) * inv = 1.
-    pub fn enforce_distinct_positions(&mut self, pos_i: usize, pos_j: usize) {
-        use winterfell::math::FieldElement;
-
-        // Insert a "special" barrier row so the preceding normal row doesn't enforce copy constraints
-        // into our distinctness check (which reuses fri scratch columns arbitrarily).
-        //
-        // We use an Absorb row with an all-zero absorbed block so the hash state is unchanged.
-        self.aux_state[2] = BaseElement::ZERO;
-        self.absorb(&[BaseElement::ZERO; 8]);
-
-        self.aux_state[0] = BaseElement::new(7);
-        self.aux_state[2] = BaseElement::new(7);
-
-        let a = BaseElement::new(pos_i as u64);
-        let b = BaseElement::new(pos_j as u64);
-        let diff = a - b;
-        // If diff == 0, inverse is undefined; use 0 and let constraints fail (no panic).
-        let inv = if diff == BaseElement::ZERO { BaseElement::ZERO } else { diff.inv() };
-
-        // Place values into fri scratch columns, leaving fri[4] (idx register) untouched.
-        // Distinctness constraint uses (fri[5] - fri[6]) * fri[7] = 1.
-        self.fri_state[5] = a;
-        self.fri_state[6] = b;
-        self.fri_state[7] = inv;
-
-        self.emit_row(VerifierOp::Nop);
-
-        // Clear mode back to default.
         self.aux_state[2] = BaseElement::ZERO;
     }
 
@@ -688,7 +672,7 @@ impl VerifierTraceBuilder {
         self.fri_state[7] = BaseElement::ZERO; // Expected to be zero
         
         // Set mode = TERMINAL VERIFICATION (aux[2] = 2)
-        // NOTE: We use a distinct mode value to differentiate from ROOT (0) and OOD (1)
+        // NOTE: We use a different mode value to differentiate from ROOT (0) and OOD (1)
         self.aux_state[2] = BaseElement::new(2u64);
         
         // Emit DeepCompose row - AIR will verify fri[6] == fri[7] (diff == 0)
@@ -774,6 +758,35 @@ impl VerifierTraceBuilder {
         self.aux_state[0] = BaseElement::new(7);
     }
 
+    /// Load expected root for the trace commitment tree.
+    pub fn set_expected_root_trace(&mut self, expected_root: [BaseElement; 4]) {
+        self.root_kind = BaseElement::ZERO; // 0 = trace
+        self.set_expected_root(expected_root);
+    }
+
+    /// Load expected root for the composition commitment tree.
+    pub fn set_expected_root_comp(&mut self, expected_root: [BaseElement; 4]) {
+        self.root_kind = BaseElement::ONE; // 1 = comp
+        self.set_expected_root(expected_root);
+    }
+
+    /// Load expected root for an arbitrary `root_kind` slot.
+    ///
+    /// `root_kind` encoding is enforced in AIR on `LOAD_ROOT4` rows:
+    /// - 0 => pub_inputs.trace_commitment
+    /// - 1 => pub_inputs.comp_commitment
+    /// - 2+i => pub_inputs.fri_commitments[i]
+    pub fn set_expected_root_kind(&mut self, root_kind: u64, expected_root: [BaseElement; 4]) {
+        self.root_kind = BaseElement::new(root_kind);
+        self.set_expected_root(expected_root);
+    }
+
+    /// Load expected root for a specific FRI layer commitment tree.
+    pub fn set_expected_root_fri(&mut self, layer_idx: usize, expected_root: [BaseElement; 4]) {
+        self.root_kind = BaseElement::new((2 + layer_idx) as u64);
+        self.set_expected_root(expected_root);
+    }
+
     /// Verify DEEP composition value
     /// 
     /// This verifies that the DEEP evaluation at a query position is correctly
@@ -808,6 +821,19 @@ impl VerifierTraceBuilder {
         self.emit_row(VerifierOp::DeepCompose);
         
         diff == BaseElement::ZERO
+    }
+
+    /// Verify an equality `a == b` using the unconditional DeepCompose equality constraint
+    /// (fri[6] == fri[7]) without affecting the mode counter.
+    ///
+    /// This is used for internal consistency checks (e.g. FRI inter-layer linkage).
+    pub fn verify_eq(&mut self, a: BaseElement, b: BaseElement) -> bool {
+        self.fri_state[6] = a;
+        self.fri_state[7] = b;
+        // Use a non-root/statement/params mode to avoid triggering other gated checks.
+        self.aux_state[2] = BaseElement::new(3u64);
+        self.emit_row(VerifierOp::DeepCompose);
+        a == b
     }
 
     /// Verify OOD constraint equation
@@ -859,7 +885,7 @@ impl VerifierTraceBuilder {
     ///
     /// # Child Types
     ///
-    /// - `VerifierAir`: 32-column Verifier/Aggregator constraints (recursive verification)
+    /// - `VerifierAir`: Verifier/Aggregator constraints (recursive verification)
     /// - `Generic`: Formula-as-witness for app proofs (VDF, Fib, Bitcoin, etc.)
     pub fn verify_ood_constraints_typed(
         &mut self,
@@ -990,7 +1016,7 @@ impl VerifierTraceBuilder {
         let zerofier_num = z_pow_n - BaseElement::ONE;
         let z_minus_1 = z - BaseElement::ONE;
 
-        // 32 transition constraints (VerifierAir) evaluated with *child* public inputs.
+        // VerifierAir transition constraints evaluated with *child* public inputs.
         // We must supply these so statement/params/root checks are evaluated correctly at OOD.
         use super::constraints::evaluate_all;
         use super::VerifierPublicInputs;
@@ -1017,12 +1043,12 @@ impl VerifierTraceBuilder {
         let mut constraints = vec![BaseElement::ZERO; super::VERIFIER_TRACE_WIDTH];
         evaluate_all(&frame, &periodic_values, &mut constraints, &pub_inputs);
 
-        if constraint_coeffs.len() < 32 + 8 || constraints.len() < 32 {
+        if constraint_coeffs.len() < super::VERIFIER_TRACE_WIDTH + 8 || constraints.len() < super::VERIFIER_TRACE_WIDTH {
             return false;
         }
 
         let mut transition_sum = BaseElement::ZERO;
-        for i in 0..32 {
+        for i in 0..super::VERIFIER_TRACE_WIDTH {
             transition_sum += constraint_coeffs[i] * constraints[i];
         }
 
@@ -1039,18 +1065,20 @@ impl VerifierTraceBuilder {
         // capacity[0..3] at columns 3..6 are zero at row 0
         for j in 0..4 {
             let col = 3 + j;
-            initial_sum += constraint_coeffs[32 + j] * ood_frame.trace_current[col];
+            initial_sum += constraint_coeffs[super::VERIFIER_TRACE_WIDTH + j] * ood_frame.trace_current[col];
         }
-        // aux[1] initial = 0 (col 29; idx_reg + root_reg added)
-        initial_sum += constraint_coeffs[36] * ood_frame.trace_current[29];
-        // aux[3] initial = 0 (col 31)
-        initial_sum += constraint_coeffs[37] * ood_frame.trace_current[31];
+        // aux[1] initial = 0 (col 31; idx_reg + root_reg + qgen_ctr + root_kind added)
+        initial_sum += constraint_coeffs[super::VERIFIER_TRACE_WIDTH + 4] * ood_frame.trace_current[31];
+        // aux[3] initial = 0 (col 33)
+        initial_sum += constraint_coeffs[super::VERIFIER_TRACE_WIDTH + 5] * ood_frame.trace_current[33];
 
         let expected_mode = BaseElement::new(expected_mode_counter as u64);
         let expected_ckpt = BaseElement::new(expected_checkpoint_count as u64);
-        let final_aux1 = ood_frame.trace_current[29] - expected_mode;
-        let final_aux3 = ood_frame.trace_current[31] - expected_ckpt;
-        let final_term = constraint_coeffs[38] * final_aux1 + constraint_coeffs[39] * final_aux3;
+        let final_aux1 = ood_frame.trace_current[31] - expected_mode;
+        let final_aux3 = ood_frame.trace_current[33] - expected_ckpt;
+        let final_term =
+            constraint_coeffs[super::VERIFIER_TRACE_WIDTH + 6] * final_aux1
+                + constraint_coeffs[super::VERIFIER_TRACE_WIDTH + 7] * final_aux3;
 
         // Multiply-through equation:
         // transition_sum * exemption^2 * (z-1) + initial_sum * (z^n-1) * exemption + final_term * (z^n-1) * (z-1)

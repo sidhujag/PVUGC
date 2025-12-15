@@ -176,20 +176,16 @@ where
         .draw_integers(proof.options().num_queries(), lde_domain_size, proof.pow_nonce)
         .expect("draw query positions");
 
-    // Canonical verifier order is sorted unique.
+    // Canonical Winterfell verifier order is sorted unique.
     let mut query_positions = raw_query_positions.clone();
-    // Keep Winterfell's canonical ordering: the proof provides openings for unique, sorted queries.
-    // Under our strict policy, the prover retries nonce until this dedup step is a no-op.
+    // Winterfell proofs provide openings for unique, sorted queries (deduped).
+    // For recursion we keep a fixed `num_queries` execution schedule (raw draw order),
+    // and if collisions occur we simply re-use the opening for the repeated index.
     query_positions.sort_unstable();
     query_positions.dedup();
     let actual_num_queries = query_positions.len();
-    // strict policy: require exact number of distinct positions.
-    // An honest prover retries/grinds `pow_nonce` until this holds.
-    assert_eq!(
-        actual_num_queries, num_queries,
-        "Fiat–Shamir query collisions: got {} unique, expected {} (retry pow_nonce)",
-        actual_num_queries, num_queries
-    );
+    // NOTE: We do NOT require `actual_num_queries == num_queries`. Collisions are allowed (rare),
+    // and simply reduce the number of distinct checks in the usual STARK soundness accounting.
     let num_constraints = proof.context.num_constraints();
     
     // Compute trace domain generator
@@ -249,8 +245,8 @@ where
     for (i, &p) in query_positions.iter().enumerate() {
         idx_by_pos.insert(p, i);
     }
-    let mut trace_queries = Vec::with_capacity(actual_num_queries);
-    let mut comp_queries = Vec::with_capacity(actual_num_queries);
+    let mut trace_queries = Vec::with_capacity(num_queries);
+    let mut comp_queries = Vec::with_capacity(num_queries);
     for &p in raw_query_positions.iter() {
         let i = *idx_by_pos.get(&p).expect("raw position not in sorted positions");
         trace_queries.push(trace_queries_sorted[i].clone());
@@ -294,7 +290,7 @@ where
     // Compute domain parameters
     let domain_offset = BaseElement::GENERATOR;
     let g_lde = BaseElement::get_root_of_unity(lde_domain_size.ilog2());
-
+    
     // ========================================================================
     // Extract VerifierAir public-input tail if present (for VerifierAir-as-child)
     // ========================================================================
@@ -311,7 +307,7 @@ where
     } else {
         (0usize, 0usize)
     };
-    
+
     ParsedProof {
         pow_nonce: proof.pow_nonce,
         trace_commitment,

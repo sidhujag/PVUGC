@@ -168,7 +168,7 @@ impl RecursiveVerifier {
             parsed.num_queries,
             parsed.num_fri_layers,
         );
-
+        
         // Params digest POLICY for the proof being verified (Aggregator proof).
         // SECURITY: do NOT derive this from the proof; it must be fixed by protocol config.
         let cfg = &self.config.aggregator_config;

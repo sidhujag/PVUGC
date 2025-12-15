@@ -319,10 +319,11 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
         #[cfg(any(test, debug_assertions))]
         debug_checkpoint("after_step1_5_ood_commitment", &cs);
 
-        // Enforce non-empty queries and alignment with positions. The circuit now requires
-        // the committed query list to be exactly `num_queries` long; if Fiat–Shamir draws
-        // collide, the prover must re-sample until all draws are distinct and the proof
-        // encodes that full set.
+        // Enforce non-empty queries and alignment with positions.
+        //
+        // Recursion policy: we keep a fixed `num_queries` slot count even if Fiat–Shamir draws
+        // collide; collisions simply repeat a query index (and thus may waste a slot), matching
+        // standard STARK soundness accounting.
         if self.query_positions.is_empty() {
             return Err(SynthesisError::Unsatisfiable);
         }
@@ -346,9 +347,12 @@ impl ConstraintSynthesizer<InnerFr> for FullStarkVerifierCircuit {
             let (pos_uint, _) = gl_alloc_u64(cs.clone(), Some(pos as u64))?;
             query_pos_uint_vars.push(pos_uint);
         }
+        // Ensure query positions are non-decreasing (sorted), but allow duplicates.
+        //
+        // This preserves fixed shape while remaining compatible with collision reuse.
         for idx in 1..expected_queries {
-            let gt = query_pos_uint_vars[idx].is_gt(&query_pos_uint_vars[idx - 1])?;
-            gt.enforce_equal(&Boolean::constant(true))?;
+            let prev_gt_curr = query_pos_uint_vars[idx - 1].is_gt(&query_pos_uint_vars[idx])?;
+            prev_gt_curr.enforce_equal(&Boolean::constant(false))?;
         }
         // Ensure data shapes are consistent with commitments
         if let Some(first_segment) = self.trace_segments.first() {

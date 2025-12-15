@@ -1,7 +1,7 @@
 //! OOD Equation Verification in R1CS
 //!
 //! This module implements the Out-of-Domain (OOD) equation verification
-//! for the VerifierAir in R1CS constraints. It hardcodes all 32 VerifierAir
+//! for the VerifierAir in R1CS constraints. It hardcodes all VerifierAir
 //! constraint evaluations and verifies:
 //!
 //!   transition_sum * exemption + boundary_contributions = C(z) * zerofier_num
@@ -49,12 +49,13 @@ pub fn verify_ood_equation_in_circuit(
     air_params: &AirParams,
     stark_pub_inputs: &[u64], // Verifier AIR public inputs (statement_hash is first 4 elements)
 ) -> Result<(), SynthesisError> {
-    const NUM_TRANSITION_CONSTRAINTS: usize = 32;
+    // VerifierAir transition constraints count (must match `verifier_air/mod.rs` degrees length).
+    const NUM_TRANSITION_CONSTRAINTS: usize = 34;
     
     if ood_trace_current.len() < NUM_TRANSITION_CONSTRAINTS || ood_trace_next.len() < NUM_TRANSITION_CONSTRAINTS {
         return Err(SynthesisError::Unsatisfiable);
     }
-    // Need 32 transition + 8 boundary (4 capacity + 2 initial aux + 2 final aux)
+    // Need 34 transition + 8 boundary (4 capacity + 2 initial aux + 2 final aux)
     if constraint_coeffs.len() < NUM_TRANSITION_CONSTRAINTS + 8 {
         return Err(SynthesisError::Unsatisfiable);
     }
@@ -101,13 +102,60 @@ pub fn verify_ood_equation_in_circuit(
     ];
     
     // =========================================================================
-    // STEP 2: Evaluate all 32 VerifierAir transition constraints (HARDCODED)
+    // STEP 2: Evaluate all VerifierAir transition constraints (HARDCODED)
     // =========================================================================
+    // Extract commitments from public inputs (see `VerifierPublicInputs::to_elements()` layout).
+    if pub_len < 12 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    let trace_commitment: [u64; 4] = [
+        stark_pub_inputs[4],
+        stark_pub_inputs[5],
+        stark_pub_inputs[6],
+        stark_pub_inputs[7],
+    ];
+    let comp_commitment: [u64; 4] = [
+        stark_pub_inputs[8],
+        stark_pub_inputs[9],
+        stark_pub_inputs[10],
+        stark_pub_inputs[11],
+    ];
+    // FRI commitments begin at index 12, and end before the final 10 tail elements.
+    // We keep fixed shape by reading up to MAX_FRI_LAYERS and padding missing with zeros.
+    const MAX_FRI_LAYERS: usize = 32;
+    let fri_commitments_start = 12usize;
+    let fri_commitments_end = pub_len.checked_sub(10).ok_or(SynthesisError::Unsatisfiable)?;
+    if fri_commitments_end < fri_commitments_start {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    let fri_commitments_words = fri_commitments_end - fri_commitments_start;
+    if fri_commitments_words % 4 != 0 {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+    let fri_commitments_len = (fri_commitments_words / 4).min(MAX_FRI_LAYERS);
+    let mut fri_commitments: Vec<[u64; 4]> = Vec::with_capacity(MAX_FRI_LAYERS);
+    for i in 0..MAX_FRI_LAYERS {
+        if i < fri_commitments_len {
+            let off = fri_commitments_start + 4 * i;
+            fri_commitments.push([
+                stark_pub_inputs[off],
+                stark_pub_inputs[off + 1],
+                stark_pub_inputs[off + 2],
+                stark_pub_inputs[off + 3],
+            ]);
+        } else {
+            fri_commitments.push([0u64; 4]);
+        }
+    }
+
     let constraints = evaluate_verifier_air_constraints_gl(
         cs.clone(),
         ood_trace_current,
         ood_trace_next,
         &statement_hash,
+        &trace_commitment,
+        &comp_commitment,
+        &fri_commitments,
         &params_digest,
     )?;
     
@@ -136,11 +184,11 @@ pub fn verify_ood_equation_in_circuit(
     // STEP 5: Compute boundary contributions
     // 
     // AIR has 8 boundary assertions (VerifierAir):
-    //   - 4 initial capacity zeros (columns 3,4,5,6 at row 0) -> coeffs 32..35
-    //   - 1 initial aux[1] = 0 (column 29 at row 0) -> coeff 36
-    //   - 1 initial aux[3] = 0 (column 31 at row 0) -> coeff 37
-    //   - 1 final aux[1] = expected_mode_counter (column 29 at last row) -> coeff 38
-    //   - 1 final aux[3] = expected_checkpoint_count (column 31 at last row) -> coeff 39
+    //   - 4 initial capacity zeros (columns 3,4,5,6 at row 0) -> coeffs 34..37
+    //   - 1 initial aux[1] = 0 (column 31 at row 0) -> coeff 38
+    //   - 1 initial aux[3] = 0 (column 33 at row 0) -> coeff 39
+    //   - 1 final aux[1] = expected_mode_counter (column 31 at last row) -> coeff 40
+    //   - 1 final aux[3] = expected_checkpoint_count (column 33 at last row) -> coeff 41
     // =========================================================================
     
     // Initial capacity zeros (columns 3-6)
@@ -154,22 +202,22 @@ pub fn verify_ood_equation_in_circuit(
         initial_sum = gl_add_light(cs.clone(), &initial_sum, &term)?;
     }
     
-    // Initial aux[1] = 0 (column 29)
+    // Initial aux[1] = 0 (column 31)
     // (Matches AIR assertion order: capacity[0-3], then aux[1], then aux[3])
     let initial_aux1_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 4;
     let beta_aux1_init = GlVar(constraint_coeffs[initial_aux1_coeff_idx].clone());
-    let val_29 = &ood_trace_current[29];
-    let aux1_init_term = gl_mul_light(cs.clone(), &beta_aux1_init, val_29)?;
+    let val_31 = &ood_trace_current[31];
+    let aux1_init_term = gl_mul_light(cs.clone(), &beta_aux1_init, val_31)?;
     initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux1_init_term)?;
     
-    // Initial aux[3] = 0 (column 31)
+    // Initial aux[3] = 0 (column 33)
     let initial_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 5;
     let beta_aux3_init = GlVar(constraint_coeffs[initial_aux3_coeff_idx].clone());
-    let val_31 = &ood_trace_current[31];
-    let aux3_init_term = gl_mul_light(cs.clone(), &beta_aux3_init, val_31)?;
+    let val_33 = &ood_trace_current[33];
+    let aux3_init_term = gl_mul_light(cs.clone(), &beta_aux3_init, val_33)?;
     initial_sum = gl_add_light(cs.clone(), &initial_sum, &aux3_init_term)?;
     
-    // Final aux[1] = expected_mode_counter (column 29)
+    // Final aux[1] = expected_mode_counter (column 31)
     // Layout: [..., expected_checkpoint_count, expected_mode_counter, interpreter_hash[0..4]]
     // So expected_mode_counter is at position pub_len - 5
     let expected_mode_counter = stark_pub_inputs[pub_len - 5];
@@ -180,10 +228,10 @@ pub fn verify_ood_equation_in_circuit(
     
     let final_aux1_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 6;
     let beta_aux1_final = GlVar(constraint_coeffs[final_aux1_coeff_idx].clone());
-    let val_29_minus_expected = gl_sub_light(cs.clone(), val_29, &expected_mode_counter_gl)?;
-    let aux1_final_term = gl_mul_light(cs.clone(), &beta_aux1_final, &val_29_minus_expected)?;
+    let val_31_minus_expected = gl_sub_light(cs.clone(), val_31, &expected_mode_counter_gl)?;
+    let aux1_final_term = gl_mul_light(cs.clone(), &beta_aux1_final, &val_31_minus_expected)?;
     
-    // Final aux[3] = expected_checkpoint_count (column 31)
+    // Final aux[3] = expected_checkpoint_count (column 33)
     // expected_checkpoint_count is at position pub_len - 6
     let expected_checkpoints = stark_pub_inputs[pub_len - 6];
     let expected_checkpoints_gl = GlVar(FpGLVar::new_witness(cs.clone(), || {
@@ -192,8 +240,8 @@ pub fn verify_ood_equation_in_circuit(
     
     let final_aux3_coeff_idx = NUM_TRANSITION_CONSTRAINTS + 7;
     let beta_aux3_final = GlVar(constraint_coeffs[final_aux3_coeff_idx].clone());
-    let val_31_minus_expected = gl_sub_light(cs.clone(), val_31, &expected_checkpoints_gl)?;
-    let aux3_final_term = gl_mul_light(cs.clone(), &beta_aux3_final, &val_31_minus_expected)?;
+    let val_33_minus_expected = gl_sub_light(cs.clone(), val_33, &expected_checkpoints_gl)?;
+    let aux3_final_term = gl_mul_light(cs.clone(), &beta_aux3_final, &val_33_minus_expected)?;
     
     // Combine both final terms
     let final_term = gl_add_light(cs.clone(), &aux1_final_term, &aux3_final_term)?;
@@ -249,7 +297,7 @@ pub fn verify_ood_equation_in_circuit(
 // CONSTRAINT EVALUATION
 // ============================================================================
 
-/// Evaluate all 32 VerifierAir transition constraints at OOD point
+/// Evaluate all VerifierAir transition constraints at OOD point
 ///
 /// This is the HARDCODED constraint evaluation matching constraints.rs exactly.
 fn evaluate_verifier_air_constraints_gl(
@@ -257,6 +305,9 @@ fn evaluate_verifier_air_constraints_gl(
     current: &[GlVar],
     next: &[GlVar],
     statement_hash: &[u64; 4], // Verifier AIR's statement_hash public input
+    trace_commitment: &[u64; 4],
+    comp_commitment: &[u64; 4],
+    fri_commitments: &[[u64; 4]], // padded to MAX_FRI_LAYERS
     params_digest: &[u64; 4],
 ) -> Result<Vec<GlVar>, SynthesisError> {
     const NUM_SELECTORS: usize = 3;
@@ -265,12 +316,14 @@ fn evaluate_verifier_air_constraints_gl(
     const FRI_START: usize = 15;
     const IDX_REG: usize = 23;
     const ROOT_REG_START: usize = 24; // 4 cols
-    const AUX_START: usize = 28;
+    const QGEN_CTR: usize = 28;
+    const ROOT_KIND: usize = 29;
+    const AUX_START: usize = 30;
     
     let one = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
     let zero = GlVar(FpGLVar::constant(InnerFr::from(0u64)));
     
-    let mut constraints = Vec::with_capacity(32);
+    let mut constraints = Vec::with_capacity(34);
     
     // --- 1. Selector constraints (3): s * (s-1) = 0 [enforce_binary] ---
     for i in 0..NUM_SELECTORS {
@@ -340,49 +393,61 @@ fn evaluate_verifier_air_constraints_gl(
             gl_sub_light(cs.clone(), &next_hash[i], &expected)?
         };
 
-        // For Init: semantics depend on aux[0] init kind in {8,9,10,11}.
+        // For Init: semantics depend on aux[0] init kind in {8,9,10,11,12}.
         // See `verifier_air/constraints.rs` for the exact polynomial selectors.
         let rc = &current[AUX_START]; // aux[0]
         let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
         let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
         let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
         let k11 = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
+        let k12 = GlVar(FpGLVar::constant(InnerFr::from(12u64)));
 
-        // init_kind_in_range = (rc-8)(rc-9)(rc-10)(rc-11)
+        // init_kind_in_range = (rc-8)(rc-9)(rc-10)(rc-11)(rc-12)
         let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
         let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
         let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
         let rc_m11 = gl_sub_light(cs.clone(), rc, &k11)?;
+        let rc_m12 = gl_sub_light(cs.clone(), rc, &k12)?;
         let t_range = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
         let t_range2 = gl_mul_light(cs.clone(), &t_range, &rc_m10)?;
-        let init_kind_in_range = gl_mul_light(cs.clone(), &t_range2, &rc_m11)?;
+        let t_range3 = gl_mul_light(cs.clone(), &t_range2, &rc_m11)?;
+        let init_kind_in_range = gl_mul_light(cs.clone(), &t_range3, &rc_m12)?;
 
-        // Lagrange basis over {8,9,10,11}:
-        // denom8  = -6, denom9 = 2, denom10 = -2, denom11 = 6
-        let inv2 = GlVar(FpGLVar::constant(InnerFr::from(9223372034707292161u64)));
-        let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
-        let neg_inv6 = GlVar(FpGLVar::constant(InnerFr::from(3074457344902430720u64))); // (-6)^(-1)
+        // Lagrange basis over {8,9,10,11,12}:
+        // denom8  = 24, denom9 = -6, denom10 = 4, denom11 = -6, denom12 = 24
+        let inv24 = GlVar(FpGLVar::constant(InnerFr::from(17678129733188976641u64)));
+        let inv4 = GlVar(FpGLVar::constant(InnerFr::from(13835058052060938241u64)));
+        let inv_neg6 = GlVar(FpGLVar::constant(InnerFr::from(3074457344902430720u64))); // (-6)^(-1)
 
-        // l8 = (rc-9)(rc-10)(rc-11)/(-6)
+        // l8 = (rc-9)(rc-10)(rc-11)(rc-12)/24
         let t_l8a = gl_mul_light(cs.clone(), &rc_m9, &rc_m10)?;
         let t_l8b = gl_mul_light(cs.clone(), &t_l8a, &rc_m11)?;
-        let l8 = gl_mul_light(cs.clone(), &t_l8b, &neg_inv6)?;
+        let t_l8c = gl_mul_light(cs.clone(), &t_l8b, &rc_m12)?;
+        let l8 = gl_mul_light(cs.clone(), &t_l8c, &inv24)?;
 
-        // l9 = (rc-8)(rc-10)(rc-11)/2
+        // l9 = (rc-8)(rc-10)(rc-11)(rc-12)/(-6)
         let t_l9a = gl_mul_light(cs.clone(), &rc_m8, &rc_m10)?;
         let t_l9b = gl_mul_light(cs.clone(), &t_l9a, &rc_m11)?;
-        let l9 = gl_mul_light(cs.clone(), &t_l9b, &inv2)?;
+        let t_l9c = gl_mul_light(cs.clone(), &t_l9b, &rc_m12)?;
+        let l9 = gl_mul_light(cs.clone(), &t_l9c, &inv_neg6)?;
 
-        // l10 = -(rc-8)(rc-9)(rc-11)/2
+        // l10 = (rc-8)(rc-9)(rc-11)(rc-12)/4
         let t_l10a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
         let t_l10b = gl_mul_light(cs.clone(), &t_l10a, &rc_m11)?;
-        let t_l10c = gl_mul_light(cs.clone(), &t_l10b, &inv2)?;
-        let l10 = gl_sub_light(cs.clone(), &zero, &t_l10c)?;
+        let t_l10c = gl_mul_light(cs.clone(), &t_l10b, &rc_m12)?;
+        let l10 = gl_mul_light(cs.clone(), &t_l10c, &inv4)?;
 
-        // l11 = (rc-8)(rc-9)(rc-10)/6
+        // l11 = (rc-8)(rc-9)(rc-10)(rc-12)/(-6)
         let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
         let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
-        let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+        let t_l11c = gl_mul_light(cs.clone(), &t_l11b, &rc_m12)?;
+        let l11 = gl_mul_light(cs.clone(), &t_l11c, &inv_neg6)?;
+
+        // l12 = (rc-8)(rc-9)(rc-10)(rc-11)/24
+        let t_l12a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t_l12b = gl_mul_light(cs.clone(), &t_l12a, &rc_m10)?;
+        let t_l12c = gl_mul_light(cs.clone(), &t_l12b, &rc_m11)?;
+        let l12 = gl_mul_light(cs.clone(), &t_l12c, &inv24)?;
 
         // Kind 8: reset to zeros with state[0] = fri[0].
         let expected_reset = if i == 0 { current[FRI_START].clone() } else { zero.clone() };
@@ -421,14 +486,20 @@ fn evaluate_verifier_air_constraints_gl(
         };
         let init_merkle_constraint = gl_sub_light(cs.clone(), &next_hash[i], &expected_merkle)?;
 
-        // init_constraint = L8*reset + L9*load + L10*copy + L11*merkle + (i==0 ? init_kind_in_range : 0)
+        // Kind 12: root-load rows copy hash_state (root_reg is updated elsewhere).
+        let init_rootload_constraint = gl_sub_light(cs.clone(), &next_hash[i], &current_hash[i])?;
+
+        // init_constraint = L8*reset + L9*load + L10*copy + L11*merkle + L12*rootload
+        //                + (i==0 ? init_kind_in_range : 0)
         let c8 = gl_mul_light(cs.clone(), &l8, &init_reset_constraint)?;
         let c9 = gl_mul_light(cs.clone(), &l9, &init_load_constraint)?;
         let c10 = gl_mul_light(cs.clone(), &l10, &init_copy_constraint)?;
         let c11 = gl_mul_light(cs.clone(), &l11, &init_merkle_constraint)?;
         let c89 = gl_add_light(cs.clone(), &c8, &c9)?;
         let c8910 = gl_add_light(cs.clone(), &c89, &c10)?;
-        let mut init_constraint = gl_add_light(cs.clone(), &c8910, &c11)?;
+        let c12 = gl_mul_light(cs.clone(), &l12, &init_rootload_constraint)?;
+        let c891011 = gl_add_light(cs.clone(), &c8910, &c11)?;
+        let mut init_constraint = gl_add_light(cs.clone(), &c891011, &c12)?;
         if i == 0 {
             init_constraint = gl_add_light(cs.clone(), &init_constraint, &init_kind_in_range)?;
         }
@@ -582,8 +653,10 @@ fn evaluate_verifier_air_constraints_gl(
     // NOP SUB-MODE SELECTORS (computed once per row)
     //
     // Mirrors `src/stark/verifier_air/constraints.rs`:
-    // Allowed Nop sub-modes: {0,6,7,8,9,10,11,12,13}.
+    // Allowed Nop sub-modes: {0,6,8,9,10,11,12,13}.
     // Use Lagrange basis over points {0,6,7,8,9,10,11,12,13}.
+    // NOTE: we keep the interpolation set (including 7) even though 7 is disallowed by the
+    // aux[2] range constraint; this avoids re-deriving constants.
     // ========================================================================
     let seven_gl = GlVar(FpGLVar::constant(InnerFr::from(7u64)));
     let eight_gl = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
@@ -595,7 +668,6 @@ fn evaluate_verifier_air_constraints_gl(
 
     // Denominator inverses for Lagrange basis over {0,6,7,8,9,10,11,12,13}.
     let inv_neg_30240 = GlVar(FpGLVar::constant(InnerFr::from(4978302855505701807u64)));
-    let inv_5040 = GlVar(FpGLVar::constant(InnerFr::from(7023671005794957800u64)));
     let inv_neg_1920 = GlVar(FpGLVar::constant(InnerFr::from(9607679202820096u64)));
     let inv_1296 = GlVar(FpGLVar::constant(InnerFr::from(12966808524102381417u64)));
     let inv_neg_1440 = GlVar(FpGLVar::constant(InnerFr::from(12310639618546816342u64)));
@@ -620,16 +692,6 @@ fn evaluate_verifier_air_constraints_gl(
     let q6 = gl_mul_light(cs.clone(), &q5, &aux_m12)?;
     let q7 = gl_mul_light(cs.clone(), &q6, &aux_m13)?;
     let is_qgen = gl_mul_light(cs.clone(), &q7, &inv_neg_30240)?;
-
-    // is_distinct: mode 7 (denom = 5040)
-    let d1 = gl_mul_light(cs.clone(), aux_mode, &aux_m6)?;
-    let d2 = gl_mul_light(cs.clone(), &d1, &aux_m8)?;
-    let d3 = gl_mul_light(cs.clone(), &d2, &aux_m9)?;
-    let d4 = gl_mul_light(cs.clone(), &d3, &aux_m10)?;
-    let d5 = gl_mul_light(cs.clone(), &d4, &aux_m11)?;
-    let d6 = gl_mul_light(cs.clone(), &d5, &aux_m12)?;
-    let d7 = gl_mul_light(cs.clone(), &d6, &aux_m13)?;
-    let is_distinct = gl_mul_light(cs.clone(), &d7, &inv_5040)?;
 
     // is_zerocheck: mode 8 (denom = -1920)
     let z1 = gl_mul_light(cs.clone(), aux_mode, &aux_m6)?;
@@ -692,7 +754,6 @@ fn evaluate_verifier_air_constraints_gl(
     let is_freeze = gl_mul_light(cs.clone(), &f7, &inv_65520)?;
 
     let is_qgen_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_qgen)?;
-    let is_distinct_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_distinct)?;
     let is_zerocheck_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_zerocheck)?;
     let is_canon_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_canon)?;
     let is_powshift_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_powshift)?;
@@ -701,13 +762,12 @@ fn evaluate_verifier_air_constraints_gl(
     let is_freeze_nop = gl_mul_light(cs.clone(), &op.is_nop, &is_freeze)?;
 
     // Default "special nop" set for copy gating on most columns.
-    let t1 = gl_add_light(cs.clone(), &is_qgen_nop, &is_distinct_nop)?;
-    let t2 = gl_add_light(cs.clone(), &t1, &is_zerocheck_nop)?;
-    let t3 = gl_add_light(cs.clone(), &t2, &is_canon_nop)?;
-    let t4 = gl_add_light(cs.clone(), &t3, &is_powshift_nop)?;
-    let t5 = gl_add_light(cs.clone(), &t4, &is_capture_nop)?;
-    let t6 = gl_add_light(cs.clone(), &t5, &is_export_nop)?;
-    let t_q = gl_add_light(cs.clone(), &t6, &is_freeze_nop)?;
+    let t1 = gl_add_light(cs.clone(), &is_qgen_nop, &is_zerocheck_nop)?;
+    let t2 = gl_add_light(cs.clone(), &t1, &is_canon_nop)?;
+    let t3 = gl_add_light(cs.clone(), &t2, &is_powshift_nop)?;
+    let t4 = gl_add_light(cs.clone(), &t3, &is_capture_nop)?;
+    let t5 = gl_add_light(cs.clone(), &t4, &is_export_nop)?;
+    let t_q = gl_add_light(cs.clone(), &t5, &is_freeze_nop)?;
     let one_minus_q = gl_sub_light(cs.clone(), &one, &t_q)?;
     let copy_ok = gl_mul_light(cs.clone(), &both_not_special, &one_minus_q)?;
     
@@ -723,11 +783,10 @@ fn evaluate_verifier_air_constraints_gl(
             let fold_term = gl_mul_light(cs.clone(), &op.is_fri, &fri_fold_constraint)?;
             // Copy gating for column 4 matches AIR: do NOT disable copy on capture/canon rows,
             // but do disable on shift/export rows.
-            let t4a = gl_add_light(cs.clone(), &is_qgen_nop, &is_distinct_nop)?;
-            let t4b = gl_add_light(cs.clone(), &t4a, &is_zerocheck_nop)?;
-            let t4c = gl_add_light(cs.clone(), &t4b, &is_powshift_nop)?;
-            let t4d = gl_add_light(cs.clone(), &t4c, &is_export_nop)?;
-            let t_q4 = gl_add_light(cs.clone(), &t4d, &is_freeze_nop)?;
+            let t4a = gl_add_light(cs.clone(), &is_qgen_nop, &is_zerocheck_nop)?;
+            let t4b = gl_add_light(cs.clone(), &t4a, &is_powshift_nop)?;
+            let t4c = gl_add_light(cs.clone(), &t4b, &is_export_nop)?;
+            let t_q4 = gl_add_light(cs.clone(), &t4c, &is_freeze_nop)?;
             let one_minus_q4 = gl_sub_light(cs.clone(), &one, &t_q4)?;
             let copy_ok4 = gl_mul_light(cs.clone(), &both_not_special, &one_minus_q4)?;
             let copy_term = gl_mul_light(cs.clone(), &copy_ok4, &copy_constraint)?;
@@ -739,17 +798,6 @@ fn evaluate_verifier_air_constraints_gl(
             let qp = gl_add_light(cs.clone(), &is_qgen_nop, &is_powshift_nop)?;
             let qgen_sel = gl_add_light(cs.clone(), &qp, &is_freeze_nop)?;
             let qgen_term = gl_mul_light(cs.clone(), &qgen_sel, &qgen_shift)?;
-
-            // Distinctness check on Nop rows with aux[2]=7:
-            // (fri5 - fri6) * fri7 = 1. (fri[4] is reserved for the Merkle idx register)
-            let a = current[FRI_START + 5].clone();
-            let b = current[FRI_START + 6].clone();
-            let inv = current[FRI_START + 7].clone();
-            let diff = gl_sub_light(cs.clone(), &a, &b)?;
-            let prod = gl_mul_light(cs.clone(), &diff, &inv)?;
-            let one_gl = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
-            let distinct_constraint = gl_sub_light(cs.clone(), &prod, &one_gl)?;
-            let distinct_term = gl_mul_light(cs.clone(), &is_distinct_nop, &distinct_constraint)?;
 
             // ZeroCheck on Nop rows with aux[2]=8: enforce fri[4] == 0.
             let zero_term = gl_mul_light(cs.clone(), &is_zerocheck_nop, fri_curr)?;
@@ -773,21 +821,20 @@ fn evaluate_verifier_air_constraints_gl(
 
             let fc = gl_add_light(cs.clone(), &fold_term, &copy_term)?;
             let fcq = gl_add_light(cs.clone(), &fc, &qgen_term)?;
-            let fcqd = gl_add_light(cs.clone(), &fcq, &distinct_term)?;
-            let fcqdz = gl_add_light(cs.clone(), &fcqd, &zero_term)?;
+            let fcqdz = gl_add_light(cs.clone(), &fcq, &zero_term)?;
             let fcqdzc = gl_add_light(cs.clone(), &fcqdz, &capture_term)?;
             constraints.push(gl_add_light(cs.clone(), &fcqdzc, &canon_term)?);
         } else if i == 6 {
             // FRI column 6: equality verification on ALL DeepCompose rows.
             let ood_term = gl_mul_light(cs.clone(), &op.is_deep, &equality_constraint)?;
+
             // Copy gating for column 6 matches AIR:
-            // disable copy only on rows that *update* the accumulator (qgen / powshift)
-            // and the distinctness check row (which reuses fri[6]).
-            let t6a = gl_add_light(cs.clone(), &is_qgen_nop, &is_distinct_nop)?;
-            let t6b = gl_add_light(cs.clone(), &t6a, &is_powshift_nop)?;
-            let one_minus_q6 = gl_sub_light(cs.clone(), &one, &t6b)?;
+            // disable copy only on rows that *update* the accumulator (qgen / powshift).
+            let t6a = gl_add_light(cs.clone(), &is_qgen_nop, &is_powshift_nop)?;
+            let one_minus_q6 = gl_sub_light(cs.clone(), &one, &t6a)?;
             let copy_ok6 = gl_mul_light(cs.clone(), &both_not_special, &one_minus_q6)?;
             let copy_term = gl_mul_light(cs.clone(), &copy_ok6, &copy_constraint)?;
+
             // QueryGen accumulator update: acc_next = acc_cur + bit * pow2.
             let bit = current[FRI_START + 5].clone();
             let pow2 = current[FRI_START + 7].clone();
@@ -796,15 +843,19 @@ fn evaluate_verifier_air_constraints_gl(
             let acc_update = gl_sub_light(cs.clone(), fri_next, &rhs)?;
             let qgen_sel = gl_add_light(cs.clone(), &is_qgen_nop, &is_powshift_nop)?;
             let qgen_term = gl_mul_light(cs.clone(), &qgen_sel, &acc_update)?;
-            let t = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
+
             // Freeze: acc_next == acc_cur
             let acc_copy = gl_sub_light(cs.clone(), fri_next, fri_curr)?;
             let freeze_term = gl_mul_light(cs.clone(), &is_freeze_nop, &acc_copy)?;
             // Capture: acc == 0
             let capture_acc_zero = gl_mul_light(cs.clone(), &is_capture_nop, fri_curr)?;
-            let tq = gl_add_light(cs.clone(), &t, &qgen_term)?;
-            let tq2 = gl_add_light(cs.clone(), &tq, &freeze_term)?;
-            constraints.push(gl_add_light(cs.clone(), &tq2, &capture_acc_zero)?);
+
+            let t = gl_add_light(cs.clone(), &ood_term, &copy_term)?;
+            let t = gl_add_light(cs.clone(), &t, &qgen_term)?;
+            let t = gl_add_light(cs.clone(), &t, &freeze_term)?;
+            let t = gl_add_light(cs.clone(), &t, &capture_acc_zero)?;
+            constraints.push(t);
+            // (the rest of the column-6 accumulator constraints were integrated above)
         } else if i < 4 {
             // FRI columns 0-3: ROOT/STATEMENT/PARAMS VERIFICATION
             //
@@ -845,13 +896,16 @@ fn evaluate_verifier_air_constraints_gl(
                 let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
                 let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
                 let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
-                let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
+                let k12 = GlVar(FpGLVar::constant(InnerFr::from(12u64)));
+                let inv_neg6 = GlVar(FpGLVar::constant(InnerFr::from(3074457344902430720u64))); // (-6)^(-1)
                 let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
                 let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
                 let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+                let rc_m12 = gl_sub_light(cs.clone(), rc, &k12)?;
                 let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
                 let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
-                let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+                let t_l11c = gl_mul_light(cs.clone(), &t_l11b, &rc_m12)?;
+                let l11 = gl_mul_light(cs.clone(), &t_l11c, &inv_neg6)?;
 
                 let dir = fri_curr;
                 // enforce_binary: dir * (dir - 1)
@@ -878,12 +932,11 @@ fn evaluate_verifier_air_constraints_gl(
             } else {
                 // i == 7: QueryGen pow2 update: pow2_next = 2*pow2_cur.
                 // Copy gating for column 7 matches AIR: do NOT disable copy on capture rows.
-                let t7a = gl_add_light(cs.clone(), &is_qgen_nop, &is_distinct_nop)?;
-                let t7b = gl_add_light(cs.clone(), &t7a, &is_zerocheck_nop)?;
-                let t7c = gl_add_light(cs.clone(), &t7b, &is_canon_nop)?;
-                let t7d = gl_add_light(cs.clone(), &t7c, &is_powshift_nop)?;
-                let t7e = gl_add_light(cs.clone(), &t7d, &is_export_nop)?;
-                let one_minus_q7 = gl_sub_light(cs.clone(), &one, &t7e)?;
+                let t7a = gl_add_light(cs.clone(), &is_qgen_nop, &is_zerocheck_nop)?;
+                let t7b = gl_add_light(cs.clone(), &t7a, &is_canon_nop)?;
+                let t7c = gl_add_light(cs.clone(), &t7b, &is_powshift_nop)?;
+                let t7d = gl_add_light(cs.clone(), &t7c, &is_export_nop)?;
+                let one_minus_q7 = gl_sub_light(cs.clone(), &one, &t7d)?;
                 let copy_ok7 = gl_mul_light(cs.clone(), &both_not_special, &one_minus_q7)?;
                 let copy_term = gl_mul_light(cs.clone(), &copy_ok7, &copy_constraint)?;
                 let two_pow2 = gl_mul_light(cs.clone(), &two_gl, fri_curr)?;
@@ -911,18 +964,22 @@ fn evaluate_verifier_air_constraints_gl(
         let idx_next = &next[IDX_REG];
         let copy_constraint = gl_sub_light(cs.clone(), idx_next, idx_curr)?;
 
-        // l11 selector over init kinds {8,9,10,11}: (rc-8)(rc-9)(rc-10)/6
+        // l11 selector for init kind 11 over {8,9,10,11,12}:
+        // l11 = (rc-8)(rc-9)(rc-10)(rc-12)/(-6)
         let rc = &current[AUX_START]; // aux[0]
         let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
         let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
         let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
-        let inv6 = GlVar(FpGLVar::constant(InnerFr::from(15372286724512153601u64)));
+        let k12 = GlVar(FpGLVar::constant(InnerFr::from(12u64)));
+        let inv_neg6 = GlVar(FpGLVar::constant(InnerFr::from(3074457344902430720u64))); // (-6)^(-1)
         let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
         let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
         let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+        let rc_m12 = gl_sub_light(cs.clone(), rc, &k12)?;
         let t_l11a = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
         let t_l11b = gl_mul_light(cs.clone(), &t_l11a, &rc_m10)?;
-        let l11 = gl_mul_light(cs.clone(), &t_l11b, &inv6)?;
+        let t_l11c = gl_mul_light(cs.clone(), &t_l11b, &rc_m12)?;
+        let l11 = gl_mul_light(cs.clone(), &t_l11c, &inv_neg6)?;
 
         let dir = current[FRI_START + 5].clone();
         let two_gl = GlVar(FpGLVar::constant(InnerFr::from(2u64)));
@@ -1017,44 +1074,253 @@ fn evaluate_verifier_air_constraints_gl(
         constraints.push(gl_add_light(cs.clone(), &t3, &export_requires_prev_zerocheck)?);
     }
 
-    // --- 9. Expected-root register constraints (4) ---
+    // --- 9. QueryGen step counter constraints (1) ---
     //
-    // Mirrors `verifier_air/constraints.rs` root_reg:
-    // - default copy
-    // - Init kind 12 (LOAD_ROOT4): root_next[j] = fri_curr[j] for j in 0..4
+    // Mirrors `verifier_air/constraints.rs` qgen_ctr:
+    // - capture (aux[2]=11): next = 0
+    // - qgen/powshift/freeze (aux[2] in {6,10,13}): next = cur + 1
+    // - otherwise: copy (except allow reset on transitions INTO capture)
+    // - export rows require ctr==64 and the row immediately before an export also requires ctr==64
     {
-        let root_update_kind = {
-            let rc = &current[AUX_START]; // aux[0]
-            let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
-            let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
-            let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
-            let k11 = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
-            let inv24 = GlVar(FpGLVar::constant(InnerFr::from(17678129733188976641u64)));
-            // l12 = (rc-8)(rc-9)(rc-10)(rc-11)/24
-            let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
-            let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
-            let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
-            let rc_m11 = gl_sub_light(cs.clone(), rc, &k11)?;
-            let t = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
-            let t2 = gl_mul_light(cs.clone(), &t, &rc_m10)?;
-            let num = gl_mul_light(cs.clone(), &t2, &rc_m11)?;
-            gl_mul_light(cs.clone(), &num, &inv24)?
-        };
-        let is_load_root = gl_mul_light(cs.clone(), &op.is_init, &root_update_kind)?;
+        let ctr_cur = &current[QGEN_CTR];
+        let ctr_next = &next[QGEN_CTR];
+
+        let one_gl = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+        let sixty_four = GlVar(FpGLVar::constant(InnerFr::from(64u64)));
+
+        let copy = gl_sub_light(cs.clone(), ctr_next, ctr_cur)?;
+        let cur_plus_one = gl_add_light(cs.clone(), ctr_cur, &one_gl)?;
+        let inc = gl_sub_light(cs.clone(), ctr_next, &cur_plus_one)?;
+        let reset = ctr_next.clone(); // == 0
+
+        let qp = gl_add_light(cs.clone(), &is_qgen_nop, &is_powshift_nop)?;
+        let inc_mode = gl_add_light(cs.clone(), &qp, &is_freeze_nop)?;
+
+        // other_mode = 1 - is_capture_nop - inc_mode
+        let t = gl_add_light(cs.clone(), &is_capture_nop, &inc_mode)?;
+        let other_mode = gl_sub_light(cs.clone(), &one_gl, &t)?;
+
+        // export requires ctr==64
+        let ctr_minus_64 = gl_sub_light(cs.clone(), ctr_cur, &sixty_four)?;
+        let export_requires_ctr = gl_mul_light(cs.clone(), &is_export_nop, &ctr_minus_64)?;
+
+        // prev_export requires ctr==64: if next row is export_nop, enforce ctr_cur==64
+        let next_mode = &next[AUX_START + 2];
+        let six_gl = GlVar(FpGLVar::constant(InnerFr::from(6u64)));
+        let seven_gl = GlVar(FpGLVar::constant(InnerFr::from(7u64)));
+        let eight_gl = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+        let nine_gl = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+        let ten_gl = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+        let eleven_gl = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
+        let twelve_gl = GlVar(FpGLVar::constant(InnerFr::from(12u64)));
+        let thirteen_gl = GlVar(FpGLVar::constant(InnerFr::from(13u64)));
+        let inv_neg_8640 = GlVar(FpGLVar::constant(InnerFr::from(8200687959562664164u64)));
+        let inv_2640 = GlVar(FpGLVar::constant(InnerFr::from(13408826465608555800u64)));
+
+        let nm_m6 = gl_sub_light(cs.clone(), next_mode, &six_gl)?;
+        let nm_m7 = gl_sub_light(cs.clone(), next_mode, &seven_gl)?;
+        let nm_m8 = gl_sub_light(cs.clone(), next_mode, &eight_gl)?;
+        let nm_m9 = gl_sub_light(cs.clone(), next_mode, &nine_gl)?;
+        let nm_m10 = gl_sub_light(cs.clone(), next_mode, &ten_gl)?;
+        let nm_m11 = gl_sub_light(cs.clone(), next_mode, &eleven_gl)?;
+        let nm_m12 = gl_sub_light(cs.clone(), next_mode, &twelve_gl)?;
+        let nm_m13 = gl_sub_light(cs.clone(), next_mode, &thirteen_gl)?;
+
+        // next_is_export: mode 12 (denom = -8640) over {0,6,7,8,9,10,11,12,13}
+        let ne1 = gl_mul_light(cs.clone(), next_mode, &nm_m6)?;
+        let ne2 = gl_mul_light(cs.clone(), &ne1, &nm_m7)?;
+        let ne3 = gl_mul_light(cs.clone(), &ne2, &nm_m8)?;
+        let ne4 = gl_mul_light(cs.clone(), &ne3, &nm_m9)?;
+        let ne5 = gl_mul_light(cs.clone(), &ne4, &nm_m10)?;
+        let ne6 = gl_mul_light(cs.clone(), &ne5, &nm_m11)?;
+        let ne7 = gl_mul_light(cs.clone(), &ne6, &nm_m13)?;
+        let next_is_export = gl_mul_light(cs.clone(), &ne7, &inv_neg_8640)?;
+        let next_is_export_nop = gl_mul_light(cs.clone(), &next_op.is_nop, &next_is_export)?;
+        let prev_export_requires_ctr = gl_mul_light(cs.clone(), &next_is_export_nop, &ctr_minus_64)?;
+
+        // Allow reset at the start of microprogram: disable copy on transitions INTO capture.
+        // next_is_capture: mode 11 (denom = 2640) over {0,6,7,8,9,10,11,12,13}
+        let nc1 = gl_mul_light(cs.clone(), next_mode, &nm_m6)?;
+        let nc2 = gl_mul_light(cs.clone(), &nc1, &nm_m7)?;
+        let nc3 = gl_mul_light(cs.clone(), &nc2, &nm_m8)?;
+        let nc4 = gl_mul_light(cs.clone(), &nc3, &nm_m9)?;
+        let nc5 = gl_mul_light(cs.clone(), &nc4, &nm_m10)?;
+        let nc6 = gl_mul_light(cs.clone(), &nc5, &nm_m12)?;
+        let nc7 = gl_mul_light(cs.clone(), &nc6, &nm_m13)?;
+        let next_is_capture = gl_mul_light(cs.clone(), &nc7, &inv_2640)?;
+        let next_is_capture_nop = gl_mul_light(cs.clone(), &next_op.is_nop, &next_is_capture)?;
+        let one_minus_next_capture = gl_sub_light(cs.clone(), &one_gl, &next_is_capture_nop)?;
+
+        let copy_if_ok = gl_mul_light(cs.clone(), &one_minus_next_capture, &copy)?;
+        let copy_term = gl_mul_light(cs.clone(), &other_mode, &copy_if_ok)?;
+        let reset_term = gl_mul_light(cs.clone(), &is_capture_nop, &reset)?;
+        let inc_term = gl_mul_light(cs.clone(), &inc_mode, &inc)?;
+
+        let t1 = gl_add_light(cs.clone(), &reset_term, &inc_term)?;
+        let t2 = gl_add_light(cs.clone(), &t1, &copy_term)?;
+        let t3 = gl_add_light(cs.clone(), &t2, &export_requires_ctr)?;
+        constraints.push(gl_add_light(cs.clone(), &t3, &prev_export_requires_ctr)?);
+    }
+
+    // --- 10. Expected-root register constraints (4) ---
+    //
+    // Mirrors `verifier_air/constraints.rs` root_reg binding on LOAD_ROOT4 (init-kind 12):
+    // - default copy
+    // - update on LOAD_ROOT4: root_next[j] = fri_curr[j]
+    // - bind loaded fri[0..3] to the public-input commitment selected by `root_kind`
+    {
+        use winter_math::fields::f64::BaseElement as GlBase;
+        use winter_math::FieldElement;
+
+        let trace_commitment_gl: [GlVar; 4] = [
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(trace_commitment[0])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(trace_commitment[1])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(trace_commitment[2])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(trace_commitment[3])))?),
+        ];
+        let comp_commitment_gl: [GlVar; 4] = [
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(comp_commitment[0])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(comp_commitment[1])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(comp_commitment[2])))?),
+            GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(comp_commitment[3])))?),
+        ];
+
+        const MAX_FRI_LAYERS: usize = 32;
+        if fri_commitments.len() < MAX_FRI_LAYERS {
+            return Err(SynthesisError::Unsatisfiable);
+        }
+        let mut fri_roots_gl: Vec<[GlVar; 4]> = Vec::with_capacity(MAX_FRI_LAYERS);
+        for i in 0..MAX_FRI_LAYERS {
+            let c = fri_commitments[i];
+            fri_roots_gl.push([
+                GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c[0])))?),
+                GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c[1])))?),
+                GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c[2])))?),
+                GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(c[3])))?),
+            ]);
+        }
+
+        // Lagrange selector for init kind 12 over {8,9,10,11,12}: l12 = (rc-8)(rc-9)(rc-10)(rc-11)/24
+        let rc = &current[AUX_START]; // aux[0]
+        let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+        let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+        let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+        let k11 = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
+        let inv24 = GlVar(FpGLVar::constant(InnerFr::from(17678129733188976641u64)));
+        let rc_m8 = gl_sub_light(cs.clone(), rc, &k8)?;
+        let rc_m9 = gl_sub_light(cs.clone(), rc, &k9)?;
+        let rc_m10 = gl_sub_light(cs.clone(), rc, &k10)?;
+        let rc_m11 = gl_sub_light(cs.clone(), rc, &k11)?;
+        let t = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t2 = gl_mul_light(cs.clone(), &t, &rc_m10)?;
+        let num = gl_mul_light(cs.clone(), &t2, &rc_m11)?;
+        let l12 = gl_mul_light(cs.clone(), &num, &inv24)?;
+        let is_load_root = gl_mul_light(cs.clone(), &op.is_init, &l12)?;
+
         let one = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
         let copy_ok = gl_sub_light(cs.clone(), &one, &is_load_root)?;
+
+        // root_kind selection
+        let rk = &current[ROOT_KIND];
+        let max_kind = 1 + MAX_FRI_LAYERS; // 17
+
+        // rk_range = Π_{k=0..max_kind} (rk - k)  (implemented as rk * Π_{k=1..max_kind} (rk - k))
+        let mut rk_range = rk.clone();
+        for k in 1..=(max_kind as u64) {
+            let k_gl = GlVar(FpGLVar::constant(InnerFr::from(k)));
+            let rk_mk = gl_sub_light(cs.clone(), rk, &k_gl)?;
+            rk_range = gl_mul_light(cs.clone(), &rk_range, &rk_mk)?;
+        }
+
+        // sels[k] = L_k(rk) over points {0..=max_kind}
+        let mut sels: Vec<GlVar> = Vec::with_capacity(max_kind + 1);
+        for k in 0..=max_kind {
+            let mut num_k = one.clone();
+            for m in 0..=max_kind {
+                if m == k {
+                    continue;
+                }
+                let m_gl = GlVar(FpGLVar::constant(InnerFr::from(m as u64)));
+                let rk_mm = gl_sub_light(cs.clone(), rk, &m_gl)?;
+                num_k = gl_mul_light(cs.clone(), &num_k, &rk_mm)?;
+            }
+            // denom = Π_{m!=k} (k - m) in Goldilocks; invert in Goldilocks and embed as u64 constant.
+            let mut den = GlBase::ONE;
+            let k_fe = GlBase::new(k as u64);
+            for m in 0..=max_kind {
+                if m == k {
+                    continue;
+                }
+                let m_fe = GlBase::new(m as u64);
+                den *= k_fe - m_fe;
+            }
+            let den_inv_u64 = den.inv().as_int();
+            let den_inv = GlVar(FpGLVar::constant(InnerFr::from(den_inv_u64)));
+            sels.push(gl_mul_light(cs.clone(), &num_k, &den_inv)?);
+        }
+
         for j in 0..4 {
             let root_curr = &current[ROOT_REG_START + j];
             let root_next = &next[ROOT_REG_START + j];
             let copy_constraint = gl_sub_light(cs.clone(), root_next, root_curr)?;
             let update_constraint = gl_sub_light(cs.clone(), root_next, &current[FRI_START + j])?;
+
+            // expected = sel0*trace + sel1*comp + Σ sel_{2+i}*fri[i]
+            let t0 = gl_mul_light(cs.clone(), &sels[0], &trace_commitment_gl[j])?;
+            let t1 = gl_mul_light(cs.clone(), &sels[1], &comp_commitment_gl[j])?;
+            let mut expected = gl_add_light(cs.clone(), &t0, &t1)?;
+            for i in 0..MAX_FRI_LAYERS {
+                let sel = &sels[2 + i];
+                let term = gl_mul_light(cs.clone(), sel, &fri_roots_gl[i][j])?;
+                expected = gl_add_light(cs.clone(), &expected, &term)?;
+            }
+            let bind_loaded = gl_sub_light(cs.clone(), &current[FRI_START + j], &expected)?;
+
             let copy_term = gl_mul_light(cs.clone(), &copy_ok, &copy_constraint)?;
             let update_term = gl_mul_light(cs.clone(), &is_load_root, &update_constraint)?;
-            constraints.push(gl_add_light(cs.clone(), &copy_term, &update_term)?);
+            let bind_term = gl_mul_light(cs.clone(), &is_load_root, &bind_loaded)?;
+            let mut c = gl_add_light(cs.clone(), &copy_term, &update_term)?;
+            c = gl_add_light(cs.clone(), &c, &bind_term)?;
+            if j == 0 {
+                // enforce rk_range == 0 on load_root rows
+                let rk_term = gl_mul_light(cs.clone(), &is_load_root, &rk_range)?;
+                c = gl_add_light(cs.clone(), &c, &rk_term)?;
+            }
+            constraints.push(c);
         }
     }
 
-    // --- 10. Auxiliary constraints (4) ---
+    // --- 11. Root-kind selector constraints (1) ---
+    //
+    // Mirrors `verifier_air/constraints.rs` root_kind:
+    // allow root_kind to change only on transitions INTO Init(kind=LOAD_ROOT4) rows.
+    {
+        let rk_cur = &current[ROOT_KIND];
+        let rk_next = &next[ROOT_KIND];
+        let copy_constraint = gl_sub_light(cs.clone(), rk_next, rk_cur)?;
+
+        // Allow updates when the NEXT row is Init(kind=LOAD_ROOT4).
+        let next_rc = &next[AUX_START]; // aux[0] on next row
+        let k8 = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
+        let k9 = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
+        let k10 = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
+        let k11 = GlVar(FpGLVar::constant(InnerFr::from(11u64)));
+        let inv24 = GlVar(FpGLVar::constant(InnerFr::from(17678129733188976641u64)));
+        let rc_m8 = gl_sub_light(cs.clone(), next_rc, &k8)?;
+        let rc_m9 = gl_sub_light(cs.clone(), next_rc, &k9)?;
+        let rc_m10 = gl_sub_light(cs.clone(), next_rc, &k10)?;
+        let rc_m11 = gl_sub_light(cs.clone(), next_rc, &k11)?;
+        let t = gl_mul_light(cs.clone(), &rc_m8, &rc_m9)?;
+        let t2 = gl_mul_light(cs.clone(), &t, &rc_m10)?;
+        let num = gl_mul_light(cs.clone(), &t2, &rc_m11)?;
+        let l12_next = gl_mul_light(cs.clone(), &num, &inv24)?;
+        let next_is_load_root = gl_mul_light(cs.clone(), &next_op.is_init, &l12_next)?;
+        let one = GlVar(FpGLVar::constant(InnerFr::from(1u64)));
+        let copy_ok = gl_sub_light(cs.clone(), &one, &next_is_load_root)?;
+        constraints.push(gl_mul_light(cs.clone(), &copy_ok, &copy_constraint)?);
+    }
+
+    // --- 12. Auxiliary constraints (4) ---
     for i in 0..4 {
         let aux_curr = &current[AUX_START + i];
         let aux_next = &next[AUX_START + i];
@@ -1109,12 +1375,17 @@ fn evaluate_verifier_air_constraints_gl(
             // - statement hash (mode 4): +1
             // - params digest (mode 5): +4096
             //
-            // Packed encoding: aux[1] = statement_count + 4096 * params_count + 2^32 * root_count
+            // Packed encoding:
+            //   aux[1] = statement_count
+            //          + 4096 * params_count
+            //          + 65536 * fri_link_count
+            //          + 2^32 * root_count
             //
             // Update rules:
             // - On DeepCompose mode 0: aux[1] += 2^32
             // - On DeepCompose mode 4: aux[1] += 1
             // - On DeepCompose mode 5: aux[1] += 4096
+            // - On DeepCompose mode 3: aux[1] += 65536
             // - Otherwise: aux[1] unchanged
             //
             // Constraint: aux[1]_next - aux[1]_curr - is_deep * (is_mode_0 * 2^32 + is_mode_4 + is_mode_5 * 4096) = 0
@@ -1163,12 +1434,24 @@ fn evaluate_verifier_air_constraints_gl(
             let r3 = gl_mul_light(cs.clone(), &r2, &mode_m4)?;
             let is_mode_0_raw = gl_mul_light(cs.clone(), &r3, &mode_m5)?;
             let is_mode_0 = gl_mul_light(cs.clone(), &is_mode_0_raw, &inv_neg_120)?;
+
+            // is_mode_3_raw = mode*(mode-1)*(mode-2)*(mode-4)*(mode-5) = 12 when mode=3
+            let s1 = gl_mul_light(cs.clone(), mode, &mode_m1)?;
+            let s2 = gl_mul_light(cs.clone(), &s1, &mode_m2)?;
+            let s3 = gl_mul_light(cs.clone(), &s2, &mode_m4)?;
+            let is_mode_3_raw = gl_mul_light(cs.clone(), &s3, &mode_m5)?;
+            // Normalize by 12
+            let inv_12 = GlVar(FpGLVar::constant(InnerFr::from(13835058052060938241u64))); // 12^{-1} in Goldilocks
+            let is_mode_3 = gl_mul_light(cs.clone(), &is_mode_3_raw, &inv_12)?;
             
-            // increment = is_mode_0 * 2^32 + is_mode_4 + is_mode_5 * 4096
+            // increment = is_mode_0 * 2^32 + is_mode_4 + is_mode_5 * 4096 + is_mode_3 * 65536
             let mode_5_scaled = gl_mul_light(cs.clone(), &is_mode_5, &four_thousand_ninety_six)?;
             let mode_0_scaled = gl_mul_light(cs.clone(), &is_mode_0, &two_pow_32)?;
+            let sixty_five_thousand_five_hundred_thirty_six = GlVar(FpGLVar::constant(InnerFr::from(65536u64)));
+            let mode_3_scaled = gl_mul_light(cs.clone(), &is_mode_3, &sixty_five_thousand_five_hundred_thirty_six)?;
             let t_inc = gl_add_light(cs.clone(), &mode_0_scaled, &is_mode_4)?;
-            let mode_increment = gl_add_light(cs.clone(), &t_inc, &mode_5_scaled)?;
+            let t_inc2 = gl_add_light(cs.clone(), &t_inc, &mode_5_scaled)?;
+            let mode_increment = gl_add_light(cs.clone(), &t_inc2, &mode_3_scaled)?;
             
             // final_increment = is_deep * mode_increment
             let final_increment = gl_mul_light(cs.clone(), &op.is_deep, &mode_increment)?;
@@ -1192,11 +1475,10 @@ fn evaluate_verifier_air_constraints_gl(
             // aux[2]: mode value.
             //
             // SECURITY:
-            // - On Nop rows, restrict aux[2] to {0,6,7,8,9,10,11,12,13} to keep sub-mode selectors well-defined.
+            // - On Nop rows, restrict aux[2] to {0,6,8,9,10,11,12,13} to keep sub-mode selectors well-defined.
             // - On DeepCompose rows, restrict aux[2] to {0,1,2,3,4,5} to prevent skippable checks.
             let mode = aux_curr;
             let six = GlVar(FpGLVar::constant(InnerFr::from(6u64)));
-            let seven = GlVar(FpGLVar::constant(InnerFr::from(7u64)));
             let eight = GlVar(FpGLVar::constant(InnerFr::from(8u64)));
             let nine = GlVar(FpGLVar::constant(InnerFr::from(9u64)));
             let ten = GlVar(FpGLVar::constant(InnerFr::from(10u64)));
@@ -1204,11 +1486,9 @@ fn evaluate_verifier_air_constraints_gl(
             let twelve = GlVar(FpGLVar::constant(InnerFr::from(12u64)));
             let thirteen = GlVar(FpGLVar::constant(InnerFr::from(13u64)));
             let m6 = gl_sub_light(cs.clone(), mode, &six)?;
-            let m7 = gl_sub_light(cs.clone(), mode, &seven)?;
             let t = gl_mul_light(cs.clone(), mode, &m6)?;
-            let t2 = gl_mul_light(cs.clone(), &t, &m7)?;
             let m8 = gl_sub_light(cs.clone(), mode, &eight)?;
-            let t3 = gl_mul_light(cs.clone(), &t2, &m8)?;
+            let t3 = gl_mul_light(cs.clone(), &t, &m8)?;
             let m9 = gl_sub_light(cs.clone(), mode, &nine)?;
             let t4 = gl_mul_light(cs.clone(), &t3, &m9)?;
             let m10 = gl_sub_light(cs.clone(), mode, &ten)?;
@@ -1520,7 +1800,7 @@ pub fn mod_pow_goldilocks(base: u64, exp: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stark::test_utils::build_vdf_recursive_stark_instance;
+    use crate::stark::test_utils::{build_vdf_recursive_stark_instance, build_vdf_recursive_stark_instance_with_fri};
     use crate::stark::verifier_air::constraints as air_constraints;
     use crate::stark::verifier_air::VerifierPublicInputs;
     use ark_r1cs_std::R1CSVar;
@@ -1529,44 +1809,73 @@ mod tests {
     use winter_math::FieldElement as _;
     use winterfell::EvaluationFrame;
 
+    fn parse_verifier_pub_inputs_from_u64s(stark_pub_inputs: &[u64]) -> VerifierPublicInputs {
+        // Must match `VerifierPublicInputs::to_elements()`:
+        // [stmt(4)][trace(4)][comp(4)][fri(4*k, k>=1 padded)][num_queries][proof_trace_len][g_trace][pub_result]
+        // [expected_checkpoint_count][expected_mode_counter][params_digest(4)]
+        assert!(stark_pub_inputs.len() >= 24);
+        let n = stark_pub_inputs.len();
+        let tail10_start = n - 10;
+        let fri_start = 12;
+        assert!(tail10_start >= fri_start);
+        assert!((tail10_start - fri_start) % 4 == 0);
+        let fri_len = (tail10_start - fri_start) / 4;
+        let mut fri_commitments = Vec::with_capacity(fri_len);
+        for i in 0..fri_len {
+            let off = fri_start + 4 * i;
+            fri_commitments.push([
+                GL::new(stark_pub_inputs[off]),
+                GL::new(stark_pub_inputs[off + 1]),
+                GL::new(stark_pub_inputs[off + 2]),
+                GL::new(stark_pub_inputs[off + 3]),
+            ]);
+        }
+
+        VerifierPublicInputs {
+            statement_hash: [
+                GL::new(stark_pub_inputs[0]),
+                GL::new(stark_pub_inputs[1]),
+                GL::new(stark_pub_inputs[2]),
+                GL::new(stark_pub_inputs[3]),
+            ],
+            trace_commitment: [
+                GL::new(stark_pub_inputs[4]),
+                GL::new(stark_pub_inputs[5]),
+                GL::new(stark_pub_inputs[6]),
+                GL::new(stark_pub_inputs[7]),
+            ],
+            comp_commitment: [
+                GL::new(stark_pub_inputs[8]),
+                GL::new(stark_pub_inputs[9]),
+                GL::new(stark_pub_inputs[10]),
+                GL::new(stark_pub_inputs[11]),
+            ],
+            fri_commitments,
+            num_queries: stark_pub_inputs[n - 10] as usize,
+            proof_trace_len: stark_pub_inputs[n - 9] as usize,
+            g_trace: GL::new(stark_pub_inputs[n - 8]),
+            pub_result: GL::new(stark_pub_inputs[n - 7]),
+            expected_checkpoint_count: stark_pub_inputs[n - 6] as usize,
+            expected_mode_counter: stark_pub_inputs[n - 5] as usize,
+            params_digest: [
+                GL::new(stark_pub_inputs[n - 4]),
+                GL::new(stark_pub_inputs[n - 3]),
+                GL::new(stark_pub_inputs[n - 2]),
+                GL::new(stark_pub_inputs[n - 1]),
+            ],
+        }
+    }
+
     #[test]
     fn test_r1cs_transition_eval_matches_air_on_real_ood_frame() {
-        const N: usize = 32;
+        const N: usize = 34;
         // Build a real VerifierAir proof instance and reuse its parsed OOD frame rows.
         let instance = build_vdf_recursive_stark_instance(3, 8);
         let circuit = instance.circuit;
 
-        // Extract statement_hash + params_digest from VerifierPublicInputs encoding.
-        assert!(circuit.stark_pub_inputs.len() >= 8);
-        let pub_len = circuit.stark_pub_inputs.len();
-        let statement_hash_u64: [u64; 4] = [
-            circuit.stark_pub_inputs[0],
-            circuit.stark_pub_inputs[1],
-            circuit.stark_pub_inputs[2],
-            circuit.stark_pub_inputs[3],
-        ];
-        let params_digest_u64: [u64; 4] = [
-            circuit.stark_pub_inputs[pub_len - 4],
-            circuit.stark_pub_inputs[pub_len - 3],
-            circuit.stark_pub_inputs[pub_len - 2],
-            circuit.stark_pub_inputs[pub_len - 1],
-        ];
-
-        let statement_hash_be: [GL; 4] = statement_hash_u64.map(GL::new);
-        let params_digest_be: [GL; 4] = params_digest_u64.map(GL::new);
-        let pub_inputs = VerifierPublicInputs {
-            statement_hash: statement_hash_be,
-            trace_commitment: [GL::ZERO; 4],
-            comp_commitment: [GL::ZERO; 4],
-            fri_commitments: vec![],
-            num_queries: 2,
-            proof_trace_len: 8,
-            g_trace: GL::ONE,
-            pub_result: GL::ZERO,
-            expected_checkpoint_count: 0,
-            params_digest: params_digest_be,
-            expected_mode_counter: 0,
-        };
+        let pub_inputs = parse_verifier_pub_inputs_from_u64s(&circuit.stark_pub_inputs);
+        let statement_hash_u64: [u64; 4] = pub_inputs.statement_hash.map(|x| x.as_int());
+        let params_digest_u64: [u64; 4] = pub_inputs.params_digest.map(|x| x.as_int());
 
         // AIR evaluation on the OOD frame rows (as field elements).
         let cur_be: Vec<GL> = circuit.ood_trace_current.iter().map(|&u| GL::new(u)).collect();
@@ -1590,11 +1899,27 @@ mod tests {
             nxt_gl.push(GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(u_nxt))).unwrap()));
         }
 
+        let trace_commitment_u64: [u64; 4] = pub_inputs.trace_commitment.map(|x| x.as_int());
+        let comp_commitment_u64: [u64; 4] = pub_inputs.comp_commitment.map(|x| x.as_int());
+        const MAX_FRI_LAYERS: usize = 32;
+        let mut fri_commitments_u64: Vec<[u64; 4]> = Vec::with_capacity(MAX_FRI_LAYERS);
+        for i in 0..MAX_FRI_LAYERS {
+            let c = pub_inputs
+                .fri_commitments
+                .get(i)
+                .copied()
+                .unwrap_or([GL::ZERO; 4]);
+            fri_commitments_u64.push(c.map(|x| x.as_int()));
+        }
+
         let r1cs_vals = super::evaluate_verifier_air_constraints_gl(
             cs.clone(),
             &cur_gl,
             &nxt_gl,
             &statement_hash_u64,
+            &trace_commitment_u64,
+            &comp_commitment_u64,
+            &fri_commitments_u64,
             &params_digest_u64,
         )
         .unwrap();
@@ -1607,6 +1932,77 @@ mod tests {
                 got,
                 InnerFr::from(expected),
                 "constraint {} mismatch: expected {} got {:?}",
+                i,
+                expected,
+                got
+            );
+        }
+    }
+
+    #[test]
+    fn test_r1cs_transition_eval_matches_air_on_real_ood_frame_with_fri() {
+        const N: usize = 34;
+        // Build a real VerifierAir proof instance which includes non-trivial FRI layers.
+        let instance = build_vdf_recursive_stark_instance_with_fri(3, 8);
+        let circuit = instance.circuit;
+
+        let pub_inputs = parse_verifier_pub_inputs_from_u64s(&circuit.stark_pub_inputs);
+        let statement_hash_u64: [u64; 4] = pub_inputs.statement_hash.map(|x| x.as_int());
+        let params_digest_u64: [u64; 4] = pub_inputs.params_digest.map(|x| x.as_int());
+
+        let cur_be: Vec<GL> = circuit.ood_trace_current.iter().map(|&u| GL::new(u)).collect();
+        let nxt_be: Vec<GL> = circuit.ood_trace_next.iter().map(|&u| GL::new(u)).collect();
+        assert_eq!(cur_be.len(), N);
+        assert_eq!(nxt_be.len(), N);
+
+        let frame = EvaluationFrame::from_rows(cur_be.clone(), nxt_be.clone());
+        let periodic_values: Vec<GL> = vec![];
+        let mut air_out = vec![GL::ZERO; N];
+        air_constraints::evaluate_all(&frame, &periodic_values, &mut air_out, &pub_inputs);
+
+        let cs = ConstraintSystem::<InnerFr>::new_ref();
+        let mut cur_gl = Vec::with_capacity(N);
+        let mut nxt_gl = Vec::with_capacity(N);
+        for i in 0..N {
+            let u_cur = circuit.ood_trace_current[i];
+            let u_nxt = circuit.ood_trace_next[i];
+            cur_gl.push(GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(u_cur))).unwrap()));
+            nxt_gl.push(GlVar(FpGLVar::new_witness(cs.clone(), || Ok(InnerFr::from(u_nxt))).unwrap()));
+        }
+
+        let trace_commitment_u64: [u64; 4] = pub_inputs.trace_commitment.map(|x| x.as_int());
+        let comp_commitment_u64: [u64; 4] = pub_inputs.comp_commitment.map(|x| x.as_int());
+        const MAX_FRI_LAYERS: usize = 32;
+        let mut fri_commitments_u64: Vec<[u64; 4]> = Vec::with_capacity(MAX_FRI_LAYERS);
+        for i in 0..MAX_FRI_LAYERS {
+            let c = pub_inputs
+                .fri_commitments
+                .get(i)
+                .copied()
+                .unwrap_or([GL::ZERO; 4]);
+            fri_commitments_u64.push(c.map(|x| x.as_int()));
+        }
+
+        let r1cs_vals = super::evaluate_verifier_air_constraints_gl(
+            cs.clone(),
+            &cur_gl,
+            &nxt_gl,
+            &statement_hash_u64,
+            &trace_commitment_u64,
+            &comp_commitment_u64,
+            &fri_commitments_u64,
+            &params_digest_u64,
+        )
+        .unwrap();
+        assert_eq!(r1cs_vals.len(), N);
+
+        for i in 0..N {
+            let expected = air_out[i].as_int();
+            let got = r1cs_vals[i].0.value().unwrap();
+            assert_eq!(
+                got,
+                InnerFr::from(expected),
+                "constraint {} mismatch (with FRI): expected {} got {:?}",
                 i,
                 expected,
                 got

@@ -378,9 +378,9 @@ fn prove_verifier_air_over_child(
     let trace = VerifierProver::new(verifier_options.clone()).build_verification_trace(child, child_type);
     let last = trace.length() - 1;
     // NOTE: with the dedicated idx_reg column, aux columns shifted by +1:
-    // aux[1] (mode counter) is at col 29, aux[3] (checkpoint counter) at col 31.
-    let expected_mode_counter = trace.get(29, last).as_int() as usize;
-    let expected_checkpoint_count = trace.get(31, last).as_int() as usize;
+    // aux[1] (mode counter) is at col 31, aux[3] (checkpoint counter) at col 33.
+    let expected_mode_counter = trace.get(31, last).as_int() as usize;
+    let expected_checkpoint_count = trace.get(33, last).as_int() as usize;
 
     let statement_hash = compute_statement_hash_sponge(child);
     let params_digest = [

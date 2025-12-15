@@ -560,7 +560,6 @@ impl OodFrame {
 /// (VDF, Fib, Bitcoin light client, etc.) without hardcoding their constraints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildAirType {
-    /// 32-column Verifier/Aggregator AIR
     /// Full STARK verification constraints (hash, Merkle, FRI, OOD)
     /// Used for recursive verification (VerifierAir verifying VerifierAir)
     VerifierAir,
@@ -579,7 +578,7 @@ impl ChildAirType {
     /// Number of columns for this AIR type
     pub fn trace_width(&self) -> usize {
         match self {
-            ChildAirType::VerifierAir => 32,
+            ChildAirType::VerifierAir => super::VERIFIER_TRACE_WIDTH,
             ChildAirType::Generic { formula, .. } => formula.trace_width,
         }
     }
@@ -587,7 +586,7 @@ impl ChildAirType {
     /// Number of transition constraints for this AIR type
     pub fn num_constraints(&self) -> usize {
         match self {
-            ChildAirType::VerifierAir => 32,
+            ChildAirType::VerifierAir => super::VERIFIER_TRACE_WIDTH,
             ChildAirType::Generic { formula, .. } => formula.constraints.len(),
         }
     }
@@ -742,9 +741,9 @@ pub fn evaluate_aggregator_constraints(
     evaluate_formula(&formula, trace_current, trace_next)
 }
 
-/// Verifier AIR constraints (32 columns)
+/// Verifier AIR constraints
 /// 
-/// This evaluates all 32 transition constraints for the Verifier/Aggregator AIR.
+/// This evaluates all transition constraints for the Verifier/Aggregator AIR.
 /// The constraints check RPO hash rounds, Merkle paths, FRI folding, and OOD verification.
 fn evaluate_verifier_constraints(
     trace_current: &[BaseElement],
@@ -843,7 +842,7 @@ pub fn verify_ood_constraint_equation(
 /// 
 /// # Child Types
 /// 
-/// - `VerifierAir`: 32-column Verifier/Aggregator constraints (recursive verification)
+/// - `VerifierAir`:Verifier/Aggregator constraints (recursive verification)
 /// - `Generic`: Formula-as-witness for truly generic verification (apps like VDF, Fib, etc.)
 pub fn verify_ood_constraint_equation_typed(
     ood_frame: &OodFrame,

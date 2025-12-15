@@ -88,19 +88,27 @@ fn full_stark_verifier_with_fri_smoke() {
     // Synthesize to check constraints
     use ark_relations::r1cs::ConstraintSynthesizer;
     use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::r1cs::ConstraintLayer;
     let cs = ConstraintSystem::new_ref();
-    instance
-        .circuit
-        .clone()
-        .generate_constraints(cs.clone())
-        .expect("generate constraints");
+    let subscriber = Registry::default().with(ConstraintLayer::default());
+    tracing::subscriber::with_default(subscriber, || {
+        instance
+            .circuit
+            .clone()
+            .generate_constraints(cs.clone())
+            .expect("generate constraints");
+    });
     
     println!("Circuit Statistics (with FRI):");
     println!("  Total Constraints: {}", cs.num_constraints());
     println!("  (Should be significantly larger than no-FRI version due to FRI verification)");
     
     assert!(cs.num_constraints() > 0, "Synthesized CS is empty");
-    assert!(cs.is_satisfied().unwrap(), "Circuit with FRI must be satisfied");
+    let ok = cs.is_satisfied().unwrap_or(false);
+    if !ok {
+        eprintln!("First failing constraint: {:?}", cs.which_is_unsatisfied());
+    }
+    assert!(ok, "Circuit with FRI must be satisfied");
     
     // The constraint count should be notably higher due to FRI verification
     // No-FRI version has ~3M constraints, with FRI should be ~5-10M+

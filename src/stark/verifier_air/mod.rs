@@ -66,8 +66,11 @@ use winterfell::{
 /// - 12 hash state columns (RPO-256)
 /// - 8 FRI/DEEP working columns
 /// - 1 dedicated Merkle index register column
+/// - 4 expected-root register columns
+/// - 1 querygen step-counter column
+/// - 1 root-kind selector column
 /// - 4 auxiliary columns
-pub const VERIFIER_TRACE_WIDTH: usize = 32;
+pub const VERIFIER_TRACE_WIDTH: usize = 34;
 
 /// Number of hash state columns (RPO-256 state)
 pub const HASH_STATE_WIDTH: usize = 12;
@@ -160,7 +163,11 @@ pub struct VerifierPublicInputs {
     pub params_digest: [BaseElement; 4],
     /// Expected mode counter
     /// 
-    /// Packed encoding: statement_count + 4096 * params_count + 2^32 * root_count
+    /// Packed encoding:
+    ///   statement_count
+    /// + 4096 * params_count
+    /// + 65536 * fri_link_count
+    /// + 2^32 * root_count
     ///
     /// - root_count is incremented on DeepCompose mode 0 (Merkle root checks)
     /// - statement_count is incremented on DeepCompose mode 4
@@ -236,7 +243,8 @@ impl VerifierPublicInputs {
         num_fri_layers: usize,
     ) -> usize {
         let root_count = num_queries * (2 + num_fri_layers);
-        (root_count << 32) + 1 + num_child_proofs * 4096
+        let fri_link_count = num_queries * num_fri_layers.saturating_sub(1);
+        (root_count << 32) + 1 + num_child_proofs * 4096 + fri_link_count * 65536
     }
 }
 
@@ -308,6 +316,7 @@ impl Air for VerifierAir {
             } else if i == 6 {
                 // Equality constraint on all DeepCompose rows:
                 // op.is_deep(3) * (fri[6]-fri[7])(1) = degree 4
+                // Plus QueryGen accumulator semantics and copy gating on non-special rows.
                 degrees.push(TransitionConstraintDegree::new(18));
             } else if i == 5 {
                 // Column 5 is scratch and is copied on non-special transitions:
@@ -337,6 +346,12 @@ impl Air for VerifierAir {
         // - copy: (1 - op.is_init*l11 - is_export_nop) * (idx_next-idx)(1) ≈ degree 12
         degrees.push(TransitionConstraintDegree::new(22));
 
+        // QueryGen step counter column (1):
+        // Copy by default; reset/increment on Nop sub-modes; plus export gating.
+        //
+        // NOTE: degree must match Winterfell's computed degree exactly.
+        degrees.push(TransitionConstraintDegree::new(23));
+
         // Expected-root register columns (4):
         // These bind Merkle root checks to the same digest value used elsewhere in the trace.
         // Each column enforces:
@@ -344,11 +359,19 @@ impl Air for VerifierAir {
         // - update on Init(kind=LOAD_ROOT4) rows: root_next = fri_curr[i]
         // - used on DeepCompose root-check rows: hash_state[i] == root_curr
         //
-        // Degree is dominated by the root-load gating:
-        // is_load_root = op.is_init(3) * l12(4) = 7, then * linear = 8.
-        for _ in 0..4 {
-            degrees.push(TransitionConstraintDegree::new(8));
+        // Degree is dominated by the root-load + binding selectors.
+        // Column 0 additionally includes the `root_kind` range-check polynomial.
+        //
+        // NOTE: Increasing MAX_FRI_LAYERS increases the degree of the root-kind selector basis,
+        // so these declared degrees must be updated accordingly.
+        degrees.push(TransitionConstraintDegree::new(41)); // root_reg[0]
+        for _ in 0..3 {
+            degrees.push(TransitionConstraintDegree::new(40)); // root_reg[1..3]
         }
+
+        // Root-kind selector column (1):
+        // Copy by default; allowed to change only when next row is Init(kind=LOAD_ROOT4).
+        degrees.push(TransitionConstraintDegree::new(8));
 
         // Auxiliary constraints (4):
         // aux[0]: degree 10 (round counter range check: is_permute*prod(rc-i) for i in 0..7)
@@ -370,9 +393,9 @@ impl Air for VerifierAir {
                 // op.is_deep = s2 * s1 * (1 - s0) = degree 3
                 degrees.push(TransitionConstraintDegree::new(3));
             } else {
-                // aux[2]: mode value. On Nop rows, constrained to {0,6,7,8,9,10,11,12,13}.
-                // op.is_nop(3) * degree-9 product = degree 12
-                degrees.push(TransitionConstraintDegree::new(12));
+                // aux[2]: mode value. On Nop rows, constrained to {0,6,8,9,10,11,12,13}.
+                // op.is_nop(3) * degree-8 product = degree 11
+                degrees.push(TransitionConstraintDegree::new(11));
             }
         }
 
@@ -408,17 +431,17 @@ impl Air for VerifierAir {
         }
 
         // Initial mode counter must be 0
-        // aux[1] is at column 29 (idx_reg + root_reg added)
+        // aux[1] is at column 31 (idx_reg + root_reg + qgen_ctr + root_kind added)
         assertions.push(Assertion::single(
-            29, // aux[1] = mode counter
+            31, // aux[1] = mode counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
 
         // Initial checkpoint counter must be 0
-        // aux[3] is at column 31 (idx_reg + root_reg added)
+        // aux[3] is at column 33 (idx_reg + root_reg + qgen_ctr + root_kind added)
         assertions.push(Assertion::single(
-            31, // aux[3] = checkpoint counter
+            33, // aux[3] = checkpoint counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
@@ -430,7 +453,7 @@ impl Air for VerifierAir {
         // For single proof: 1 + 4096*1 = 4097
         // For multi-proof (N children): 1 + 4096*N
         assertions.push(Assertion::single(
-            29, // aux[1] = mode counter
+            31, // aux[1] = mode counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_mode_counter as u64),
         ));
@@ -438,7 +461,7 @@ impl Air for VerifierAir {
         // Final checkpoint count must equal expected value
         // This ensures all verification steps were executed (not skipped).
         assertions.push(Assertion::single(
-            31, // aux[3] = checkpoint counter
+            33, // aux[3] = checkpoint counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64),
         ));

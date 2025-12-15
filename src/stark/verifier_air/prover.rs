@@ -209,19 +209,25 @@ pub fn append_proof_verification(
     proof_data: &ParsedProof,
     child_type: super::ood_eval::ChildAirType,
 ) -> VerificationResult {
-    append_proof_verification_with_options(builder, proof_data, child_type, true)
+    append_proof_verification_with_options(builder, proof_data, child_type, true, None)
 }
 
 /// Append proof verification trace with options
 /// 
 /// Same as `append_proof_verification` but with option to skip statement hash verification.
-/// Use `skip_statement_hash = true` when verifying multiple child proofs and you want
+/// Set `verify_statement_hash = false` when verifying multiple child proofs and you want
 /// to do ONE combined statement hash verification at the end.
+///
+/// `root_kind_base` controls how expected Merkle roots are bound to public inputs:
+/// - `None`: canonical mapping (0=trace, 1=comp, 2+i=fri[i]).
+/// - `Some(base_kind)` (must be >=2): treat this proof's roots as living in the `fri_commitments`
+///   pool starting at `base_kind` for trace, `base_kind+1` for comp, and `base_kind+2+i` for FRI layer i.
 pub fn append_proof_verification_with_options(
     builder: &mut VerifierTraceBuilder,
     proof_data: &ParsedProof,
     child_type: super::ood_eval::ChildAirType,
     verify_statement_hash: bool,
+    root_kind_base: Option<u64>,
 ) -> VerificationResult {
     // Track verification results - ALL checks must pass for acceptance
     let mut all_valid = true;
@@ -439,7 +445,8 @@ pub fn append_proof_verification_with_options(
     //   pos_i = u64(digest_i[0]) & (lde_domain_size - 1)
     //
     // We use the raw draw order (no sort) and rely on the parser to have reordered openings
-    // into this order (and to enforce uniqueness by requiring dedup to be a no-op).
+    // into this order for fixed-shape recursion. Collisions are allowed; repeated indices re-use
+    // the same opening (this is sound and simply reduces the number of distinct checks).
     let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
     let domain_bits = if lde_domain_size == 0 || !lde_domain_size.is_power_of_two() {
         all_valid = false;
@@ -567,7 +574,10 @@ pub fn append_proof_verification_with_options(
     // 1. merkle_step correctness (hash(left || right) with correct direction)
     // 2. Root verification (hash_state[0..3] == trace_commitment)
     // Load the expected root digest for the trace commitment tree.
-    builder.set_expected_root(proof_data.trace_commitment);
+    match root_kind_base {
+        None => builder.set_expected_root_trace(proof_data.trace_commitment),
+        Some(base) => builder.set_expected_root_kind(base, proof_data.trace_commitment),
+    }
     for (q_idx, query) in proof_data.trace_queries.iter().enumerate() {
         // Derive and bind the query index IN-TRACE, and export it into the next row's idx register.
         // This closes the "derive honestly then choose any opening index" attack.
@@ -599,7 +609,10 @@ pub fn append_proof_verification_with_options(
 
     // === Phase 5: Verify composition Merkle paths ===
     // Load the expected root digest for the composition commitment tree.
-    builder.set_expected_root(proof_data.comp_commitment);
+    match root_kind_base {
+        None => builder.set_expected_root_comp(proof_data.comp_commitment),
+        Some(base) => builder.set_expected_root_kind(base + 1, proof_data.comp_commitment),
+    }
     for (q_idx, query) in proof_data.comp_queries.iter().enumerate() {
         // Derive/bind the same query index for the composition commitment tree.
         if domain_bits > 0 {
@@ -693,7 +706,7 @@ pub fn append_proof_verification_with_options(
     // Track final folded values for terminal verification
     let mut final_folded_values: Vec<BaseElement> = Vec::new();
     let mut final_layer_x_values: Vec<BaseElement> = Vec::new();
-    
+
     // Track positions through FRI layers (like R1CS does)
     // Each layer halves the domain, so position folds: new_pos = old_pos % (domain_size / 2)
     let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
@@ -722,7 +735,10 @@ pub fn append_proof_verification_with_options(
             .unwrap_or([BaseElement::ZERO; 4]);  // Merkle verify_root will fail against zeros
             
         // Load the expected root digest for this FRI layer's commitment tree.
-        builder.set_expected_root(layer_commitment);
+        match root_kind_base {
+            None => builder.set_expected_root_fri(layer_idx, layer_commitment),
+            Some(base) => builder.set_expected_root_kind(base + 2 + (layer_idx as u64), layer_commitment),
+        }
         for (q_idx, query) in layer.queries.iter().enumerate() {
             // Derive and bind the FRI Merkle index u_j IN-TRACE.
             // For folding factor 2, the Merkle index at layer `layer_idx` is the original position
@@ -753,14 +769,10 @@ pub fn append_proof_verification_with_options(
                 eprintln!("[verifier] FRI Merkle root failed at layer={}, query={}", layer_idx, q_idx);
                 all_valid = false;
             }
-            
+
             // Fold evaluation - AIR constraint verifies formula is correct
             // NOTE: This is done AFTER root verification because the folded value
-            // feeds into the NEXT layer, not this layer's commitment
-            //
-            // For upper-half positions (>= domain_size/2), the query is at
-            // the HIGH position, so actual f(x) = f_neg_x and f(-x) = f_x
-            // We must swap the arguments to fri_fold accordingly
+            // feeds into the NEXT layer, not this layer's commitment.
             let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
             let is_upper_half = pos >= current_domain_size / 2;
             let (actual_f_x, actual_f_neg_x) = if is_upper_half {
@@ -774,6 +786,33 @@ pub fn append_proof_verification_with_options(
                 query.x,
                 layer.beta,
             );
+
+            // FRI inter-layer consistency (critical):
+            // the folded value computed for layer `i` must equal the next layer's opened low value
+            // at the corresponding folded position (u_{i+1}).
+            //
+            // NOTE: this DeepCompose(mode=3) row is made NON-OPTIONAL by counting it in aux[1]
+            // (mode counter) and verifying aux[1] against a public expected_mode_counter.
+            if layer_idx + 1 < proof_data.fri_layers.len() {
+                if let Some(next_layer) = proof_data.fri_layers.get(layer_idx + 1) {
+                    if let Some(next_q) = next_layer.queries.get(q_idx) {
+                        let link_ok = builder.verify_eq(folded, next_q.f_x);
+                        if !link_ok {
+                            #[cfg(any(test, debug_assertions))]
+                            eprintln!(
+                                "[verifier] FRI inter-layer link failed at layer={}, query={}",
+                                layer_idx,
+                                q_idx
+                            );
+                            all_valid = false;
+                        }
+                    } else {
+                        all_valid = false;
+                    }
+                } else {
+                    all_valid = false;
+                }
+            }
             
             // Track final layer's folded values and x values for terminal verification
             if layer_idx == proof_data.fri_layers.len() - 1 {
@@ -844,13 +883,10 @@ pub fn append_proof_verification_with_options(
         }
     }
 
-    // Compute statement hash from commitments
-    // This binds the verified proof to a unique identifier
-    let statement_hash = compute_statement_hash(
-        &proof_data.trace_commitment,
-        &proof_data.comp_commitment,
-        &proof_data.fri_commitments,
-    );
+    // IMPORTANT: `computed_hash` is the ONLY statement hash actually enforced by AIR (mode 4).
+    // Always return it (even if we skipped the mode-4 check), so higher-level aggregation can
+    // bind to the *real* statement hash, not a host-only placeholder.
+    let statement_hash = computed_hash;
 
     VerificationResult {
         valid: all_valid,
@@ -859,37 +895,6 @@ pub fn append_proof_verification_with_options(
         comp_commitment: proof_data.comp_commitment,
         fri_commitments: proof_data.fri_commitments.clone(),
     }
-}
-
-/// Compute statement hash from commitments
-/// 
-/// This creates a unique identifier for the verified proof.
-fn compute_statement_hash(
-    trace_commitment: &MerkleDigest,
-    comp_commitment: &MerkleDigest,
-    fri_commitments: &[MerkleDigest],
-) -> [BaseElement; 4] {
-    // Simple polynomial combination (in production, use Poseidon)
-    let mut h = [BaseElement::ZERO; 4];
-    
-    // Include trace commitment
-    for (i, &elem) in trace_commitment.iter().enumerate() {
-        h[i] = h[i] * BaseElement::new(7) + elem;
-    }
-    
-    // Include composition commitment
-    for (i, &elem) in comp_commitment.iter().enumerate() {
-        h[i] = h[i] * BaseElement::new(11) + elem;
-    }
-    
-    // Include FRI commitments
-    for fri_commit in fri_commitments {
-        for (i, &elem) in fri_commit.iter().enumerate() {
-            h[i] = h[i] * BaseElement::new(13) + elem;
-        }
-    }
-    
-    h
 }
 
 // ============================================================================

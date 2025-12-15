@@ -43,8 +43,14 @@ pub const IDX_REG: usize = FRI_END;
 pub const ROOT_REG_START: usize = IDX_REG + 1;
 pub const ROOT_REG_END: usize = ROOT_REG_START + 4;
 
+/// QueryGen step counter column: enforces qgen/export microprogram runs (prevents skipping).
+pub const QGEN_CTR: usize = ROOT_REG_END;
+
+/// Root-kind selector column: selects which public commitment root is expected (trace/comp/FRI layer).
+pub const ROOT_KIND: usize = QGEN_CTR + 1;
+
 /// Auxiliary column range
-pub const AUX_START: usize = ROOT_REG_END;
+pub const AUX_START: usize = ROOT_KIND + 1;
 pub const AUX_END: usize = VERIFIER_TRACE_WIDTH;
 
 /// Round counter index within auxiliary columns
@@ -62,6 +68,14 @@ pub const INIT_KIND_LOAD_CAPACITY4: u64 = 9;
 pub const INIT_KIND_COPY_DIGEST_FROM_RATE: u64 = 10;
 pub const INIT_KIND_MERKLE_PREP_MERGE8: u64 = 11;
 pub const INIT_KIND_LOAD_ROOT4: u64 = 12;
+
+// Max supported FRI layers for root-kind binding (trace=0, comp=1, fri layers at 2..=2+MAX-1).
+// Must be >= the maximum FRI layers implied by protocol parameters (e.g. blowup=64, remainder=31).
+// Root pool size must cover:
+// - direct proofs: num_fri_layers
+// - 2-child verifying aggregator: child0.fri + 2 + child1.fri (root-kind remap pool)
+// Keep comfortably above any realistic configuration.
+const MAX_FRI_LAYERS: usize = 32;
 
 // ============================================================================
 // CONSTRAINT EVALUATION
@@ -368,9 +382,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // SECURITY: On Nop rows we restrict aux[2] to a small set of mode tags, and then use
     // Lagrange basis polynomials to activate different constraint sub-systems.
     //
-    // Allowed Nop sub-modes: {0,6,7,8,9,10,11,12,13}
+    // Allowed Nop sub-modes: {0,6,8,9,10,11,12,13}
     // - 6  : QueryGen (bit/shift + accumulator)
-    // - 7  : Distinctness check (pos_i != pos_j)
     // - 8  : ZeroCheck (fri[4] == 0), used to bind terminal quotient = 0
     // - 9  : Canonicality check for Goldilocks u64 extraction (see below)
     // - 10 : PoWShift (QueryGen shift with bit forced to 0)
@@ -382,10 +395,15 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let eleven = E::from(super::BaseElement::new(11));
 
     // Denominator inverses for Lagrange basis over points {0,6,7,8,9,10,11,12,13}.
+    //
+    // NOTE: we keep the interpolation set (including 7) even though 7 is disallowed by the
+    // "allowed Nop sub-modes" constraint below; the basis polynomials still evaluate to the
+    // correct 0/1 indicators on the remaining allowed points, and this avoids re-deriving
+    // constants.
+    //
     // Precomputed in Goldilocks:
-    // - inv(-30240), inv(5040), inv(-1920), inv(1296), inv(-1440), inv(2640), inv(-8640), inv(65520)
+    // - inv(-30240), inv(-1920), inv(1296), inv(-1440), inv(2640), inv(-8640), inv(65520)
     let inv_neg_30240 = E::from(super::BaseElement::new(4978302855505701807u64));
-    let inv_5040 = E::from(super::BaseElement::new(7023671005794957800u64));
     let inv_neg_1920 = E::from(super::BaseElement::new(9607679202820096u64));
     let inv_1296 = E::from(super::BaseElement::new(12966808524102381417u64));
     let inv_neg_1440 = E::from(super::BaseElement::new(12310639618546816342u64));
@@ -406,16 +424,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
         * inv_neg_30240;
-    // L_7(x) denom = 5040
-    let is_distinct = aux_mode
-        * (aux_mode - six)
-        * (aux_mode - eight)
-        * (aux_mode - nine)
-        * (aux_mode - ten)
-        * (aux_mode - eleven)
-        * (aux_mode - twelve)
-        * (aux_mode - thirteen)
-        * inv_5040;
     // L_8(x) denom = -1920
     let is_zerocheck = aux_mode
         * (aux_mode - six)
@@ -478,14 +486,13 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * inv_65520;
 
     let is_qgen_nop = op.is_nop * is_qgen;
-    let is_distinct_nop = op.is_nop * is_distinct;
     let is_zerocheck_nop = op.is_nop * is_zerocheck;
     let is_canon_nop = op.is_nop * is_canon;
     let is_powshift_nop = op.is_nop * is_powshift;
     let is_capture_nop = op.is_nop * is_capture;
     let is_export_nop = op.is_nop * is_export;
     let is_freeze_nop = op.is_nop * is_freeze;
-    
+
     for i in 0..8 {
         let fri_curr = current[FRI_START + i];
         let fri_next = next[FRI_START + i];
@@ -511,10 +518,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             //   fri4_cur = 2*fri4_next + fri5_cur
             // (with fri5 constrained binary).
             //
-            // On Distinct Nop rows, we enforce:
-            //   (fri5 - fri6) * fri7 = 1
-            //
-            // So we must disable the default copy constraint on these rows.
             // IMPORTANT (soundness): for column 4, we MUST chain capture/canonicality rows into
             // the subsequent decomposition rows. Otherwise the prover can "capture then swap"
             // or "canon then swap" and decompose a different limb.
@@ -523,16 +526,11 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let copy_ok = both_not_special
                 * (one
                     - is_qgen_nop
-                    - is_distinct_nop
                     - is_zerocheck_nop
                     - is_powshift_nop
                     - is_export_nop
                     - is_freeze_nop);
             let qgen_shift = fri_curr - (two * fri_next + current[FRI_START + 5]);
-            // Distinctness check (does NOT use idx register fri[4]):
-            // (pos_i - pos_j) * inv = 1, where pos_i is in fri[5], pos_j in fri[6], inv in fri[7].
-            let distinct_constraint =
-                (current[FRI_START + 5] - current[FRI_START + 6]) * current[FRI_START + 7] - E::ONE;
             let zerocheck_constraint = fri_curr; // enforce fri[4] == 0
             // Capture binding: fri[4] == hash_state[0]
             let capture_constraint = fri_curr - current_hash[0];
@@ -558,7 +556,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             result[idx] = op.is_fri * fri_fold_constraint
                 + copy_ok * copy_constraint
                 + (is_qgen_nop + is_powshift_nop + is_freeze_nop) * qgen_shift
-                + is_distinct_nop * distinct_constraint
                 + is_zerocheck_nop * zerocheck_constraint
                 + is_capture_nop * capture_constraint
                 + is_canon_nop * canon_eq;
@@ -571,7 +568,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let copy_ok = both_not_special
                 * (one
                     - is_qgen_nop
-                    - is_distinct_nop
                     - is_powshift_nop
                     );
             let acc_update = fri_next - (fri_curr + current[FRI_START + 5] * current[FRI_START + 7]);
@@ -647,7 +643,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 let copy_ok = both_not_special
                     * (one
                         - is_qgen_nop
-                        - is_distinct_nop
                         - is_zerocheck_nop
                         - is_canon_nop
                         - is_powshift_nop
@@ -670,7 +665,6 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 let copy_ok = both_not_special
                     * (one
                         - is_qgen_nop
-                        - is_distinct_nop
                         - is_zerocheck_nop
                         - is_canon_nop
                         - is_powshift_nop
@@ -761,7 +755,74 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         idx += 1;
     }
 
-    // --- 9. Expected-root register constraints (4) ---
+    // --- 9. QueryGen step counter constraints (1) ---
+    //
+    // SECURITY: force the capture→64-step qgen→zerocheck→export microprogram to actually run.
+    // qgen_ctr semantics:
+    // - On capture rows (aux[2]=11): next qgen_ctr = 0
+    // - On qgen/powshift/freeze rows (aux[2] in {6,10,13}): next = cur + 1
+    // - Otherwise: copy
+    // Additionally, on export rows we require qgen_ctr == 64, and also on the immediately preceding
+    // zerocheck row (because export_requires_prev_zerocheck enforces the predecessor exists).
+    {
+        let ctr_cur = current[QGEN_CTR];
+        let ctr_next = next[QGEN_CTR];
+        let copy = ctr_next - ctr_cur;
+        let inc = ctr_next - (ctr_cur + E::ONE);
+        let reset = ctr_next; // == 0
+
+        let inc_mode = is_qgen_nop + is_powshift_nop + is_freeze_nop;
+        let other_mode = E::ONE - is_capture_nop - inc_mode;
+
+        // Force export rows to have ctr==64.
+        let sixty_four = E::from(super::BaseElement::new(64));
+        let export_requires_ctr = is_export_nop * (ctr_cur - sixty_four);
+
+        // Force the row before an export to also have ctr==64 (prevents fake zerocheck→export).
+        let next_mode = next[AUX_START + 2];
+        let six = E::from(super::BaseElement::new(6));
+        let seven = E::from(super::BaseElement::new(7));
+        let eight = E::from(super::BaseElement::new(8));
+        let nine = E::from(super::BaseElement::new(9));
+        let ten = E::from(super::BaseElement::new(10));
+        let eleven = E::from(super::BaseElement::new(11));
+        let twelve = E::from(super::BaseElement::new(12));
+        let thirteen = E::from(super::BaseElement::new(13));
+
+        let next_is_export = next_mode
+            * (next_mode - six)
+            * (next_mode - seven)
+            * (next_mode - eight)
+            * (next_mode - nine)
+            * (next_mode - ten)
+            * (next_mode - eleven)
+            * (next_mode - thirteen)
+            * inv_neg_8640;
+        let next_is_export_nop = next_op.is_nop * next_is_export;
+        let prev_export_requires_ctr = next_is_export_nop * (ctr_cur - sixty_four);
+
+        // Allow the counter to reset at the start of a new microprogram: disable the "copy" constraint
+        // on transitions INTO a capture row (aux[2]=11 on NEXT row).
+        let next_is_capture = next_mode
+            * (next_mode - six)
+            * (next_mode - seven)
+            * (next_mode - eight)
+            * (next_mode - nine)
+            * (next_mode - ten)
+            * (next_mode - twelve)
+            * (next_mode - thirteen)
+            * inv_2640;
+        let next_is_capture_nop = next_op.is_nop * next_is_capture;
+
+        result[idx] = is_capture_nop * reset
+            + inc_mode * inc
+            + other_mode * (E::ONE - next_is_capture_nop) * copy
+            + export_requires_ctr
+            + prev_export_requires_ctr;
+        idx += 1;
+    }
+
+    // --- 10. Expected-root register constraints (4) ---
     //
     // These 4 columns store the expected Merkle root digest for the *current* commitment tree.
     // They are updated only on Init(kind=LOAD_ROOT4) rows:
@@ -782,18 +843,99 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         // l12 = (rc-8)(rc-9)(rc-10)(rc-11) / 24
         let l12 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * inv24;
         let is_load_root = op.is_init * l12;
+
+        // Bind the loaded root to the committed source selected by `root_kind`.
+        // root_kind encoding:
+        // - 0 => pub_inputs.trace_commitment
+        // - 1 => pub_inputs.comp_commitment
+        // - 2+i => pub_inputs.fri_commitments[i] for i in 0..MAX_FRI_LAYERS
+        let rk = current[ROOT_KIND];
+        // Enforce rk in {0..=1+MAX_FRI_LAYERS} on load_root rows.
+        let mut rk_range = rk;
+        for k in 1..=(1 + MAX_FRI_LAYERS as u64) {
+            rk_range = rk_range * (rk - E::from(super::BaseElement::new(k)));
+        }
+
+        // Compute Lagrange selectors over points {0..=1+MAX_FRI_LAYERS}.
+        let max_kind = 1 + MAX_FRI_LAYERS;
+        let mut sels: Vec<E> = Vec::with_capacity(max_kind + 1);
+        for k in 0..=max_kind {
+            let mut num = E::ONE;
+            let mut den = E::ONE;
+            let k_fe = E::from(super::BaseElement::new(k as u64));
+            for m in 0..=max_kind {
+                if m == k {
+                    continue;
+                }
+                let m_fe = E::from(super::BaseElement::new(m as u64));
+                num *= rk - m_fe;
+                den *= k_fe - m_fe;
+            }
+            sels.push(num * den.inv());
+        }
+
+        // Build expected root constants for each kind.
+        let mut fri_roots: Vec<[E; 4]> = Vec::with_capacity(MAX_FRI_LAYERS);
+        for i in 0..MAX_FRI_LAYERS {
+            let root_i = if i < pub_inputs.fri_commitments.len() {
+                pub_inputs.fri_commitments[i]
+            } else {
+                [super::BaseElement::ZERO; 4]
+            };
+            fri_roots.push([
+                E::from(root_i[0]),
+                E::from(root_i[1]),
+                E::from(root_i[2]),
+                E::from(root_i[3]),
+            ]);
+        }
+
         for j in 0..4 {
             let root_curr = current[ROOT_REG_START + j];
             let root_next = next[ROOT_REG_START + j];
             let copy_constraint = root_next - root_curr;
             let update_constraint = root_next - current[FRI_START + j];
             let copy_ok = E::ONE - is_load_root;
-            result[idx] = copy_ok * copy_constraint + is_load_root * update_constraint;
+            // On load_root rows: require current fri[j] equals the selected public root.
+            let mut expected = sels[0] * E::from(pub_inputs.trace_commitment[j])
+                + sels[1] * E::from(pub_inputs.comp_commitment[j]);
+            for i in 0..MAX_FRI_LAYERS {
+                expected += sels[2 + i] * fri_roots[i][j];
+            }
+            let bind_loaded = current[FRI_START + j] - expected;
+
+            result[idx] = copy_ok * copy_constraint
+                + is_load_root * update_constraint
+                + is_load_root * bind_loaded
+                + if j == 0 { is_load_root * rk_range } else { E::ZERO };
             idx += 1;
         }
     }
 
-    // --- 10. Auxiliary constraints (4) ---
+    // --- 11. Root-kind selector constraints (1) ---
+    //
+    // root_kind is a small selector used only for binding LOAD_ROOT4 rows to public-input roots.
+    // We allow it to change only on transitions INTO an Init(kind=LOAD_ROOT4) row; otherwise it must copy.
+    {
+        let rk_cur = current[ROOT_KIND];
+        let rk_next = next[ROOT_KIND];
+        let copy_constraint = rk_next - rk_cur;
+
+        // Allow updates when the NEXT row is Init(kind=LOAD_ROOT4).
+        let next_rc = next[ROUND_COUNTER];
+        let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
+        let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
+        let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
+        let k11 = E::from(super::BaseElement::new(INIT_KIND_MERKLE_PREP_MERGE8));
+        let inv24 = E::from(super::BaseElement::new(17678129733188976641u64)); // 24^{-1}
+        let l12_next = (next_rc - k8) * (next_rc - k9) * (next_rc - k10) * (next_rc - k11) * inv24;
+        let next_is_load_root = next_op.is_init * l12_next;
+        let copy_ok = E::ONE - next_is_load_root;
+        result[idx] = copy_ok * copy_constraint;
+        idx += 1;
+    }
+
+    // --- 12. Auxiliary constraints (4) ---
     
     for i in 0..4 {
         let aux_curr = current[AUX_START + i];
@@ -834,7 +976,11 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             //
             // Tracks statement hash (mode 4) and params digest (mode 5) verifications.
             //
-            // Packed encoding: aux[1] = statement_count + 4096 * params_count + 2^32 * root_count
+            // Packed encoding:
+            //   aux[1] = statement_count
+            //          + 4096 * params_count
+            //          + 65536 * fri_link_count
+            //          + 2^32 * root_count
             //
             // This prevents attacks where an attacker skips these critical bindings
             // or substitutes other check types.
@@ -843,6 +989,7 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             // - On DeepCompose mode 0: aux[1] += 2^32 (increment root count)
             // - On DeepCompose mode 4: aux[1] += 1 (increment statement count)
             // - On DeepCompose mode 5: aux[1] += 4096 (increment params count)
+            // - On DeepCompose mode 3: aux[1] += 65536 (increment FRI inter-layer link count)
             // - Otherwise: aux[1] unchanged (copy)
             //
             // We normalize polynomial selectors to 0/1 indicators.
@@ -878,14 +1025,32 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 (mode - one) * (mode - two) * (mode - three) * (mode - four) * (mode - five);
             // Normalize: divide by -120 to get 1 when mode=0
             let is_mode_0 = mode_0_raw * inv_neg_120;
+
+            // Selector for mode 3 (FRI inter-layer link check).
+            // mode_3_raw = mode*(mode-1)*(mode-2)*(mode-4)*(mode-5)
+            // - equals 12 when mode=3
+            // - equals 0 on {0,1,2,4,5}
+            let mode_3_raw =
+                mode * (mode - one) * (mode - two) * (mode - four) * (mode - five);
+            let inv_12 = E::from(super::BaseElement::new(12)).inv();
+            let is_mode_3 = mode_3_raw * inv_12;
             
             // Increment values
             let four_thousand_ninety_six = E::from(super::BaseElement::new(4096));
+            let sixty_five_thousand_five_hundred_thirty_six = E::from(super::BaseElement::new(65536));
             let two_pow_32 = E::from(super::BaseElement::new(1u64 << 32));
             
-            // Constraint: aux[1]_next = aux[1]_curr + is_deep * (is_mode_0 * 2^32 + is_mode_4 * 1 + is_mode_5 * 4096)
+            // Constraint:
+            // aux[1]_next = aux[1]_curr
+            //              + is_deep * (is_mode_0 * 2^32
+            //                          + is_mode_4 * 1
+            //                          + is_mode_5 * 4096
+            //                          + is_mode_3 * 65536)
             let increment =
-                op.is_deep * (is_mode_0 * two_pow_32 + is_mode_4 + is_mode_5 * four_thousand_ninety_six);
+                op.is_deep * (is_mode_0 * two_pow_32
+                    + is_mode_4
+                    + is_mode_5 * four_thousand_ninety_six
+                    + is_mode_3 * sixty_five_thousand_five_hundred_thirty_six);
             let mode_counter_constraint = aux_next - aux_curr - increment;
             
             result[idx] = mode_counter_constraint;
@@ -905,11 +1070,10 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             // aux[2]: mode value.
             //
             // SECURITY: aux[2] is a mode tag:
-            // - On Nop rows: restrict to {0,6,7,8,9,10,11,12,13}.
+            // - On Nop rows: restrict to {0,6,8,9,10,11,12,13}.
             // - On DeepCompose rows: restrict to {0,1,2,3,4,5}.
             let mode = aux_curr;
             let six = E::from(super::BaseElement::new(6));
-            let seven = E::from(super::BaseElement::new(7));
             let eight = E::from(super::BaseElement::new(8));
             let nine = E::from(super::BaseElement::new(9));
             let ten = E::from(super::BaseElement::new(10));
@@ -918,13 +1082,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let thirteen = E::from(super::BaseElement::new(13));
             let in_set = mode
                 * (mode - six)
-                * (mode - seven)
                 * (mode - eight)
                 * (mode - nine)
                 * (mode - ten)
                 * (mode - eleven)
                 * (mode - twelve)
-                * (mode - thirteen); // = 0 iff mode ∈ {0,6,7,8,9,10,11,12,13}
+                * (mode - thirteen); // = 0 iff mode ∈ {0,6,8,9,10,11,12,13}
             let one = E::ONE;
             let two = E::from(super::BaseElement::new(2));
             let three = E::from(super::BaseElement::new(3));
@@ -1196,7 +1359,7 @@ mod tests {
 
     #[test]
     fn test_column_indices() {
-        // Verify indices are consistent with VERIFIER_TRACE_WIDTH (32)
+        // Verify indices are consistent with VERIFIER_TRACE_WIDTH (34)
         assert_eq!(SEL_0, 0);
         assert_eq!(SEL_1, 1);
         assert_eq!(SEL_2, 2);
@@ -1207,8 +1370,10 @@ mod tests {
         assert_eq!(IDX_REG, 23);
         assert_eq!(ROOT_REG_START, 24);
         assert_eq!(ROOT_REG_END, 28);
-        assert_eq!(AUX_START, 28);
-        assert_eq!(AUX_END, 32);
+        assert_eq!(QGEN_CTR, 28);
+        assert_eq!(ROOT_KIND, 29);
+        assert_eq!(AUX_START, 30);
+        assert_eq!(AUX_END, VERIFIER_TRACE_WIDTH);
     }
 
 }

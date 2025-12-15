@@ -881,12 +881,28 @@ pub fn build_verifying_aggregator_trace(
     // We skip the statement hash check here because pub_inputs.statement_hash
     // will be the COMBINED hash, not child0's individual hash.
     let result0 = append_proof_verification_with_options(
-        &mut builder, child0_proof, child0_type, false
+        &mut builder,
+        child0_proof,
+        child0_type,
+        false,
+        None,
     );
     
     // === Phase 2: Verify child 1 (skip per-child statement hash verification) ===
+    // Root-kind pool offset for child1:
+    // child0 uses canonical mapping (0=trace, 1=comp, 2+i=fri[i]),
+    // so the first free slot in `pub_inputs.fri_commitments` is index child0_proof.fri_commitments.len().
+    // We map child1 roots into that pool as:
+    // - trace => kind = 2 + offset
+    // - comp  => kind = 2 + offset + 1
+    // - fri i => kind = 2 + offset + 2 + i
+    let child1_base_kind = 2u64 + (child0_proof.fri_commitments.len() as u64);
     let result1 = append_proof_verification_with_options(
-        &mut builder, child1_proof, child1_type, false
+        &mut builder,
+        child1_proof,
+        child1_type,
+        false,
+        Some(child1_base_kind),
     );
     
     // === Phase 3: Bind both statement hashes ===
@@ -977,7 +993,6 @@ use super::verifier_air::{VerifierPublicInputs, prover::VerifierProver};
 /// Generate a Verifying Aggregator STARK proof
 /// 
 /// This creates a STARK proof that verifies 2 child proofs.
-/// Uses the 32-column VerifierAir structure.
 /// 
 /// # Architecture
 /// 
@@ -1019,17 +1034,73 @@ pub fn generate_verifying_aggregator_proof(
     
     // Create public inputs.
     //
-    // The VerifierAir enforces these via boundary assertions on aux counters.
-    // To avoid mismatches between "expected" accounting and the actual trace builder
-    // schedule (especially across small proof parameter regimes), we derive the
-    // expected counters from the constructed trace itself.
-    //
-    // aux[1] is the mode counter, aux[3] is the checkpoint counter.
+    // SECURITY: these expected counters MUST be computed from protocol parameters / proof context,
+    // not read from the produced trace. Otherwise the prover could “pick” a counter value that
+    // matches a skipped-check trace, and the boundary assertion would become vacuous.
     let last = trace.length() - 1;
     // NOTE: with the dedicated idx_reg column, aux columns shifted by +1:
-    // aux[1] (mode counter) is at col 29, aux[3] (checkpoint counter) at col 31.
-    let expected_mode_counter = trace.get(29, last).as_int() as usize;
-    let total_checkpoints = trace.get(31, last).as_int() as usize;
+    // aux[1] (mode counter) is at col 31, aux[3] (checkpoint counter) at col 33.
+
+    // Deterministic expected-mode-counter computation.
+    //
+    // aux[1] encoding:
+    //   statement_count
+    // + 4096  * params_count
+    // + 65536 * fri_link_count
+    // + 2^32  * root_count
+    //
+    // For this verifying aggregator:
+    // - statement_count = 1 (the combined statement hash check we emit at the end)
+    // - params_count = 2 (we check params digest once per child proof)
+    // - root_count = Σ_child num_queries * (2 + num_fri_layers)
+    // - fri_link_count = Σ_child num_queries * max(num_fri_layers - 1, 0)
+    let root_count_0 = child0_proof.num_queries * (2 + child0_proof.num_fri_layers);
+    let root_count_1 = child1_proof.num_queries * (2 + child1_proof.num_fri_layers);
+    let root_count = root_count_0 + root_count_1;
+    let fri_link_0 = child0_proof.num_queries * child0_proof.num_fri_layers.saturating_sub(1);
+    let fri_link_1 = child1_proof.num_queries * child1_proof.num_fri_layers.saturating_sub(1);
+    let fri_link_count = fri_link_0 + fri_link_1;
+    let expected_mode_counter =
+        1usize + 2usize * 4096usize + fri_link_count * 65536usize + (root_count << 32);
+
+    // Deterministic expected checkpoint count (aux[3]) = number of DeepCompose rows.
+    // Per child we have:
+    // - OOD (1)
+    // - params digest (1)
+    // - trace Merkle roots (num_queries)
+    // - comp Merkle roots (num_queries)
+    // - if FRI exists:
+    //     - DEEP check (num_queries)
+    //     - FRI Merkle roots (num_queries * num_fri_layers)
+    //     - FRI inter-layer links (num_queries * (num_fri_layers - 1))
+    //     - terminal: constant => (num_queries - 1), poly => num_queries
+    fn child_checkpoint_count(p: &ParsedProof) -> usize {
+        let mut c = 0usize;
+        c += 1; // OOD
+        c += 1; // params digest
+        c += p.num_queries; // trace root checks
+        c += p.num_queries; // comp root checks
+        if p.num_fri_layers > 0 {
+            c += p.num_queries; // DEEP checks
+            c += p.num_queries * p.num_fri_layers; // FRI root checks
+            c += p.num_queries * p.num_fri_layers.saturating_sub(1); // link checks
+            if p.fri_terminal_is_constant {
+                c += p.num_queries.saturating_sub(1);
+            } else {
+                c += p.num_queries;
+            }
+        }
+        c
+    }
+    let total_checkpoints = child_checkpoint_count(child0_proof)
+        + child_checkpoint_count(child1_proof)
+        + 1; // combined statement hash (mode 4)
+
+    // Defense-in-depth sanity: assert our computed counters match the trace we constructed.
+    let trace_mode_counter = trace.get(31, last).as_int() as usize;
+    let trace_ckpt_counter = trace.get(33, last).as_int() as usize;
+    assert_eq!(trace_mode_counter, expected_mode_counter, "mode counter mismatch");
+    assert_eq!(trace_ckpt_counter, total_checkpoints, "checkpoint counter mismatch");
     
     // Compute interpreter hash for the child proofs.
     //
@@ -1050,11 +1121,28 @@ pub fn generate_verifying_aggregator_proof(
     // SECURITY: do NOT derive this from the proof; it must be fixed by protocol policy.
     let _ = (child0_proof, child1_proof); // keep args used for now
     
+    // Root-kind binding requires that every LOAD_ROOT4 row loads a root that exists in the
+    // `VerifierPublicInputs` root pool. For a 2-child verifying aggregator, we map:
+    // - child0 roots: trace/comp/fri into (trace_commitment, comp_commitment, fri_commitments[0..])
+    // - child1 roots: into the *tail* of fri_commitments as [trace, comp, fri...]
+    //
+    // This keeps VerifierAir trace width unchanged while still binding each loaded root to public inputs.
+    let mut fri_commitments = child0_proof.fri_commitments.clone();
+    fri_commitments.push(child1_proof.trace_commitment);
+    fri_commitments.push(child1_proof.comp_commitment);
+    fri_commitments.extend_from_slice(&child1_proof.fri_commitments);
+    // Must fit within the AIR's MAX_FRI_LAYERS root-kind pool.
+    assert!(
+        fri_commitments.len() <= 32,
+        "verifying-aggregator root pool too large: {} (max=32)",
+        fri_commitments.len()
+    );
+
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
-        trace_commitment: result0.trace_commitment,
-        comp_commitment: result0.comp_commitment,
-        fri_commitments: result0.fri_commitments.clone(),
+        trace_commitment: child0_proof.trace_commitment,
+        comp_commitment: child0_proof.comp_commitment,
+        fri_commitments,
         num_queries: child0_proof.num_queries,
         proof_trace_len: trace.length(),
         g_trace: child0_proof.g_trace,
