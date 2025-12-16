@@ -32,7 +32,7 @@ pub use inner_stark_full::{
     TraceSegmentWitness, AGGREGATOR_VERSION,
 };
 
-// Re-export Aggregator STARK types
+// Re-export Aggregator STARK types (two-AIR design: AggregatorAir -> VerifierAir -> Groth16).
 pub use aggregator_air::{
     AggregatorAir, AggregatorConfig, AggregatorProver, AggregatorPublicInputs,
     ChildStatementHash, generate_aggregator_proof, generate_aggregator_proof_with_config,
@@ -41,7 +41,7 @@ pub use aggregator_air::{
 
 // Re-export Verifier STARK integration types
 pub use verifier_stark_groth16::{
-    prove_verifier_stark, build_verifier_circuit_from_app_hash,
+    prove_verifier_stark,
     VerifierStarkResult,
 };
 

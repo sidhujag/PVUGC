@@ -631,6 +631,10 @@ impl ChildAirType {
         ChildAirType::Generic { formula, circuit_hash }
     }
 
+    pub fn verifier_air() -> Self {
+        ChildAirType::VerifierAir
+    }
+
     /// Create a generic Add2 type using pre-encoded formula.
     pub fn generic_add2() -> Self {
         let formula = encode_add2_formula();
@@ -907,31 +911,38 @@ pub fn verify_ood_constraint_equation_typed(
     // Assertion: column 1, step (trace_len - 1), equals pub_result
     // ==============================================================
     // For VerifierAir children we use aux[3] (checkpoint counter) as the boundary column in the
-    // multiply-through OOD equation (mirrors `ood_eval_r1cs`). With the dedicated idx_reg column,
-    // aux[3] moved from col 26 -> col 31 (idx_reg + root_reg added).
-    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) { 27 } else { 1 };
-    let boundary_value = ood_frame.trace_current.get(boundary_col)
+    // multiply-through OOD equation (mirrors `ood_eval_r1cs`).
+    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) {
+        super::constraints::AUX_START + 3
+    } else {
+        1
+    };
+    // Boundary assertion evaluation (TEMPORARY SHAPE ASSUMPTION):
+    // For `ChildAirType::Generic`, we currently assume a single boundary assertion of the form:
+    //   trace[col=1] at step (n-1) equals `pub_result`.
+    //
+    // This is NOT universal. A fully-generic app verifier must commit to, and evaluate, the
+    // complete set of boundary assertions (including divisor structure) exactly as Winterfell does.
+    let boundary_value = ood_frame
+        .trace_current
+        .get(boundary_col)
         .copied()
-        .unwrap_or(BaseElement::ZERO) - params.pub_result;
+        .unwrap_or(BaseElement::ZERO)
+        - params.pub_result;
     let beta_0 = params.constraint_coeffs.get(num_constraints)
         .copied()
         .unwrap_or(BaseElement::ZERO);
     let boundary_sum = beta_0 * boundary_value;
 
     // ==============================================================
-    // LHS = transition_sum * exemption² + boundary_sum * (z^n - 1)
+    // Multiply-through OOD equation (current recursion scaffold):
+    //   transition_sum * exemption² + boundary_sum * (z^n - 1)
+    //     == C(z) * (z^n - 1) * exemption
     // ==============================================================
     let lhs = transition_sum * exemption_sq + boundary_sum * zerofier_num;
 
     // ==============================================================
     // RHS = C(z) * (z^n - 1) * exemption
-    //
-    // Winterfell's composition polynomial can be split across 1+ columns depending on
-    // degrees/batching. For small AIRs, `comp_width` may be 1.
-    //
-    // Winterfell combines columns as:
-    //   C(z) = Σ_{i=0..w-1} C_i(z) * z^(i*n)
-    // where w = comp_width and n = trace_len.
     // ==============================================================
     let mut c_combined = BaseElement::ZERO;
     let mut z_pow_in = BaseElement::ONE;

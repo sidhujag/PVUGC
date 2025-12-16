@@ -310,6 +310,7 @@ where
 
     ParsedProof {
         pow_nonce: proof.pow_nonce,
+        pub_inputs_elements: pub_elems.clone(),
         trace_commitment,
         comp_commitment,
         fri_commitments,

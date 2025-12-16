@@ -69,8 +69,9 @@ use winterfell::{
 /// - 4 expected-root register columns
 /// - 1 querygen step-counter column
 /// - 1 root-kind selector column
+/// - 8 carry/register columns (cross-op binding; always copied unless explicitly updated)
 /// - 4 auxiliary columns
-pub const VERIFIER_TRACE_WIDTH: usize = 34;
+pub const VERIFIER_TRACE_WIDTH: usize = 42;
 
 /// Number of hash state columns (RPO-256 state)
 pub const HASH_STATE_WIDTH: usize = 12;
@@ -305,36 +306,19 @@ impl Air for VerifierAir {
         // IMPORTANT: The declared degree must match what Winterfell computes from
         // the actual trace evaluation. For most FRI columns, degree 6 works.
         for i in 0..8 {
-            if i == 4 {
-                // Column 4 participates in:
-                // - FRI folding: op.is_fri(3) * fold(2) ≈ degree 5
-                // - copy constraints on non-special transitions: both_not_special(6) * copy(1) = degree 7
-                // With QueryGen/Distinct/ZeroCheck implemented as Nop sub-modes and aux[2] restricted on Nop rows,
-                // the gating/selectors are low-degree; the copy term tops out around degree 13.
-                // Nop sub-mode selectors now range over {0,6..13}, increasing selector degree.
-                degrees.push(TransitionConstraintDegree::new(18));
-            } else if i == 6 {
-                // Equality constraint on all DeepCompose rows:
-                // op.is_deep(3) * (fri[6]-fri[7])(1) = degree 4
-                // Plus QueryGen accumulator semantics and copy gating on non-special rows.
-                degrees.push(TransitionConstraintDegree::new(18));
-            } else if i == 5 {
-                // Column 5 is scratch and is copied on non-special transitions:
-                // both_not_special(6) * copy(1) = degree 7 (but raised by QueryGen gating)
-                // Additionally, for Init kind 11 we enforce dir bit binary:
-                // op.is_init(3) * l11(3) * binary(2) = degree 8
-                degrees.push(TransitionConstraintDegree::new(18));
-            } else if i == 7 {
-                // Column 7: copy constraint only
-                degrees.push(TransitionConstraintDegree::new(18));
-            } else {
-                // Columns 0-3: root/statement/interpreter check constraints
-                // Root: op.is_deep(3) * is_root_check(6) * root(1) = degree 10
-                // Statement: op.is_deep(3) * is_statement_check(6) * statement(1) = degree 10
-                // Params: op.is_deep(3) * is_params_check(6) * params(1) = degree 10
-                // Copy: both_not_special(6) * copy(1) = degree 7
-                // Max = 10
-                degrees.push(TransitionConstraintDegree::new(10));
+            match i {
+                0 => {
+                    // fri[0] participates in higher-degree DEEP/terminal/linkage bindings.
+                    degrees.push(TransitionConstraintDegree::new(16));
+                }
+                4 | 5 | 6 | 7 => {
+                    // QueryGen / folding / equality columns have higher-degree gating.
+                    degrees.push(TransitionConstraintDegree::new(22));
+                }
+                _ => {
+                    // Default copy / low-degree binding columns.
+                    degrees.push(TransitionConstraintDegree::new(10));
+                }
             }
         }
 
@@ -344,13 +328,13 @@ impl Air for VerifierAir {
         // - export: is_export_nop (deg 11) * (idx_next - acc)(1) = degree 12
         // - export sequencing: next_is_export_nop (11) * (1 - is_zerocheck_nop) (11) = degree 22
         // - copy: (1 - op.is_init*l11 - is_export_nop) * (idx_next-idx)(1) ≈ degree 12
-        degrees.push(TransitionConstraintDegree::new(22));
+        degrees.push(TransitionConstraintDegree::new(30));
 
         // QueryGen step counter column (1):
         // Copy by default; reset/increment on Nop sub-modes; plus export gating.
         //
         // NOTE: degree must match Winterfell's computed degree exactly.
-        degrees.push(TransitionConstraintDegree::new(23));
+        degrees.push(TransitionConstraintDegree::new(31));
 
         // Expected-root register columns (4):
         // These bind Merkle root checks to the same digest value used elsewhere in the trace.
@@ -373,6 +357,13 @@ impl Air for VerifierAir {
         // Copy by default; allowed to change only when next row is Init(kind=LOAD_ROOT4).
         degrees.push(TransitionConstraintDegree::new(8));
 
+        // Carry/register columns (8): copied by default, selectively updated by mode-tag polynomials.
+        // NOTE: these must match actual degrees exactly (validated by Winterfell in debug builds).
+        let carry_degrees = [16usize, 15, 15, 17, 17, 31, 15, 4];
+        for d in carry_degrees {
+            degrees.push(TransitionConstraintDegree::new(d));
+        }
+
         // Auxiliary constraints (4):
         // aux[0]: degree 10 (round counter range check: is_permute*prod(rc-i) for i in 0..7)
         // aux[1]: degree 8 (mode counter: is_deep * is_mode_4/5 normalized selectors)
@@ -393,9 +384,9 @@ impl Air for VerifierAir {
                 // op.is_deep = s2 * s1 * (1 - s0) = degree 3
                 degrees.push(TransitionConstraintDegree::new(3));
             } else {
-                // aux[2]: mode value. On Nop rows, constrained to {0,6,8,9,10,11,12,13}.
-                // op.is_nop(3) * degree-8 product = degree 11
-                degrees.push(TransitionConstraintDegree::new(11));
+                // aux[2]: mode value. On Nop rows, constrained to {0,6,7,8,9,10,11,12,13,14,15,16,17}.
+                // op.is_nop(3) * degree-13 product = degree 16
+                degrees.push(TransitionConstraintDegree::new(16));
             }
         }
 
@@ -431,17 +422,15 @@ impl Air for VerifierAir {
         }
 
         // Initial mode counter must be 0
-        // aux[1] is at column 31 (idx_reg + root_reg + qgen_ctr + root_kind added)
         assertions.push(Assertion::single(
-            31, // aux[1] = mode counter
+            constraints::AUX_START + 1, // aux[1] = mode counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
 
         // Initial checkpoint counter must be 0
-        // aux[3] is at column 33 (idx_reg + root_reg + qgen_ctr + root_kind added)
         assertions.push(Assertion::single(
-            33, // aux[3] = checkpoint counter
+            constraints::AUX_START + 3, // aux[3] = checkpoint counter
             0,
             BaseElement::ZERO, // Starts at 0
         ));
@@ -453,7 +442,7 @@ impl Air for VerifierAir {
         // For single proof: 1 + 4096*1 = 4097
         // For multi-proof (N children): 1 + 4096*N
         assertions.push(Assertion::single(
-            31, // aux[1] = mode counter
+            constraints::AUX_START + 1, // aux[1] = mode counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_mode_counter as u64),
         ));
@@ -461,7 +450,7 @@ impl Air for VerifierAir {
         // Final checkpoint count must equal expected value
         // This ensures all verification steps were executed (not skipped).
         assertions.push(Assertion::single(
-            33, // aux[3] = checkpoint counter
+            constraints::AUX_START + 3, // aux[3] = checkpoint counter
             last_row,
             BaseElement::new(self.pub_inputs.expected_checkpoint_count as u64),
         ));

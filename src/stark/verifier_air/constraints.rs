@@ -13,7 +13,7 @@
 //! - Nop: State preserved (padding)
 //! - MerklePath/FriFold/DeepCompose: Special operations (state preserved)
 
-use winterfell::{math::FieldElement, EvaluationFrame};
+use winterfell::{math::{FieldElement, StarkField}, EvaluationFrame};
 
 use super::{
     VerifierPublicInputs, HASH_STATE_WIDTH, NUM_SELECTORS, VERIFIER_TRACE_WIDTH,
@@ -49,8 +49,12 @@ pub const QGEN_CTR: usize = ROOT_REG_END;
 /// Root-kind selector column: selects which public commitment root is expected (trace/comp/FRI layer).
 pub const ROOT_KIND: usize = QGEN_CTR + 1;
 
+/// Carry/register columns (8): cross-op binding (always copied unless explicitly updated).
+pub const CARRY_START: usize = ROOT_KIND + 1;
+pub const CARRY_END: usize = CARRY_START + 8;
+
 /// Auxiliary column range
-pub const AUX_START: usize = ROOT_KIND + 1;
+pub const AUX_START: usize = CARRY_END;
 pub const AUX_END: usize = VERIFIER_TRACE_WIDTH;
 
 /// Round counter index within auxiliary columns
@@ -68,6 +72,8 @@ pub const INIT_KIND_LOAD_CAPACITY4: u64 = 9;
 pub const INIT_KIND_COPY_DIGEST_FROM_RATE: u64 = 10;
 pub const INIT_KIND_MERKLE_PREP_MERGE8: u64 = 11;
 pub const INIT_KIND_LOAD_ROOT4: u64 = 12;
+/// Load scratch Merkle index from persistent query index (IDX_REG → CARRY[0]).
+pub const INIT_KIND_LOAD_MERKLE_IDX: u64 = 13;
 
 // Max supported FRI layers for root-kind binding (trace=0, comp=1, fri layers at 2..=2+MAX-1).
 // Must be >= the maximum FRI layers implied by protocol parameters (e.g. blowup=64, remainder=31).
@@ -168,33 +174,40 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         };
 
         // For Init: semantics depend on aux[0] "init kind".
-        // We use 5 kinds (8,9,10,11,12) with degree-4 Lagrange basis polynomials.
+        // We use 6 kinds (8,9,10,11,12,13) with degree-5 Lagrange basis polynomials.
         let rc = current[ROUND_COUNTER];
         let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
         let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
         let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
         let k11 = E::from(super::BaseElement::new(INIT_KIND_MERKLE_PREP_MERGE8));
         let k12 = E::from(super::BaseElement::new(INIT_KIND_LOAD_ROOT4));
+        let k13 = E::from(super::BaseElement::new(INIT_KIND_LOAD_MERKLE_IDX));
 
-        // Ensure init kind is in {8,9,10,11,12} on Init rows:
-        // (rc-8)(rc-9)(rc-10)(rc-11)(rc-12) = 0
-        let init_kind_in_range = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12);
+        // Ensure init kind is in {8,9,10,11,12,13} on Init rows:
+        // (rc-8)(rc-9)(rc-10)(rc-11)(rc-12)(rc-13) = 0
+        let init_kind_in_range =
+            (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12) * (rc - k13);
 
-        // Lagrange basis over points {8,9,10,11,12}:
-        // denom8  = (8-9)(8-10)(8-11)(8-12)     = 24
-        // denom9  = (9-8)(9-10)(9-11)(9-12)     = -6
-        // denom10 = (10-8)(10-9)(10-11)(10-12)  = 4
-        // denom11 = (11-8)(11-9)(11-10)(11-12)  = -6
-        // denom12 = (12-8)(12-9)(12-10)(12-11)  = 24
-        let inv24 = E::from(super::BaseElement::new(17678129733188976641u64));
-        let inv4 = E::from(super::BaseElement::new(13835058052060938241u64));
-        let inv_neg6 = E::from(super::BaseElement::new(3074457344902430720u64)); // (-6)^{-1}
+        // Lagrange basis over points {8,9,10,11,12,13}:
+        // denom8  = (8-9)(8-10)(8-11)(8-12)(8-13)        = -120
+        // denom9  = (9-8)(9-10)(9-11)(9-12)(9-13)        = 24
+        // denom10 = (10-8)(10-9)(10-11)(10-12)(10-13)    = -12
+        // denom11 = (11-8)(11-9)(11-10)(11-12)(11-13)    = 12
+        // denom12 = (12-8)(12-9)(12-10)(12-11)(12-13)    = -24
+        // denom13 = (13-8)(13-9)(13-10)(13-11)(13-12)    = 120
+        let inv24 = E::from(super::BaseElement::new(17678129733188976641u64)); // 24^{-1}
+        let inv_neg24 = E::ZERO - inv24;
+        let inv_neg120 = E::from(super::BaseElement::new(153722867245121536u64)); // (-120)^{-1}
+        let inv120 = E::ZERO - inv_neg120;
+        let inv12 = E::from(super::BaseElement::new(12)).inv();
+        let inv_neg12 = E::ZERO - inv12;
 
-        let l8 = (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12) * inv24;
-        let l9 = (rc - k8) * (rc - k10) * (rc - k11) * (rc - k12) * inv_neg6;
-        let l10 = (rc - k8) * (rc - k9) * (rc - k11) * (rc - k12) * inv4;
-        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * inv_neg6;
-        let l12 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * inv24;
+        let l8 = (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12) * (rc - k13) * inv_neg120;
+        let l9 = (rc - k8) * (rc - k10) * (rc - k11) * (rc - k12) * (rc - k13) * inv24;
+        let l10 = (rc - k8) * (rc - k9) * (rc - k11) * (rc - k12) * (rc - k13) * inv_neg12;
+        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * (rc - k13) * inv12;
+        let l12 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * (rc - k13) * inv_neg24;
+        let l13 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12) * inv120;
 
         // Kind 8: reset to all-zeros with state[0] = fri[0] (length/domain-sep).
         let expected_reset = if i == 0 { current[FRI_START] } else { E::ZERO };
@@ -245,6 +258,9 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         // Kind 12: load expected-root register (root_reg) from fri[0..3], while copying hash_state.
         let init_rootload_constraint = next_hash[i] - current_hash[i];
 
+        // Kind 13: load scratch Merkle index into carry column(s); hash_state is copied.
+        let init_load_merkle_idx_constraint = next_hash[i] - current_hash[i];
+
         // Combine init constraints by kind selector.
         // Also enforce init kind range on ALL init rows by adding the cubic constraint once (i==0).
         let init_constraint =
@@ -253,6 +269,7 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 + l10 * init_copy_constraint
                 + l11 * init_merkle_constraint
                 + l12 * init_rootload_constraint
+                + l13 * init_load_merkle_idx_constraint
                 + if i == 0 { init_kind_in_range } else { E::ZERO };
 
         // Combine constraints based on operation.
@@ -301,11 +318,21 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // [7] = rhs (pre-computed: C(z) * zerofier_num * exemption)
     // ========================================================================
     
-    let f_x = current[FRI_START];
-    let f_neg_x = current[FRI_START + 1];
-    let x = current[FRI_START + 2];
+    // Opened pair (as committed in the FRI layer Merkle leaf).
+    let fx_open = current[FRI_START];
+    let fnegx_open = current[FRI_START + 1];
+    // x is taken from carry[1] (computed once per query, then squared across layers).
+    let x = current[CARRY_START + 1];
     let beta = current[FRI_START + 3];
     let g = current[FRI_START + 4];
+    
+    // SECURITY: bind swap ordering via carry[5] (upper-half bit derived in-trace).
+    // b=0 => (f(x), f(-x)) = (fx_open, fnegx_open)
+    // b=1 => (f(x), f(-x)) = (fnegx_open, fx_open)
+    let b = current[CARRY_START + 5];
+    let one_minus_b = E::ONE - b;
+    let f_x = one_minus_b * fx_open + b * fnegx_open;
+    let f_neg_x = b * fx_open + one_minus_b * fnegx_open;
     
     // FRI folding constraint: g = (f_x + f_neg_x)/2 + beta * (f_x - f_neg_x)/(2*x)
     // Rearranged to avoid division: 2*x*g = x*(f_x + f_neg_x) + beta*(f_x - f_neg_x)
@@ -377,24 +404,113 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // Equality constraint: fri[6] == fri[7] (for OOD, TERMINAL, DEEP modes)
     let equality_constraint = current[FRI_START + 6] - current[FRI_START + 7];
 
+    // Additional binding constraints for DEEP verification (DeepCompose mode 3):
+    // fri[6] must be selected_f * (x - z) * (x - z*g)
+    // fri[7] must be carry[3]*(x - z*g) + carry[4]*(x - z)
+    //
+    // Row layout for mode 3:
+    // - fri[0] = z
+    // - fri[1] = f_x
+    // - fri[2] = f_neg_x
+    let z_val = current[FRI_START + 0];
+    let fx0 = current[FRI_START + 1];
+    let fneg0 = current[FRI_START + 2];
+    let x0 = current[CARRY_START + 1];
+    let g_trace = E::from(pub_inputs.g_trace);
+    let zg = z_val * g_trace;
+    let den_z = x0 - z_val;
+    let den_zg = x0 - zg;
+    let denom = den_z * den_zg;
+    let b0 = current[CARRY_START + 5];
+    let one_minus_b0 = E::ONE - b0;
+    let selected_f = one_minus_b0 * fx0 + b0 * fneg0;
+    let deep_lhs = selected_f * denom;
+    let deep_rhs = current[CARRY_START + 3] * den_zg + current[CARRY_START + 4] * den_z;
+
+    let bind_deep_lhs = current[FRI_START + 6] - deep_lhs;
+    let bind_deep_rhs = current[FRI_START + 7] - deep_rhs;
+
+    // DeepCompose mode selector for DEEP check (aux[2]=3) over {0..=6}.
+    // Non-zero only when aux_mode == 3.
+    let is_deep_check = aux_mode
+        * (aux_mode - one)
+        * (aux_mode - two)
+        * (aux_mode - four)
+        * (aux_mode - five)
+        * (aux_mode - six);
+
+    // DeepCompose mode selector for generic linkage checks (aux[2]=6) over {0..=6}.
+    // Non-zero only when aux_mode == 6.
+    let is_link_check = aux_mode
+        * (aux_mode - one)
+        * (aux_mode - two)
+        * (aux_mode - three)
+        * (aux_mode - four)
+        * (aux_mode - five);
+
+    // Link-check row layout (aux[2]=6):
+    // - fri[0] = next_f_x
+    // - fri[1] = next_f_neg_x
+    // - fri[6] = prev_fold (carry[7])
+    // - fri[7] = selected(next_f_x,next_f_neg_x) based on carry[5]
+    let next_fx = current[FRI_START + 0];
+    let next_fneg = current[FRI_START + 1];
+    let b_link = current[CARRY_START + 5];
+    let one_minus_b_link = E::ONE - b_link;
+    let selected_next = one_minus_b_link * next_fx + b_link * next_fneg;
+    let bind_link_lhs = current[FRI_START + 6] - current[CARRY_START + 7];
+    let bind_link_rhs = current[FRI_START + 7] - selected_next;
+
+    // Terminal-check selector (aux[2]=2) over {0..=6}: non-zero only at 2.
+    let is_terminal_check = aux_mode
+        * (aux_mode - one)
+        * (aux_mode - three)
+        * (aux_mode - four)
+        * (aux_mode - five)
+        * (aux_mode - six);
+
+    // Terminal-check row layout (aux[2]=2):
+    // - fri[0] = final_value
+    // - fri[1] = c0
+    // - fri[2] = c1   (remainder degree < 2 for folding_factor=2; missing coeffs treated as 0)
+    // - carry[1] = x_terminal (already chained in-trace via x_{i+1}=x_i^2)
+    // - fri[6] = final_value (lhs)
+    // - fri[7] = expected = c0 + c1 * x_terminal (rhs)
+    let final_val = current[FRI_START + 0];
+    let c0 = current[FRI_START + 1];
+    let c1 = current[FRI_START + 2];
+    let x_term = current[CARRY_START + 1];
+    let expected_term = c0 + c1 * x_term;
+    let bind_term_lhs = current[FRI_START + 6] - final_val;
+    let bind_term_rhs = current[FRI_START + 7] - expected_term;
+
     // Nop sub-mode selectors.
     //
     // SECURITY: On Nop rows we restrict aux[2] to a small set of mode tags, and then use
     // Lagrange basis polynomials to activate different constraint sub-systems.
     //
-    // Allowed Nop sub-modes: {0,6,8,9,10,11,12,13}
+    // Allowed Nop sub-modes: {0,6,7,8,9,10,11,12,13,14,15,16,17}
     // - 6  : QueryGen (bit/shift + accumulator)
     // - 8  : ZeroCheck (fri[4] == 0), used to bind terminal quotient = 0
     // - 9  : Canonicality check for Goldilocks u64 extraction (see below)
     // - 10 : PoWShift (QueryGen shift with bit forced to 0)
     // - 11 : Capture binding (fri[4] == hash_state[0]) to bind derived integers to transcript
+    // - 14 : CaptureIdx binding (fri[4] == IDX_REG) to derive masked indices / bits from Q_IDX
+    // - 15 : StoreAccToMerkleIdx (carry[0] := fri[6]) to seed Merkle microprogram with masked idx
     let seven = E::from(super::BaseElement::new(7));
     let eight = E::from(super::BaseElement::new(8));
     let nine = E::from(super::BaseElement::new(9));
     let ten = E::from(super::BaseElement::new(10));
     let eleven = E::from(super::BaseElement::new(11));
 
-    // Denominator inverses for Lagrange basis over points {0,6,7,8,9,10,11,12,13}.
+    let twelve = E::from(super::BaseElement::new(12));
+    let thirteen = E::from(super::BaseElement::new(13));
+    let fourteen = E::from(super::BaseElement::new(14));
+    let fifteen = E::from(super::BaseElement::new(15));
+    let sixteen = E::from(super::BaseElement::new(16));
+    let seventeen = E::from(super::BaseElement::new(17));
+
+    // Denominator inverses for Lagrange basis over points {0,6,7,8,9,10,11,12,13,14,15,16,17}.
     //
     // NOTE: we keep the interpolation set (including 7) even though 7 is disallowed by the
     // "allowed Nop sub-modes" constraint below; the basis polynomials still evaluate to the
@@ -402,19 +518,62 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     // constants.
     //
     // Precomputed in Goldilocks:
-    // - inv(-30240), inv(-1920), inv(1296), inv(-1440), inv(2640), inv(-8640), inv(65520)
-    let inv_neg_30240 = E::from(super::BaseElement::new(4978302855505701807u64));
-    let inv_neg_1920 = E::from(super::BaseElement::new(9607679202820096u64));
-    let inv_1296 = E::from(super::BaseElement::new(12966808524102381417u64));
-    let inv_neg_1440 = E::from(super::BaseElement::new(12310639618546816342u64));
-    let inv_2640 = E::from(super::BaseElement::new(13408826465608555800u64));
-    let inv_neg_8640 = E::from(super::BaseElement::new(8200687959562664164u64));
-    let inv_65520 = E::from(super::BaseElement::new(540282385061150600u64));
+    // denom6  = -239500800
+    // denom8  = -5806080
+    // denom9  = 2177280
+    // denom10 = -1209600
+    // denom11 = 950400
+    // denom12 = -1036800
+    // denom13 = 1572480
+    // denom14 = -3386880
+    // denom15 = 10886400
+    // denom16 = -58060800
+    // denom17 = 678585600
+    let inv_neg_239500800 = E::from(super::BaseElement::new(13493303875880579883u64));
+    let inv_neg_5806080 = E::from(super::BaseElement::new(7808148814990036624u64));
+    let inv_2177280 = E::from(super::BaseElement::new(9922843275717542871u64));
+    let inv_neg_1209600 = E::from(super::BaseElement::new(15343021428654674610u64));
+    let inv_950400 = E::from(super::BaseElement::new(12335076119791968869u64));
+    let inv_neg_1036800 = E::from(super::BaseElement::new(17900191666763787045u64));
+    let inv_1572480 = E::from(super::BaseElement::new(12320341145653937489u64));
+    let inv_neg_3386880 = E::from(super::BaseElement::new(209152204686788269u64));
+    let inv_10886400 = E::from(super::BaseElement::new(16741963910675176031u64));
+    let inv_neg_58060800 = E::from(super::BaseElement::new(11848861323147754255u64));
+    let inv_678585600 = E::from(super::BaseElement::new(8258888563393619562u64));
 
-    let twelve = E::from(super::BaseElement::new(12));
-    let thirteen = E::from(super::BaseElement::new(13));
+    // Enforce Nop sub-mode is in {0,6,7,8,9,10,11,12,13,14,15,16,17} on Nop rows:
+    // aux*(aux-6)(aux-7)(aux-8)(aux-9)(aux-10)(aux-11)(aux-12)(aux-13)(aux-14)(aux-15)(aux-16)(aux-17) = 0
+    let nop_mode_in_range = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - seven)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen);
 
-    // L_6(x) over {0,6,7,8,9,10,11,12,13} has denom = -30240.
+    // L_7(x) over {0,6,7,8,9,10,11,12,13,14,15,16,17} has denom = 25401600.
+    let inv_25401600 = E::from(super::BaseElement::new(9810376543062873202u64));
+    let is_deepacc = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_25401600;
+
+    // L_6(x) over {0,6,7,8,9,10,11,12,13,14,15,16,17} has denom = -239500800.
     let is_qgen = aux_mode
         * (aux_mode - seven)
         * (aux_mode - eight)
@@ -423,8 +582,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - eleven)
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
-        * inv_neg_30240;
-    // L_8(x) denom = -1920
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_neg_239500800;
+    // L_8(x) denom = -5806080
     let is_zerocheck = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -433,8 +596,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - eleven)
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
-        * inv_neg_1920;
-    // L_9(x) denom = 1296
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_neg_5806080;
+    // L_9(x) denom = 2177280
     let is_canon = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -443,8 +610,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - eleven)
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
-        * inv_1296;
-    // L_10(x) denom = -1440
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_2177280;
+    // L_10(x) denom = -1209600
     let is_powshift = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -453,8 +624,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - eleven)
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
-        * inv_neg_1440;
-    // L_11(x) denom = 2640
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_neg_1209600;
+    // L_11(x) denom = 950400
     let is_capture = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -463,8 +638,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - ten)
         * (aux_mode - twelve)
         * (aux_mode - thirteen)
-        * inv_2640;
-    // L_12(x) denom = -8640
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_950400;
+    // L_12(x) denom = -1036800
     let is_export = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -473,8 +652,12 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - ten)
         * (aux_mode - eleven)
         * (aux_mode - thirteen)
-        * inv_neg_8640;
-    // L_13(x) denom = 65520
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_neg_1036800;
+    // L_13(x) denom = 1572480
     let is_freeze = aux_mode
         * (aux_mode - six)
         * (aux_mode - seven)
@@ -483,7 +666,71 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         * (aux_mode - ten)
         * (aux_mode - eleven)
         * (aux_mode - twelve)
-        * inv_65520;
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_1572480;
+
+    // L_14(x) denom = -3386880
+    let is_capture_idx = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - seven)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_neg_3386880;
+
+    // L_15(x) denom = 10886400
+    let is_store_acc = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - seven)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fourteen)
+        * (aux_mode - sixteen)
+        * (aux_mode - seventeen)
+        * inv_10886400;
+
+    // L_16(x) denom = -58060800
+    let is_xexp_step = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - seven)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - seventeen)
+        * inv_neg_58060800;
+
+    // L_17(x) denom = 678585600
+    let is_xexp_init = aux_mode
+        * (aux_mode - six)
+        * (aux_mode - seven)
+        * (aux_mode - eight)
+        * (aux_mode - nine)
+        * (aux_mode - ten)
+        * (aux_mode - eleven)
+        * (aux_mode - twelve)
+        * (aux_mode - thirteen)
+        * (aux_mode - fourteen)
+        * (aux_mode - fifteen)
+        * (aux_mode - sixteen)
+        * inv_678585600;
 
     let is_qgen_nop = op.is_nop * is_qgen;
     let is_zerocheck_nop = op.is_nop * is_zerocheck;
@@ -492,21 +739,28 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
     let is_capture_nop = op.is_nop * is_capture;
     let is_export_nop = op.is_nop * is_export;
     let is_freeze_nop = op.is_nop * is_freeze;
-
+    let is_capture_idx_nop = op.is_nop * is_capture_idx;
+    let is_store_acc_nop = op.is_nop * is_store_acc;
+    let is_xexp_step_nop = op.is_nop * is_xexp_step;
+    let is_xexp_init_nop = op.is_nop * is_xexp_init;
+    let is_deepacc_nop = op.is_nop * is_deepacc;
+    
     for i in 0..8 {
         let fri_curr = current[FRI_START + i];
         let fri_next = next[FRI_START + i];
         let copy_constraint = fri_next - fri_curr;
 
-        // Selector for Init-kind 11 (Merkle merge prep): l11 over {8,9,10,11,12}.
+        // Selector for Init-kind 11 (Merkle merge prep): l11 over {8,9,10,11,12,13}.
         // We recompute it here because we need it for fri-column semantics.
         let rc = current[ROUND_COUNTER];
         let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
         let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
         let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
         let k12 = E::from(super::BaseElement::new(INIT_KIND_LOAD_ROOT4));
-        let inv_neg6 = E::from(super::BaseElement::new(3074457344902430720u64)); // (-6)^{-1}
-        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * inv_neg6;
+        let k13 = E::from(super::BaseElement::new(INIT_KIND_LOAD_MERKLE_IDX));
+        // denom11 = 12 over {8..=13}
+        let inv12 = E::from(super::BaseElement::new(12)).inv();
+        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * (rc - k13) * inv12;
 
         if i == 4 {
             // FRI folding result verification
@@ -526,14 +780,22 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             let copy_ok = both_not_special
                 * (one
                     - is_qgen_nop
+                    - is_deepacc_nop
                     - is_zerocheck_nop
                     - is_powshift_nop
                     - is_export_nop
-                    - is_freeze_nop);
+                    - is_freeze_nop
+                    - is_capture_idx_nop
+                    - is_xexp_step_nop
+                    - is_xexp_init_nop);
             let qgen_shift = fri_curr - (two * fri_next + current[FRI_START + 5]);
             let zerocheck_constraint = fri_curr; // enforce fri[4] == 0
             // Capture binding: fri[4] == hash_state[0]
             let capture_constraint = fri_curr - current_hash[0];
+            // CaptureIdx binding: fri[4] == IDX_REG (persistent query index).
+            let capture_idx_constraint = fri_curr - current[IDX_REG];
+            // XExp init binding: fri[4] == IDX_REG (persistent query index).
+            let xexp_init_constraint = fri_curr - current[IDX_REG];
             // Export binding targets IDX_REG; fri[4] is left as scratch.
             // Canonicality check (Goldilocks u64 extraction):
             //
@@ -555,9 +817,11 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
 
             result[idx] = op.is_fri * fri_fold_constraint
                 + copy_ok * copy_constraint
-                + (is_qgen_nop + is_powshift_nop + is_freeze_nop) * qgen_shift
+                + (is_qgen_nop + is_powshift_nop + is_freeze_nop + is_xexp_step_nop) * qgen_shift
                 + is_zerocheck_nop * zerocheck_constraint
                 + is_capture_nop * capture_constraint
+                + is_capture_idx_nop * capture_idx_constraint
+                + is_xexp_init_nop * xexp_init_constraint
                 + is_canon_nop * canon_eq;
         } else if i == 6 {
             // Equality verification on ALL DeepCompose rows.
@@ -569,16 +833,32 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 * (one
                     - is_qgen_nop
                     - is_powshift_nop
+                    - is_capture_idx_nop
+                    - is_export_nop
                     );
             let acc_update = fri_next - (fri_curr + current[FRI_START + 5] * current[FRI_START + 7]);
             let acc_copy = fri_next - fri_curr;
             // Capture mode anchors accumulator at 0.
             let capture_acc_zero = is_capture_nop * fri_curr;
+            // CaptureIdx anchors accumulator at 0.
+            let capture_idx_acc_zero = is_capture_idx_nop * fri_curr;
+            // XExp init anchors accumulator at 0.
+            let xexp_init_acc_zero = is_xexp_init_nop * fri_curr;
+            // Equality verification on ALL DeepCompose rows.
+            // Trace builder must ensure fri[6]==fri[7] also in modes 0/4/5 (set both to 0).
             result[idx] = op.is_deep * equality_constraint
+                + op.is_deep * is_deep_check * bind_deep_lhs
+                + op.is_deep * is_deep_check * bind_deep_rhs
+                + op.is_deep * is_link_check * bind_link_lhs
+                + op.is_deep * is_link_check * bind_link_rhs
+                + op.is_deep * is_terminal_check * bind_term_lhs
+                + op.is_deep * is_terminal_check * bind_term_rhs
                 + copy_ok * copy_constraint
                 + (is_qgen_nop + is_powshift_nop) * acc_update
                 + is_freeze_nop * acc_copy
                 + capture_acc_zero
+                + capture_idx_acc_zero
+                + xexp_init_acc_zero
                 ;
         } else if i < 4 {
             // Root verification for mode 0: hash_state == fri[0..3]
@@ -632,7 +912,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             result[idx] = op.is_deep * is_root_check * root_constraint
                 + op.is_deep * is_statement_check * statement_constraint
                 + op.is_deep * is_params_check * params_constraint
-                + both_not_special * copy_constraint;
+                + both_not_special * copy_constraint
+                + if i == 0 { op.is_nop * nop_mode_in_range } else { E::ZERO };
         } else {
             // Columns 5, 7: copy constraint only
             if i == 5 {
@@ -643,12 +924,17 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 let copy_ok = both_not_special
                     * (one
                         - is_qgen_nop
+                        - is_deepacc_nop
                         - is_zerocheck_nop
                         - is_canon_nop
                         - is_powshift_nop
                         - is_capture_nop
+                        - is_capture_idx_nop
                         - is_export_nop
-                        - is_freeze_nop);
+                        - is_freeze_nop
+                        - is_store_acc_nop
+                        - is_xexp_step_nop
+                        - is_xexp_init_nop);
                 let qgen_bit = fri_curr * (fri_curr - one);
 
                 result[idx] = copy_ok * copy_constraint
@@ -656,6 +942,11 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                     + is_qgen_nop * qgen_bit;
                 // PoWShift: enforce bit==0
                 result[idx] = result[idx] + is_powshift_nop * fri_curr;
+                // CaptureIdx: anchor bit==0 (shift seed).
+                result[idx] = result[idx] + is_capture_idx_nop * fri_curr;
+                // XExp init/step: anchor bit==0 on init, binary on steps.
+                result[idx] = result[idx] + is_xexp_init_nop * fri_curr;
+                result[idx] = result[idx] + is_xexp_step_nop * qgen_bit;
                 // Freeze mode uses fri[5] as the bit; enforce bit binary.
                 result[idx] = result[idx] + is_freeze_nop * qgen_bit;
                 // Canonicality mode does not impose any constraints on fri[5] here (fri[5] is used as inverse witness).
@@ -665,17 +956,27 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
                 let copy_ok = both_not_special
                     * (one
                         - is_qgen_nop
+                        - is_deepacc_nop
                         - is_zerocheck_nop
                         - is_canon_nop
                         - is_powshift_nop
+                        - is_capture_idx_nop
                         - is_export_nop
+                        - is_xexp_step_nop
+                        - is_xexp_init_nop
                         );
                 let pow2_update = fri_next - (two * fri_curr);
                 // Capture mode anchors pow2 at 1.
                 let capture_pow2_one = is_capture_nop * (fri_curr - one);
+                // CaptureIdx anchors pow2 at 1.
+                let capture_idx_pow2_one = is_capture_idx_nop * (fri_curr - one);
                 result[idx] = copy_ok * copy_constraint
                     + (is_qgen_nop + is_powshift_nop) * pow2_update
-                    + capture_pow2_one;
+                    + capture_pow2_one
+                    + capture_idx_pow2_one
+                    // XExp init/step: anchor pow2==1 and keep it constant.
+                    + is_xexp_init_nop * (fri_curr - one)
+                    + is_xexp_step_nop * (fri_next - fri_curr);
             }
         }
         idx += 1;
@@ -683,46 +984,13 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
 
     // --- 8. Index register constraints (1) ---
     //
-    // Dedicated Merkle index register semantics:
+    // Persistent query index register (Q_IDX):
     // - Default: copy
-    // - On Init kind 11: idx_cur = 2*idx_next + dir   (dir in fri[5])
-    // - On DeepCompose root-check rows (aux[2]=0): idx must be 0
     // - On Export Nop rows (aux[2]=12): idx_next = fri[6] (accumulator)
     {
         let idx_curr = current[IDX_REG];
         let idx_next = next[IDX_REG];
         let copy_constraint = idx_next - idx_curr;
-
-        // l11 selector for init kind 11 over {8,9,10,11,12}.
-        let rc = current[ROUND_COUNTER];
-        let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
-        let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
-        let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
-        let k12 = E::from(super::BaseElement::new(INIT_KIND_LOAD_ROOT4));
-        let inv_neg6 = E::from(super::BaseElement::new(3074457344902430720u64)); // (-6)^{-1}
-        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * inv_neg6;
-
-        // Root-mode index must be fully consumed: idx == 0 after all Merkle steps.
-        // is_root_check = Π_{k=1..6}(aux[2]-k) (non-zero only when aux[2]=0).
-        let aux_mode = current[AUX_START + 2];
-        let one = E::ONE;
-        let two = E::from(super::BaseElement::new(2));
-        let three = E::from(super::BaseElement::new(3));
-        let four = E::from(super::BaseElement::new(4));
-        let five = E::from(super::BaseElement::new(5));
-        let six = E::from(super::BaseElement::new(6));
-        let is_root_check = (aux_mode - one)
-            * (aux_mode - two)
-            * (aux_mode - three)
-            * (aux_mode - four)
-            * (aux_mode - five)
-            * (aux_mode - six);
-        let root_idx_zero = op.is_deep * is_root_check * idx_curr;
-
-        // Merkle idx update on Init kind 11.
-        let dir = current[FRI_START + 5];
-        let idx_update_constraint = idx_curr - (two * idx_next + dir);
-        let merkle_idx_update = op.is_init * l11 * idx_update_constraint;
 
         // Export: idx_next = acc (fri[6]) on aux[2]=12 Nop rows.
         let export_constraint = idx_next - current[FRI_START + 6];
@@ -733,6 +1001,13 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         // We enforce this by looking at the *next* row:
         //   if next row is export_nop, current row must be zerocheck_nop.
         let next_mode = next[AUX_START + 2];
+        // Selector for export (aux[2]=12) over {0,6,7,8,9,10,11,12,13,14,15,16,17}:
+        // denom12 = -1036800.
+        let inv_neg_1036800 = E::from(super::BaseElement::new(17900191666763787045u64));
+        let fourteen = E::from(super::BaseElement::new(14));
+        let fifteen = E::from(super::BaseElement::new(15));
+        let sixteen = E::from(super::BaseElement::new(16));
+        let seventeen = E::from(super::BaseElement::new(17));
         let next_is_export = next_mode
             * (next_mode - six)
             * (next_mode - seven)
@@ -741,15 +1016,17 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             * (next_mode - ten)
             * (next_mode - eleven)
             * (next_mode - thirteen)
-            * inv_neg_8640;
+            * (next_mode - fourteen)
+            * (next_mode - fifteen)
+            * (next_mode - sixteen)
+            * (next_mode - seventeen)
+            * inv_neg_1036800;
         let next_is_export_nop = next_op.is_nop * next_is_export;
         let export_requires_prev_zerocheck = next_is_export_nop * (E::ONE - is_zerocheck_nop);
 
-        // Copy by default, except on init-kind 11 and export rows.
-        let copy_ok = E::ONE - op.is_init * l11 - is_export_nop;
+        // Copy by default, except on export rows.
+        let copy_ok = E::ONE - is_export_nop;
         result[idx] = copy_ok * copy_constraint
-            + merkle_idx_update
-            + root_idx_zero
             + export_term
             + export_requires_prev_zerocheck;
         idx += 1;
@@ -772,7 +1049,8 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         let reset = ctr_next; // == 0
 
         let inc_mode = is_qgen_nop + is_powshift_nop + is_freeze_nop;
-        let other_mode = E::ONE - is_capture_nop - inc_mode;
+        let capture_begin = is_capture_nop + is_capture_idx_nop;
+        let other_mode = E::ONE - capture_begin - inc_mode;
 
         // Force export rows to have ctr==64.
         let sixty_four = E::from(super::BaseElement::new(64));
@@ -797,12 +1075,19 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             * (next_mode - ten)
             * (next_mode - eleven)
             * (next_mode - thirteen)
-            * inv_neg_8640;
+            * (next_mode - fourteen)
+            * (next_mode - fifteen)
+            * (next_mode - sixteen)
+            * (next_mode - seventeen)
+            * inv_neg_1036800;
         let next_is_export_nop = next_op.is_nop * next_is_export;
         let prev_export_requires_ctr = next_is_export_nop * (ctr_cur - sixty_four);
 
         // Allow the counter to reset at the start of a new microprogram: disable the "copy" constraint
-        // on transitions INTO a capture row (aux[2]=11 on NEXT row).
+        // on transitions INTO a capture-begin row (aux[2]=11 or 14 on NEXT row).
+        // Selector for capture (aux[2]=11) over {0,6,7,8,9,10,11,12,13,14,15,16,17}:
+        // denom11 = 950400.
+        let inv_950400 = E::from(super::BaseElement::new(12335076119791968869u64));
         let next_is_capture = next_mode
             * (next_mode - six)
             * (next_mode - seven)
@@ -811,12 +1096,33 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             * (next_mode - ten)
             * (next_mode - twelve)
             * (next_mode - thirteen)
-            * inv_2640;
-        let next_is_capture_nop = next_op.is_nop * next_is_capture;
+            * (next_mode - fourteen)
+            * (next_mode - fifteen)
+            * (next_mode - sixteen)
+            * (next_mode - seventeen)
+            * inv_950400;
+        // Selector for capture-idx (aux[2]=14) over {0,6,7,8,9,10,11,12,13,14,15,16,17}:
+        // denom14 = -3386880.
+        let inv_neg_3386880 = E::from(super::BaseElement::new(209152204686788269u64));
+        let next_is_capture_idx = next_mode
+            * (next_mode - six)
+            * (next_mode - seven)
+            * (next_mode - eight)
+            * (next_mode - nine)
+            * (next_mode - ten)
+            * (next_mode - eleven)
+            * (next_mode - twelve)
+            * (next_mode - thirteen)
+            * (next_mode - fifteen)
+            * (next_mode - sixteen)
+            * (next_mode - seventeen)
+            * inv_neg_3386880;
 
-        result[idx] = is_capture_nop * reset
+        let next_is_capture_begin_nop = next_op.is_nop * (next_is_capture + next_is_capture_idx);
+
+        result[idx] = capture_begin * reset
             + inc_mode * inc
-            + other_mode * (E::ONE - next_is_capture_nop) * copy
+            + other_mode * (E::ONE - next_is_capture_begin_nop) * copy
             + export_requires_ctr
             + prev_export_requires_ctr;
         idx += 1;
@@ -935,7 +1241,185 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
         idx += 1;
     }
 
-    // --- 12. Auxiliary constraints (4) ---
+    // --- 12. Carry/register constraints (8) ---
+    //
+    // carry[0] is the scratch MERKLE_IDX which is consumed by the Merkle microprogram.
+    // Other carry columns currently copy (they are activated in later hardening steps).
+    {
+        let rc = current[ROUND_COUNTER];
+        let k8 = E::from(super::BaseElement::new(INIT_KIND_RESET_WITH_LEN));
+        let k9 = E::from(super::BaseElement::new(INIT_KIND_LOAD_CAPACITY4));
+        let k10 = E::from(super::BaseElement::new(INIT_KIND_COPY_DIGEST_FROM_RATE));
+        let k11 = E::from(super::BaseElement::new(INIT_KIND_MERKLE_PREP_MERGE8));
+        let k12 = E::from(super::BaseElement::new(INIT_KIND_LOAD_ROOT4));
+        let k13 = E::from(super::BaseElement::new(INIT_KIND_LOAD_MERKLE_IDX));
+
+        // Lagrange denominators over {8..=13}: denom11=12, denom13=120.
+        let inv12 = E::from(super::BaseElement::new(12)).inv();
+        let inv_neg120 = E::from(super::BaseElement::new(153722867245121536u64)); // (-120)^{-1}
+        let inv120 = E::ZERO - inv_neg120;
+
+        // l11 selector for init kind 11 over {8..=13}.
+        let l11 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k12) * (rc - k13) * inv12;
+        // l13 selector for init kind 13 over {8..=13}.
+        let l13 = (rc - k8) * (rc - k9) * (rc - k10) * (rc - k11) * (rc - k12) * inv120;
+
+        // Root-mode selector: non-zero only when aux[2]=0.
+        let aux_mode = current[AUX_START + 2];
+        let one = E::ONE;
+        let two = E::from(super::BaseElement::new(2));
+        let three = E::from(super::BaseElement::new(3));
+        let four = E::from(super::BaseElement::new(4));
+        let five = E::from(super::BaseElement::new(5));
+        let six = E::from(super::BaseElement::new(6));
+        let is_root_check = (aux_mode - one)
+            * (aux_mode - two)
+            * (aux_mode - three)
+            * (aux_mode - four)
+            * (aux_mode - five)
+            * (aux_mode - six);
+
+        for i in 0..8 {
+            let c_cur = current[CARRY_START + i];
+            let c_next = next[CARRY_START + i];
+            let copy = c_next - c_cur;
+
+            if i == 0 {
+                // Load scratch Merkle idx from Q_IDX.
+                let load = c_next - current[IDX_REG];
+                // Store masked idx from QueryGen accumulator (fri[6]) on Nop(mode=15).
+                let store_acc = c_next - current[FRI_START + 6];
+                // Merkle idx update on init kind 11: idx_cur = 2*idx_next + dir.
+                let dir = current[FRI_START + 5];
+                let update = c_cur - (two * c_next + dir);
+                // Root-mode requires the Merkle idx be fully consumed.
+                let root_zero = op.is_deep * is_root_check * c_cur;
+
+                let is_load = op.is_init * l13;
+                let is_update = op.is_init * l11;
+                let is_store = is_store_acc_nop;
+                let copy_ok = E::ONE - is_load - is_update - is_store;
+                result[idx] = copy_ok * copy
+                    + is_load * load
+                    + is_store * store_acc
+                    + is_update * update
+                    + root_zero;
+            } else if i == 1 {
+                // carry[1] holds the current FRI x-coordinate for this query.
+                //
+                // It is updated by:
+                // - XExp init (mode 17): set to domain_offset.
+                // - XExp step (mode 16): conditional multiply by base (bit from fri[5]).
+                // - FriFold rows: x_{i+1} = x_i^2.
+                let bit = current[FRI_START + 5];
+                let base_cur = current[CARRY_START + 2];
+                let xexp_mul = c_next - (c_cur * (E::ONE + bit * (base_cur - E::ONE)));
+                let x_square = c_next - (c_cur * c_cur);
+
+                let set_offset = c_next - E::from(super::BaseElement::GENERATOR);
+
+                let allow_update = is_xexp_init_nop + is_xexp_step_nop + op.is_fri;
+                let copy_ok = E::ONE - allow_update;
+                result[idx] = copy_ok * copy
+                    + is_xexp_init_nop * set_offset
+                    + is_xexp_step_nop * xexp_mul
+                    + op.is_fri * x_square;
+            } else if i == 2 {
+                // carry[2] holds the base for exponentiation (starts at g_lde and squares each step).
+                let base_square = c_next - (c_cur * c_cur);
+                let set_g = c_next - E::from(super::BaseElement::get_root_of_unity(6)); // lde_domain_size=64
+
+                let allow_update = is_xexp_init_nop + is_xexp_step_nop;
+                let copy_ok = E::ONE - allow_update;
+                result[idx] = copy_ok * copy
+                    + is_xexp_init_nop * set_g
+                    + is_xexp_step_nop * base_square;
+            } else if i == 6 {
+                // carry[6] is the XExp step counter for the current query.
+                //
+                // - Reset to 0 on XExp init (mode 17).
+                // - Increment by 1 on XExp step (mode 16).
+                // - Must equal 32 on FriFold rows (ensures xexp ran to completion before folding).
+                let reset = c_next; // == 0
+                let inc = c_next - (c_cur + E::ONE);
+                let thirty_two = E::from(super::BaseElement::new(32));
+                let fri_requires_32 = op.is_fri * (c_cur - thirty_two);
+
+                let allow_update = is_xexp_init_nop + is_xexp_step_nop;
+                let copy_ok = E::ONE - allow_update;
+                result[idx] = copy_ok * copy
+                    + is_xexp_init_nop * reset
+                    + is_xexp_step_nop * inc
+                    + fri_requires_32;
+            } else if i == 5 {
+                // carry[5] is the per-query "upper-half" bit (msb of the transcript-derived Q_IDX).
+                //
+                // We capture it at the transition from the last QueryGen row (mode 6) to the first
+                // Freeze row (mode 13) inside `decompose_fri4_u64_canonical(capture_bits=domain_bits)`.
+                // This is exactly the highest captured bit and corresponds to "upper-half" for the LDE domain.
+                // Detect next row is Freeze Nop (aux[2]=13).
+                let next_mode = next[AUX_START + 2];
+                let next_is_freeze = next_mode
+                    * (next_mode - six)
+                    * (next_mode - seven)
+                    * (next_mode - eight)
+                    * (next_mode - nine)
+                    * (next_mode - ten)
+                    * (next_mode - eleven)
+                    * (next_mode - twelve)
+                    * (next_mode - fourteen)
+                    * (next_mode - fifteen)
+                    * (next_mode - sixteen)
+                    * (next_mode - seventeen)
+                    * E::from(super::BaseElement::new(12320341145653937489u64)); // inv(1572480)
+                let next_is_freeze_nop = next_op.is_nop * next_is_freeze;
+
+                let capture_swap = is_qgen_nop * next_is_freeze_nop * (c_next - current[FRI_START + 5]);
+
+                // On capture/capture-idx/xexp-init rows, clear swap bit to 0 (will be overwritten on the qgen→freeze boundary).
+                let reset_swap = (is_capture_nop + is_capture_idx_nop + is_xexp_init_nop) * c_next;
+
+                // Enforce binary always (defense-in-depth).
+                let binary = c_cur * (c_cur - E::ONE);
+
+                let allow_update = is_qgen_nop * next_is_freeze_nop + is_capture_nop + is_capture_idx_nop + is_xexp_init_nop;
+                let copy_ok = E::ONE - allow_update;
+                result[idx] = copy_ok * copy + capture_swap + reset_swap + binary;
+            } else {
+                // carry[3], carry[4] are reserved for DEEP accumulators:
+                // - reset to 0 on root-check rows (DeepCompose mode 0),
+                // - update on Nop(mode=7) rows as:
+                //   next = cur + gamma * (Tx - Tz)   for carry[3]
+                //   next = cur + gamma * (Tx - Tzg)  for carry[4]
+                if i == 3 || i == 4 {
+                    let is_root_row = op.is_deep * is_root_check;
+                    let reset = c_next; // == 0
+                    let tx = current[FRI_START + 0];
+                    let tz = current[FRI_START + 1];
+                    let tzg = current[FRI_START + 2];
+                    let gamma = current[FRI_START + 3];
+                    let delta = if i == 3 { tx - tz } else { tx - tzg };
+                    let update = c_next - (c_cur + gamma * delta);
+                    let allow_update = is_root_row + is_deepacc_nop;
+                    let copy_ok = E::ONE - allow_update;
+                    result[idx] = copy_ok * copy + is_root_row * reset + is_deepacc_nop * update;
+                } else {
+                    // carry[7] stores the previous layer's folded value for inter-layer linkage.
+                    if i == 7 {
+                        let set_on_fold = c_next - current[FRI_START + 4];
+                        let allow_update = op.is_fri;
+                        let copy_ok = E::ONE - allow_update;
+                        result[idx] = copy_ok * copy + op.is_fri * set_on_fold;
+                    } else {
+                        result[idx] = copy;
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    // --- 13. Auxiliary constraints (4) ---
     
     for i in 0..4 {
         let aux_curr = current[AUX_START + i];
@@ -1070,24 +1554,34 @@ pub fn evaluate_all<E: FieldElement<BaseField = super::BaseElement>>(
             // aux[2]: mode value.
             //
             // SECURITY: aux[2] is a mode tag:
-            // - On Nop rows: restrict to {0,6,8,9,10,11,12,13}.
+            // - On Nop rows: restrict to {0,6,7,8,9,10,11,12,13,14,15,16,17}.
             // - On DeepCompose rows: restrict to {0,1,2,3,4,5}.
             let mode = aux_curr;
             let six = E::from(super::BaseElement::new(6));
+            let seven = E::from(super::BaseElement::new(7));
             let eight = E::from(super::BaseElement::new(8));
             let nine = E::from(super::BaseElement::new(9));
             let ten = E::from(super::BaseElement::new(10));
             let eleven = E::from(super::BaseElement::new(11));
             let twelve = E::from(super::BaseElement::new(12));
             let thirteen = E::from(super::BaseElement::new(13));
+            let fourteen = E::from(super::BaseElement::new(14));
+            let fifteen = E::from(super::BaseElement::new(15));
+            let sixteen = E::from(super::BaseElement::new(16));
+            let seventeen = E::from(super::BaseElement::new(17));
             let in_set = mode
                 * (mode - six)
+                * (mode - seven)
                 * (mode - eight)
                 * (mode - nine)
                 * (mode - ten)
                 * (mode - eleven)
                 * (mode - twelve)
-                * (mode - thirteen); // = 0 iff mode ∈ {0,6,8,9,10,11,12,13}
+                * (mode - thirteen)
+                * (mode - fourteen)
+                * (mode - fifteen)
+                * (mode - sixteen)
+                * (mode - seventeen); // = 0 iff mode ∈ {0,6,7,8,9,10,11,12,13,14,15,16,17}
             let one = E::ONE;
             let two = E::from(super::BaseElement::new(2));
             let three = E::from(super::BaseElement::new(3));
@@ -1359,7 +1853,7 @@ mod tests {
 
     #[test]
     fn test_column_indices() {
-        // Verify indices are consistent with VERIFIER_TRACE_WIDTH (34)
+        // Verify indices are consistent with VERIFIER_TRACE_WIDTH (42)
         assert_eq!(SEL_0, 0);
         assert_eq!(SEL_1, 1);
         assert_eq!(SEL_2, 2);
@@ -1372,7 +1866,9 @@ mod tests {
         assert_eq!(ROOT_REG_END, 28);
         assert_eq!(QGEN_CTR, 28);
         assert_eq!(ROOT_KIND, 29);
-        assert_eq!(AUX_START, 30);
+        assert_eq!(CARRY_START, 30);
+        assert_eq!(CARRY_END, 38);
+        assert_eq!(AUX_START, 38);
         assert_eq!(AUX_END, VERIFIER_TRACE_WIDTH);
     }
 

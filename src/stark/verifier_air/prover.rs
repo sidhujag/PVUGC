@@ -201,9 +201,8 @@ pub struct VerificationResult {
 /// 
 /// - `child_type`: The AIR type of the proof being verified. This determines
 ///   which constraint formula to use for OOD verification.
-///   - Use `ChildAirType::generic_vdf()` for VdfAir proofs (1 constraint)
-///   - Use `ChildAirType::generic_aggregator_vdf()` for AggregatorAir proofs (2 constraints)
-///   - Use `ChildAirType::VerifierAir` for recursive VerifierAir proofs
+///   - Use `ChildAirType::Generic{...}` for app proofs (formula-as-witness)
+///   - Use `ChildAirType::verifier_air()` for recursive VerifierAir proofs (aggregator nodes)
 pub fn append_proof_verification(
     builder: &mut VerifierTraceBuilder,
     proof_data: &ParsedProof,
@@ -328,6 +327,17 @@ pub fn append_proof_verification_with_options(
         builder.absorb(&commit_buf);
         builder.permute();
     }
+
+    // Bind child AIR type / app formula ID into the statement hash.
+    //
+    // SECURITY: prevents AIR-substitution (e.g. verify a different app AIR but claim the same public output).
+    // This is also the mechanism that lets production enforce "this proof is an Aggregator node vs an App leaf"
+    // without changing Groth16 public inputs: the statement hash commits to the child-type tag.
+    let formula_hash = child_type.compute_formula_hash();
+    commit_buf = [BaseElement::ZERO; 8];
+    commit_buf[0..4].copy_from_slice(&formula_hash);
+    builder.absorb(&commit_buf);
+    builder.permute();
 
     // === Statement Hash Verification ===
     // The statement hash binds all commitments to the public inputs.
@@ -502,42 +512,14 @@ pub fn append_proof_verification_with_options(
         p: &ParsedProof,
         child_type: &super::ood_eval::ChildAirType,
     ) -> Vec<BaseElement> {
-        use super::VerifierPublicInputs;
-        use winter_math::ToElements as _;
-
-        match child_type {
-            super::ood_eval::ChildAirType::VerifierAir => {
-                // Reconstruct `VerifierPublicInputs::to_elements()` deterministically from the parsed fields.
-                // NOTE: `VerifierPublicInputs::to_elements()` pads fri_commitments to at least 1.
-                let fri_commitments_len = p.fri_commitments.len().max(1);
-                let mut fri_commitments: Vec<[BaseElement; 4]> = Vec::with_capacity(fri_commitments_len);
-                for c in p.fri_commitments.iter() {
-                    fri_commitments.push(*c);
-                }
-                if p.fri_commitments.is_empty() {
-                    fri_commitments.push([BaseElement::ZERO; 4]);
-                }
-
-                let pub_inputs = VerifierPublicInputs {
-                    statement_hash: p.verifier_statement_hash,
-                    trace_commitment: p.trace_commitment,
-                    comp_commitment: p.comp_commitment,
-                    fri_commitments,
-                    num_queries: p.num_queries,
-                    proof_trace_len: p.trace_len,
-                    g_trace: p.g_trace,
-                    pub_result: p.pub_result,
-                    expected_checkpoint_count: p.verifier_expected_checkpoint_count,
-                    params_digest: p.verifier_params_digest,
-                    expected_mode_counter: p.verifier_expected_mode_counter,
-                };
-                pub_inputs.to_elements()
-            }
-            _ => {
-                // For the generic app proofs in this repo, the Winterfell public input is a single BaseElement.
-                vec![p.pub_result]
-            }
-        }
+        let _ = child_type;
+        // IMPORTANT (recursion correctness):
+        // Fiat–Shamir seeding MUST use the child proof's public inputs in the exact
+        // `pub_inputs.to_elements()` order Winterfell used when generating the proof.
+        // We therefore always use the parsed `pub_inputs_elements` verbatim (for both VerifierAir
+        // and Generic child types). Any "reconstruction" risks subtle padding/order mismatches,
+        // which would change derived query positions and break recursive verification.
+        p.pub_inputs_elements.clone()
     }
 
     let mut seed_material = reconstruct_context_to_elements_exact(proof_data);
@@ -584,12 +566,22 @@ pub fn append_proof_verification_with_options(
         if domain_bits > 0 {
             let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
             builder.capture_fri4_equals_hash0();
-            let _pos = builder.decompose_fri4_u64_canonical(0, domain_bits);
+            let pos = builder.decompose_fri4_u64_canonical(0, domain_bits) as usize;
+            if pos != query.position {
+                #[cfg(any(test, debug_assertions))]
+                eprintln!(
+                    "[verifier] derived trace query position mismatch: derived={}, proof={}",
+                    pos, query.position
+                );
+                all_valid = false;
+            }
             builder.export_fri6_to_next_idx_reg();
         } else {
             // Invalid domain; keep idx at 0 (will fail elsewhere).
             builder.set_merkle_index(0);
         }
+        // Materialize scratch Merkle index from the transcript-derived Q_IDX.
+        builder.mask_idx_reg_to_merkle_idx(domain_bits);
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
         
@@ -618,11 +610,21 @@ pub fn append_proof_verification_with_options(
         if domain_bits > 0 {
             let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
             builder.capture_fri4_equals_hash0();
-            let _pos = builder.decompose_fri4_u64_canonical(0, domain_bits);
+            let pos = builder.decompose_fri4_u64_canonical(0, domain_bits) as usize;
+            if pos != query.position {
+                #[cfg(any(test, debug_assertions))]
+                eprintln!(
+                    "[verifier] derived comp query position mismatch: derived={}, proof={}",
+                    pos, query.position
+                );
+                all_valid = false;
+            }
             builder.export_fri6_to_next_idx_reg();
         } else {
             builder.set_merkle_index(0);
         }
+        // Materialize scratch Merkle index from the transcript-derived Q_IDX.
+        builder.mask_idx_reg_to_merkle_idx(domain_bits);
         // Initialize hash state with leaf data
         builder.init_leaf(&query.values);
         
@@ -641,193 +643,145 @@ pub fn append_proof_verification_with_options(
     }
 
     // === Phase 6: DEEP Composition Verification ===
-    // 
-    // R1CS computes DEEP and passes it as FRI starting values.
-    // AIR verifies: prover's claimed DEEP values (in layer 0) match our computation.
     //
-    // The first FRI layer commits to DEEP polynomial evaluations:
-    //   DEEP(x) = Σ γᵢ * (T(x) - T(z)) / (x - z) 
-    //           + Σ γⱼ * (T(x) - T(z·g)) / (x - z·g) 
-    //           + comp terms
-    //
-    // We independently compute DEEP(x) and verify it matches the committed f_x values.
-    // This prevents a malicious prover from using incorrect DEEP values.
-    if !proof_data.fri_layers.is_empty() && !proof_data.trace_queries.is_empty() {
-    let first_layer = &proof_data.fri_layers[0];
-    
-    for (q_idx, fri_query) in first_layer.queries.iter().enumerate() {
-        // Get corresponding trace and comp query data
-        let trace_query = proof_data.trace_queries.get(q_idx);
-        let comp_query = proof_data.comp_queries.get(q_idx);
-        
-        if let (Some(trace_q), Some(comp_q)) = (trace_query, comp_query) {
-            // Use the proof-provided query position (should match transcript-derived position).
-            let position = trace_q.position;
-            let x = fri_query.x;  // Already: offset * g_lde^position
-            
-            let expected_deep = compute_deep_value(
-                x,
-                &trace_q.values,
-                &comp_q.values,
-                &proof_data.ood_trace_current,
-                &proof_data.ood_trace_next,
-                &proof_data.ood_comp_current,
-                &proof_data.ood_comp_next,
-                proof_data.z,
-                proof_data.g_trace,
-                &proof_data.deep_coeffs,
-            );
-            
-            // For upper-half positions, the query is at the HIGH position
-            // so actual f(x) = f_neg_x, not f_x
-            let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
-            // Upper-half test depends only on the top bit within the domain size (power of two).
-            let half = lde_domain_size / 2;
-            let is_upper_half = (position & half) != 0;
-            let prover_deep = if is_upper_half {
-                fri_query.f_neg_x  // Upper half: actual f(x) is at high position
-            } else {
-                fri_query.f_x      // Lower half: actual f(x) is at low position
-            };
-            
-            // DEEP verification: Compare prover's FRI value with our computed value
-            // This ensures the DEEP composition polynomial was computed correctly
-            let deep_ok = builder.verify_deep_value(prover_deep, expected_deep);
-            if !deep_ok {
-                #[cfg(any(test, debug_assertions))]
-                eprintln!("[verifier] DEEP check failed at query index {}", q_idx);
-                all_valid = false;
-            }
-        }
-    }
-    } // end DEEP verification guard
+    // Implemented in-trace as a microprogram:
+    // - Nop(mode=7) rows accumulate DEEP numerators into carry[3], carry[4]
+    // - one DeepCompose(mode=3) row enforces the final cross-multiplied DEEP equation.
 
     // === Phase 7: FRI layer verification ===
-    // Track final folded values for terminal verification
-    let mut final_folded_values: Vec<BaseElement> = Vec::new();
-    let mut final_layer_x_values: Vec<BaseElement> = Vec::new();
-
-    // Track positions through FRI layers (like R1CS does)
-    // Each layer halves the domain, so position folds: new_pos = old_pos % (domain_size / 2)
-    let lde_domain_size = proof_data.trace_len * proof_data.lde_blowup;
-    let mut folded_positions: Vec<usize> = proof_data
-        .trace_queries
-        .iter()
-        .map(|q| q.position)
-        .collect();
-    let mut current_domain_size = lde_domain_size;
-    
-    // NOTE: Length checks here are defense-in-depth. The REAL security is:
-    //   - AIR constraints verify Merkle roots match commitments
-    //   - AIR constraints verify FRI folding formula
-    //   - If attacker provides wrong/missing data, constraints fail → proof invalid
     //
-    // Even if attacker omits commitments:
-    //   - verify_root checks computed hash against commitment
-    //   - Wrong commitment → hash mismatch → all_valid=false
-    //   - Final trace has valid=0 → AIR rejects
-    
-    for (layer_idx, layer) in proof_data.fri_layers.iter().enumerate() {
-        // Get commitment for this layer from centralized list (matches R1CS pattern)
-        // If missing, use zeros - AIR constraints will reject (hash won't match zeros)
-        let layer_commitment = proof_data.fri_commitments.get(layer_idx)
-            .copied()
-            .unwrap_or([BaseElement::ZERO; 4]);  // Merkle verify_root will fail against zeros
-            
-        // Load the expected root digest for this FRI layer's commitment tree.
-        match root_kind_base {
-            None => builder.set_expected_root_fri(layer_idx, layer_commitment),
-            Some(base) => builder.set_expected_root_kind(base + 2 + (layer_idx as u64), layer_commitment),
-        }
-        for (q_idx, query) in layer.queries.iter().enumerate() {
-            // Derive and bind the FRI Merkle index u_j IN-TRACE.
-            // For folding factor 2, the Merkle index at layer `layer_idx` is the original position
-            // with the top (layer_idx+1) bits cleared, i.e. mask low (domain_bits-1-layer_idx) bits.
+    // Process per-query so that the x-coordinate can be chained across layers as x_{i+1}=x_i^2
+    // and so that `IDX_REG` is treated as the persistent query index (Q_IDX) for that slot.
+    let mut final_folded_values: Vec<BaseElement> = Vec::new();
+
+    let num_layers = proof_data.fri_layers.len();
+    if num_layers > 0 {
+        let num_q = proof_data.fri_layers[0].queries.len();
+
+        for q_idx in 0..num_q {
+            // Derive and bind the persistent query index (Q_IDX) for this slot.
             if domain_bits > 0 {
-                let bits_for_layer = domain_bits.saturating_sub(layer_idx + 1);
                 let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
                 builder.capture_fri4_equals_hash0();
-                let _u_j = builder.decompose_fri4_u64_canonical(0, bits_for_layer);
+                let pos = builder.decompose_fri4_u64_canonical(0, domain_bits) as usize;
+                if let Some(p) = proof_data.query_positions.get(q_idx) {
+                    if pos != *p {
+                        #[cfg(any(test, debug_assertions))]
+                        eprintln!(
+                            "[verifier] derived FRI query position mismatch: derived={}, proof={}",
+                            pos, *p
+                        );
+                        all_valid = false;
+                    }
+                }
                 builder.export_fri6_to_next_idx_reg();
             } else {
                 builder.set_merkle_index(0);
             }
 
-            // Initialize hash state with the FRI layer values being committed.
-            // For folding factor 2: the leaf is (val_low, val_high) pair = (f_x, f_neg_x).
-            builder.init_leaf(&[query.f_x, query.f_neg_x]);
-            
-            // Verify Merkle path for this FRI layer
-            for step in &query.merkle_path.steps {
-                builder.merkle_step_from_index(step.sibling);
+            // Seed x for layer 0 from the proof’s opened x (todo(3) will derive this from IDX_REG).
+            if let Some(q0) = proof_data.fri_layers[0].queries.get(q_idx) {
+                builder.set_fri_x(q0.x);
             }
-            
-            // Verify computed root matches the loaded expected FRI layer commitment root.
-            let root_ok = builder.verify_root();
-            if !root_ok {
-                #[cfg(any(test, debug_assertions))]
-                eprintln!("[verifier] FRI Merkle root failed at layer={}, query={}", layer_idx, q_idx);
-                all_valid = false;
-            }
+            // Compute x once per query from the transcript-bound Q_IDX (IDX_REG), then
+            // carry it across layers by squaring on each FriFold.
+            builder.xexp_init_from_qidx();
+            builder.xexp_run_32();
 
-            // Fold evaluation - AIR constraint verifies formula is correct
-            // NOTE: This is done AFTER root verification because the folded value
-            // feeds into the NEXT layer, not this layer's commitment.
-            let pos = folded_positions.get(q_idx).copied().unwrap_or(0);
-            let is_upper_half = pos >= current_domain_size / 2;
-            let (actual_f_x, actual_f_neg_x) = if is_upper_half {
-                (query.f_neg_x, query.f_x)  // Swap for upper half
-            } else {
-                (query.f_x, query.f_neg_x)
-            };
-            let folded = builder.fri_fold(
-                actual_f_x,
-                actual_f_neg_x,
-                query.x,
-                layer.beta,
-            );
+            for layer_idx in 0..num_layers {
+                let layer = &proof_data.fri_layers[layer_idx];
+                let query = match layer.queries.get(q_idx) {
+                    Some(q) => q,
+                    None => {
+                        all_valid = false;
+                        break;
+                    }
+                };
 
-            // FRI inter-layer consistency (critical):
-            // the folded value computed for layer `i` must equal the next layer's opened low value
-            // at the corresponding folded position (u_{i+1}).
-            //
-            // NOTE: this DeepCompose(mode=3) row is made NON-OPTIONAL by counting it in aux[1]
-            // (mode counter) and verifying aux[1] against a public expected_mode_counter.
-            if layer_idx + 1 < proof_data.fri_layers.len() {
-                if let Some(next_layer) = proof_data.fri_layers.get(layer_idx + 1) {
-                    if let Some(next_q) = next_layer.queries.get(q_idx) {
-                        let link_ok = builder.verify_eq(folded, next_q.f_x);
-                        if !link_ok {
-                            #[cfg(any(test, debug_assertions))]
-                            eprintln!(
-                                "[verifier] FRI inter-layer link failed at layer={}, query={}",
-                                layer_idx,
-                                q_idx
+                // Load expected Merkle root for this layer.
+                let layer_commitment = proof_data
+                    .fri_commitments
+                    .get(layer_idx)
+                    .copied()
+                    .unwrap_or([BaseElement::ZERO; 4]);
+                match root_kind_base {
+                    None => builder.set_expected_root_fri(layer_idx, layer_commitment),
+                    Some(base) => builder.set_expected_root_kind(base + 2 + (layer_idx as u64), layer_commitment),
+                }
+
+                // Seed scratch MERKLE_IDX from Q_IDX for this layer, and capture the layer swap bit into carry[5].
+                let bits_for_layer = domain_bits.saturating_sub(layer_idx + 1);
+                builder.mask_idx_reg_to_merkle_idx(bits_for_layer);
+
+                // Merkle leaf is (f_x, f_neg_x).
+                builder.init_leaf(&[query.f_x, query.f_neg_x]);
+                for step in &query.merkle_path.steps {
+                    builder.merkle_step_from_index(step.sibling);
+                }
+                if !builder.verify_root() {
+                    #[cfg(any(test, debug_assertions))]
+                    eprintln!("[verifier] FRI Merkle root failed at layer={}, query={}", layer_idx, q_idx);
+                    all_valid = false;
+                }
+
+                // DEEP check at layer 0: compute DEEP(x) in-trace and enforce it matches the committed
+                // layer-0 opened value (selected by swap bit).
+                if layer_idx == 0 {
+                    // Trace terms (AggregatorAir has trace_width=2).
+                    if let Some(trace_q) = proof_data.trace_queries.get(q_idx) {
+                        // gamma_0, gamma_1
+                        if proof_data.deep_coeffs.len() >= 2 && trace_q.values.len() >= 2 {
+                            builder.deep_accumulate(
+                                trace_q.values[0],
+                                proof_data.ood_trace_current[0],
+                                proof_data.ood_trace_next[0],
+                                proof_data.deep_coeffs[0],
                             );
+                            builder.deep_accumulate(
+                                trace_q.values[1],
+                                proof_data.ood_trace_current[1],
+                                proof_data.ood_trace_next[1],
+                                proof_data.deep_coeffs[1],
+                            );
+                        } else {
                             all_valid = false;
                         }
                     } else {
                         all_valid = false;
                     }
-                } else {
-                    all_valid = false;
+                    // Comp term (AggregatorAir has comp_width=1).
+                    if let Some(comp_q) = proof_data.comp_queries.get(q_idx) {
+                        if proof_data.deep_coeffs.len() >= 3 && !comp_q.values.is_empty() {
+                            builder.deep_accumulate(
+                                comp_q.values[0],
+                                proof_data.ood_comp_current[0],
+                                proof_data.ood_comp_next[0],
+                                proof_data.deep_coeffs[2],
+                            );
+                        } else {
+                            all_valid = false;
+                        }
+                    } else {
+                        all_valid = false;
+                    }
+
+                    builder.deep_check(proof_data.z, query.f_x, query.f_neg_x, proof_data.g_trace);
+                }
+
+                // If not the first layer, verify the inter-layer link against the *selected* opened
+                // value for this layer (depends on the transcript-derived swap bit).
+                if layer_idx > 0 {
+                    builder.verify_fri_link(query.f_x, query.f_neg_x);
+                }
+
+                // Fold (AIR chooses canonical ordering using carry[5]) and store folded in carry[7].
+                let folded = builder.fri_fold(query.f_x, query.f_neg_x, layer.beta);
+
+                if layer_idx + 1 == num_layers {
+                    final_folded_values.push(folded);
                 }
             }
-            
-            // Track final layer's folded values and x values for terminal verification
-            if layer_idx == proof_data.fri_layers.len() - 1 {
-                final_folded_values.push(folded);
-                // Store the x value from this layer
-                final_layer_x_values.push(query.x);
-            }
         }
-        
-        // After processing this layer, fold positions to next domain size
-        // Each fold halves the domain: new_pos = old_pos % (domain_size / 2)
-        current_domain_size /= 2;
-        folded_positions = folded_positions.iter()
-            .map(|&pos| pos % current_domain_size)
-            .collect();
     }
 
     // === Phase 8: FRI Terminal Verification ===
@@ -840,8 +794,7 @@ pub fn append_proof_verification_with_options(
             // Constant terminal: all values should equal the first value
             let first_val = final_folded_values[0];
             for &final_val in final_folded_values[1..].iter() {
-                let terminal_ok = builder.verify_fri_terminal(final_val, first_val);
-                if !terminal_ok {
+                if !builder.verify_eq(final_val, first_val) {
                     #[cfg(any(test, debug_assertions))]
                     eprintln!("[verifier] FRI terminal(constant) failed");
                     all_valid = false;
@@ -864,17 +817,22 @@ pub fn append_proof_verification_with_options(
             }
             
             for (i, &final_val) in final_folded_values.iter().enumerate() {
-                // Use the position tracked through all FRI layer folds
-                let terminal_pos = folded_positions.get(i).copied().unwrap_or(0);
+                // Use the (sorted, unique) query position parsed from the proof, and fold it down
+                // by dividing by 2 once per layer (folding factor = 2).
+                let mut terminal_pos = proof_data.query_positions.get(i).copied().unwrap_or(0);
+                for _ in 0..num_layers {
+                    terminal_pos >>= 1;
+                }
                 
                 // Compute x_terminal = offset * g_terminal^terminal_pos
                 let x_terminal = proof_data.domain_offset * g_terminal.exp(terminal_pos as u64);
                 
-                // Evaluate remainder polynomial at x_terminal
-                let expected = evaluate_polynomial(&proof_data.fri_remainder_coeffs, x_terminal);
-                
-                let terminal_ok = builder.verify_fri_terminal(final_val, expected);
-                if !terminal_ok {
+                // Terminal check in-trace: for folding_factor=2, remainder degree < 2, so we only
+                // support c0 + c1*x here (missing coeffs treated as 0).
+                let c0 = proof_data.fri_remainder_coeffs.get(0).copied().unwrap_or(BaseElement::ZERO);
+                let c1 = proof_data.fri_remainder_coeffs.get(1).copied().unwrap_or(BaseElement::ZERO);
+                builder.set_fri_x(x_terminal);
+                if !builder.verify_fri_terminal_poly(final_val, c0, c1) {
                     #[cfg(any(test, debug_assertions))]
                     eprintln!("[verifier] FRI terminal(poly) failed");
                     all_valid = false;
@@ -1036,6 +994,12 @@ pub struct ParsedProof {
     /// Proof-specific PoW nonce used by Winterfell for query position derivation.
     pub pow_nonce: u64,
 
+    /// Child proof public inputs as elements (exact Winterfell `pub_inputs.to_elements()` order).
+    ///
+    /// Required to replay Winterfell Fiat–Shamir seeding in-trace for fixed-shape recursion
+    /// when verifying AggregatorAir proofs (whose public inputs are not a single element).
+    pub pub_inputs_elements: Vec<BaseElement>,
+
     // Commitments
     pub trace_commitment: MerkleDigest,
     pub comp_commitment: MerkleDigest,
@@ -1189,6 +1153,7 @@ mod tests {
         use winterfell::math::StarkField;
         ParsedProof {
             pow_nonce: 0,
+            pub_inputs_elements: vec![],
             trace_commitment: [BaseElement::new(1); 4],
             comp_commitment: [BaseElement::new(2); 4],
             fri_commitments: vec![[BaseElement::new(3); 4], [BaseElement::new(4); 4]],

@@ -861,12 +861,14 @@ use super::verifier_air::{
 pub fn build_verifying_aggregator_trace(
     child0_proof: &ParsedProof,
     child0_type: super::verifier_air::ood_eval::ChildAirType,
-    child1_proof: &ParsedProof,
-    child1_type: super::verifier_air::ood_eval::ChildAirType,
-) -> (TraceTable<BaseElement>, VerificationResult, VerificationResult, [BaseElement; 4]) {
-    // Estimate total trace length (2 proofs + binding rows)
+    child1: Option<(&ParsedProof, super::verifier_air::ood_eval::ChildAirType)>,
+) -> (TraceTable<BaseElement>, VerificationResult, Option<VerificationResult>, [BaseElement; 4]) {
+    // Estimate total trace length (1 or 2 proofs + binding rows)
     let child0_len = estimate_verification_trace_length(child0_proof);
-    let child1_len = estimate_verification_trace_length(child1_proof);
+    let child1_len = child1
+        .as_ref()
+        .map(|(p, _)| estimate_verification_trace_length(p))
+        .unwrap_or(0);
     let binding_rows = 64; // For combining statement hashes
     let total_len = (child0_len + child1_len + binding_rows).next_power_of_two();
     
@@ -888,29 +890,39 @@ pub fn build_verifying_aggregator_trace(
         None,
     );
     
-    // === Phase 2: Verify child 1 (skip per-child statement hash verification) ===
-    // Root-kind pool offset for child1:
-    // child0 uses canonical mapping (0=trace, 1=comp, 2+i=fri[i]),
-    // so the first free slot in `pub_inputs.fri_commitments` is index child0_proof.fri_commitments.len().
-    // We map child1 roots into that pool as:
-    // - trace => kind = 2 + offset
-    // - comp  => kind = 2 + offset + 1
-    // - fri i => kind = 2 + offset + 2 + i
-    let child1_base_kind = 2u64 + (child0_proof.fri_commitments.len() as u64);
-    let result1 = append_proof_verification_with_options(
-        &mut builder,
-        child1_proof,
-        child1_type,
-        false,
-        Some(child1_base_kind),
-    );
+    // === Phase 2: Verify child 1 (optional) ===
+    //
+    // If `child1` is None, we skip verifying the right child and bind to a fixed zero statement hash.
+    let result1 = if let Some((child1_proof, child1_type)) = child1 {
+        // Root-kind pool offset for child1:
+        // child0 uses canonical mapping (0=trace, 1=comp, 2+i=fri[i]),
+        // so the first free slot in `pub_inputs.fri_commitments` is index child0_proof.fri_commitments.len().
+        // We map child1 roots into that pool as:
+        // - trace => kind = 2 + offset
+        // - comp  => kind = 2 + offset + 1
+        // - fri i => kind = 2 + offset + 2 + i
+        let child1_base_kind = 2u64 + (child0_proof.fri_commitments.len() as u64);
+        Some(append_proof_verification_with_options(
+            &mut builder,
+            child1_proof,
+            child1_type,
+            false,
+            Some(child1_base_kind),
+        ))
+    } else {
+        None
+    };
     
     // === Phase 3: Bind both statement hashes ===
     // Absorb both statement hashes to create combined binding
     // This is the ONLY statement hash verification for this aggregator
     let mut combined = [BaseElement::ZERO; 8];
     combined[0..4].copy_from_slice(&result0.statement_hash);
-    combined[4..8].copy_from_slice(&result1.statement_hash);
+    let right_hash = result1
+        .as_ref()
+        .map(|r| r.statement_hash)
+        .unwrap_or([BaseElement::ZERO; 4]);
+    combined[4..8].copy_from_slice(&right_hash);
     builder.absorb(&combined);
     builder.permute();
     let combined_hash = builder.squeeze();
@@ -1014,8 +1026,7 @@ use super::verifier_air::{VerifierPublicInputs, prover::VerifierProver};
 pub fn generate_verifying_aggregator_proof(
     child0_proof: &ParsedProof,
     child0_type: super::verifier_air::ood_eval::ChildAirType,
-    child1_proof: &ParsedProof,
-    child1_type: super::verifier_air::ood_eval::ChildAirType,
+    child1: Option<(&ParsedProof, super::verifier_air::ood_eval::ChildAirType)>,
     expected_child_params_digest: [BaseElement; 4],
     options: ProofOptions,
 ) -> Result<(Proof, VerifierPublicInputs, TraceTable<BaseElement>), ProverError> {
@@ -1023,14 +1034,15 @@ pub fn generate_verifying_aggregator_proof(
     let (trace, result0, result1, combined_hash) = build_verifying_aggregator_trace(
         child0_proof,
         child0_type.clone(),
-        child1_proof,
-        child1_type.clone(),
+        child1.as_ref().map(|(p, t)| (*p, t.clone())),
     );
     
     // Check both children verified successfully
     // If verification failed, the trace won't satisfy the acceptance flag boundary assertion
     assert!(result0.valid, "Child 0 verification failed");
-    assert!(result1.valid, "Child 1 verification failed");
+    if let Some(r1) = result1.as_ref() {
+        assert!(r1.valid, "Child 1 verification failed");
+    }
     
     // Create public inputs.
     //
@@ -1055,13 +1067,20 @@ pub fn generate_verifying_aggregator_proof(
     // - root_count = Σ_child num_queries * (2 + num_fri_layers)
     // - fri_link_count = Σ_child num_queries * max(num_fri_layers - 1, 0)
     let root_count_0 = child0_proof.num_queries * (2 + child0_proof.num_fri_layers);
-    let root_count_1 = child1_proof.num_queries * (2 + child1_proof.num_fri_layers);
-    let root_count = root_count_0 + root_count_1;
     let fri_link_0 = child0_proof.num_queries * child0_proof.num_fri_layers.saturating_sub(1);
-    let fri_link_1 = child1_proof.num_queries * child1_proof.num_fri_layers.saturating_sub(1);
+    let (root_count_1, fri_link_1, params_count) = if let Some((p1, _)) = child1.as_ref() {
+        (
+            p1.num_queries * (2 + p1.num_fri_layers),
+            p1.num_queries * p1.num_fri_layers.saturating_sub(1),
+            2usize,
+        )
+    } else {
+        (0usize, 0usize, 1usize)
+    };
+    let root_count = root_count_0 + root_count_1;
     let fri_link_count = fri_link_0 + fri_link_1;
     let expected_mode_counter =
-        1usize + 2usize * 4096usize + fri_link_count * 65536usize + (root_count << 32);
+        1usize + params_count * 4096usize + fri_link_count * 65536usize + (root_count << 32);
 
     // Deterministic expected checkpoint count (aux[3]) = number of DeepCompose rows.
     // Per child we have:
@@ -1093,12 +1112,15 @@ pub fn generate_verifying_aggregator_proof(
         c
     }
     let total_checkpoints = child_checkpoint_count(child0_proof)
-        + child_checkpoint_count(child1_proof)
+        + child1.as_ref().map(|(p1, _)| child_checkpoint_count(p1)).unwrap_or(0)
         + 1; // combined statement hash (mode 4)
 
     // Defense-in-depth sanity: assert our computed counters match the trace we constructed.
-    let trace_mode_counter = trace.get(31, last).as_int() as usize;
-    let trace_ckpt_counter = trace.get(33, last).as_int() as usize;
+    //
+    // NOTE: use column layout constants (trace width is 42).
+    let aux_start = crate::stark::verifier_air::constraints::AUX_START;
+    let trace_mode_counter = trace.get(aux_start + 1, last).as_int() as usize; // aux[1]
+    let trace_ckpt_counter = trace.get(aux_start + 3, last).as_int() as usize; // aux[3]
     assert_eq!(trace_mode_counter, expected_mode_counter, "mode counter mismatch");
     assert_eq!(trace_ckpt_counter, total_checkpoints, "checkpoint counter mismatch");
     
@@ -1112,15 +1134,16 @@ pub fn generate_verifying_aggregator_proof(
     // In the intended protocol, the armed statement selects the interpreter/formula, and the
     // aggregation tree is built over proofs of that same interpreter. We enforce that here.
     let interpreter_hash_0 = child0_type.compute_formula_hash();
-    let interpreter_hash_1 = child1_type.compute_formula_hash();
-    assert_eq!(
-        interpreter_hash_0, interpreter_hash_1,
-        "verifying-aggregator currently requires both children to use the same interpreter hash"
-    );
+    if let Some((_, ref t1)) = child1.as_ref() {
+        let interpreter_hash_1 = t1.compute_formula_hash();
+        assert_eq!(
+            interpreter_hash_0,
+            interpreter_hash_1,
+            "verifying-aggregator currently requires both children to use the same interpreter hash"
+        );
+    }
     // Params digest POLICY for the child proofs.
     // SECURITY: do NOT derive this from the proof; it must be fixed by protocol policy.
-    let _ = (child0_proof, child1_proof); // keep args used for now
-    
     // Root-kind binding requires that every LOAD_ROOT4 row loads a root that exists in the
     // `VerifierPublicInputs` root pool. For a 2-child verifying aggregator, we map:
     // - child0 roots: trace/comp/fri into (trace_commitment, comp_commitment, fri_commitments[0..])
@@ -1128,16 +1151,18 @@ pub fn generate_verifying_aggregator_proof(
     //
     // This keeps VerifierAir trace width unchanged while still binding each loaded root to public inputs.
     let mut fri_commitments = child0_proof.fri_commitments.clone();
-    fri_commitments.push(child1_proof.trace_commitment);
-    fri_commitments.push(child1_proof.comp_commitment);
-    fri_commitments.extend_from_slice(&child1_proof.fri_commitments);
+    if let Some((p1, _)) = child1.as_ref() {
+        fri_commitments.push(p1.trace_commitment);
+        fri_commitments.push(p1.comp_commitment);
+        fri_commitments.extend_from_slice(&p1.fri_commitments);
+    }
     // Must fit within the AIR's MAX_FRI_LAYERS root-kind pool.
     assert!(
         fri_commitments.len() <= 32,
         "verifying-aggregator root pool too large: {} (max=32)",
         fri_commitments.len()
     );
-
+    
     let pub_inputs = VerifierPublicInputs {
         statement_hash: combined_hash,
         trace_commitment: child0_proof.trace_commitment,

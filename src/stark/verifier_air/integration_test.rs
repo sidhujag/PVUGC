@@ -166,12 +166,8 @@ mod tests {
         builder.merkle_step_from_index(sibling);
         
         // FRI fold
-        let _folded = builder.fri_fold(
-            BaseElement::new(10),
-            BaseElement::new(10),
-            BaseElement::new(3),
-            BaseElement::new(1),
-        );
+        builder.set_fri_x(BaseElement::new(3));
+        let _folded = builder.fri_fold(BaseElement::new(10), BaseElement::new(10), BaseElement::new(1));
         
         // Final accept
         builder.accept(true);

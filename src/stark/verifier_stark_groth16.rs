@@ -4,13 +4,13 @@
 //! completing the PVUGC recursive verification pipeline:
 //!
 //! ```text
-//! Application STARK (VDF, CubicFib, etc.)
+//! Application STARK(s)
 //!           ↓
-//!    Aggregator STARK (aggregates statement hashes)
+//! Aggregator STARK proof (AggregatorAir)
 //!           ↓
-//!     Verifier STARK (verifies Aggregator STARK in AIR)
+//! Verifier STARK proof (VerifierAir verifies AggregatorAir)
 //!           ↓
-//!    FullStarkVerifierCircuit (R1CS verifies Verifier STARK)
+//! FullStarkVerifierCircuit (R1CS verifies VerifierAir)
 //!           ↓
 //!        Groth16 (constant-size proof)
 //! ```
@@ -28,7 +28,7 @@ use winterfell::{
 use winter_crypto::hashers::Rp64_256;
 
 use super::{
-    aggregator_air::{AggregatorConfig, AggregatorPublicInputs},
+    aggregator_air::AggregatorPublicInputs,
     inner_stark_full::{AirParams, FullStarkVerifierCircuit},
     stark_proof_parser::{derive_query_positions, parse_proof_for_circuit_with_query_positions},
     verifier_air::{
@@ -60,18 +60,18 @@ pub struct VerifierStarkResult {
     pub statement_hash: StarkInnerFr,
 }
 
-/// Generate a Verifier STARK proof from an Aggregator STARK proof
-///
-/// This is the key function that creates the recursive bridge:
-/// - Takes an Aggregator STARK proof
-/// - Generates a Verifier STARK that proves "I verified the Aggregator STARK"
-/// - Returns everything needed for Groth16 wrapping
+/// Generate a Verifier STARK proof from an Aggregator STARK proof (two-AIR design).
 pub fn prove_verifier_stark(
     aggregator_proof: &Proof,
     aggregator_pub_inputs: &AggregatorPublicInputs,
     config: RecursiveConfig,
+    child_type: crate::stark::verifier_air::ood_eval::ChildAirType,
 ) -> Result<VerifierStarkResult, String> {
     // Step 1: Build verification trace from Aggregator proof
+    // NOTE: in the two-AIR design, VerifierAir is hardcoded to verify AggregatorAir proofs.
+    // The child_type is kept in the signature for future-proofing, but is not currently used
+    // by the AggregatorIntegration pipeline.
+    let _ = child_type;
     let pipeline_result = run_recursive_pipeline(
         aggregator_proof,
         aggregator_pub_inputs,
@@ -187,99 +187,4 @@ pub fn prove_verifier_stark(
     })
 }
 
-/// One-shot function: App hash → Aggregator → Verifier STARK → Groth16 circuit
-///
-/// This is the simplest API for the full pipeline.
-pub fn build_verifier_circuit_from_app_hash(
-    app_statement_hash: [BaseElement; 4],
-) -> Result<VerifierStarkResult, String> {
-    // Step 1: Generate Aggregator STARK
-    let agg_config = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _) = super::aggregator_air::generate_aggregator_proof_with_config(
-        app_statement_hash,
-        &agg_config,
-    )
-    .map_err(|e| format!("Aggregator proof failed: {:?}", e))?;
-
-    // Step 2: Generate Verifier STARK
-    let recursive_config = RecursiveConfig::test();
-    prove_verifier_stark(&agg_proof, &agg_pub_inputs, recursive_config)
-}
-
-// ============================================================================
-// TESTS
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::stark::verifier_air::VERIFIER_TRACE_WIDTH;
-    use winterfell::Trace;
-
-    #[test]
-    fn test_build_verifier_circuit_integration_path() {
-        // This test validates the integration path exists.
-        let app_hash = [
-            BaseElement::new(42),
-            BaseElement::new(43),
-            BaseElement::new(44),
-            BaseElement::new(45),
-        ];
-
-        // Step 1: Generate Aggregator STARK (this works)
-        let agg_config = AggregatorConfig::test_fast();
-        let result = crate::stark::aggregator_air::generate_aggregator_proof_with_config(
-            app_hash,
-            &agg_config,
-        );
-        assert!(result.is_ok(), "Aggregator proof should succeed");
-
-        let (agg_proof, agg_pub_inputs, _) = result.unwrap();
-
-        // Step 2: Build verification trace (this works)
-        let recursive_config = RecursiveConfig::test();
-        let pipeline_result = run_recursive_pipeline(
-            &agg_proof,
-            &agg_pub_inputs,
-            recursive_config.clone(),
-        );
-
-        // The verification trace is generated successfully
-        assert_eq!(pipeline_result.verifier_trace.width(), VERIFIER_TRACE_WIDTH);
-        assert!(pipeline_result.verifier_trace.length().is_power_of_two());
-
-        // Step 3: Try to generate Verifier STARK proof
-        let verifier_prover = VerifierProver::with_pub_inputs(
-            recursive_config.verifier_options.clone(),
-            pipeline_result.verifier_pub_inputs.clone(),
-        );
-        let proof_result = verifier_prover.prove(pipeline_result.verifier_trace.clone());
-
-        match proof_result {
-            Ok(verifier_proof) => {
-                // Verify the proof
-                let acceptable = winterfell::AcceptableOptions::OptionSet(
-                    vec![recursive_config.verifier_options]
-                );
-                let verify_result = winterfell::verify::<
-                    crate::stark::verifier_air::VerifierAir,
-                    Hasher,
-                    RandomCoin,
-                    VerifierMerkle,
-                >(
-                    verifier_proof,
-                    pipeline_result.verifier_pub_inputs,
-                    &acceptable,
-                );
-                
-                match verify_result {
-                    Ok(()) => println!("  ✓ Verifier STARK verified!"),
-                    Err(e) => println!("  ✗ Verification failed: {:?}", e),
-                }
-            }
-            Err(e) => {
-                println!("\n⚠ Verifier STARK proof generation failed: {:?}", e);
-            }
-        }
-    }
-}
+// (legacy integration tests removed: pipeline is now agg-proof (VerifierAir) -> R1CS directly)

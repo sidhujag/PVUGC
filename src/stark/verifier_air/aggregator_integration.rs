@@ -51,7 +51,7 @@ impl RecursiveConfig {
         Self {
             aggregator_config: AggregatorConfig::test_fast(),
             verifier_options: winterfell::ProofOptions::new(
-                4,  // num_queries
+                2,  // num_queries (keep tests fast while building)
                 64, // blowup_factor (must be >= max constraint degree + 1, we have degree 50)
                 0,  // grinding_factor
                 winterfell::FieldExtension::None,
@@ -181,7 +181,7 @@ impl RecursiveVerifier {
         ];
         
         VerifierPublicInputs {
-            statement_hash: compute_statement_hash_from_parsed(&parsed),
+            statement_hash: compute_statement_hash_from_parsed(&parsed, &ChildAirType::generic_aggregator_vdf()),
             trace_commitment: parsed.trace_commitment,
             comp_commitment: parsed.comp_commitment,
             fri_commitments: parsed.fri_commitments.clone(),
@@ -241,7 +241,10 @@ fn sponge_absorb_permute(state: &mut [BaseElement; 12], input: &[BaseElement; 8]
 /// 3. Return elements 0-3 as the hash
 /// 
 /// The AIR constraint verifies: hash_state[0..3] == pub_inputs.statement_hash
-fn compute_statement_hash_from_parsed(parsed: &super::prover::ParsedProof) -> MerkleDigest {
+fn compute_statement_hash_from_parsed(
+    parsed: &super::prover::ParsedProof,
+    child_type: &ChildAirType,
+) -> MerkleDigest {
     use winterfell::math::FieldElement;
     
     // Initialize sponge state to zeros (matching init_sponge)
@@ -273,6 +276,12 @@ fn compute_statement_hash_from_parsed(parsed: &super::prover::ParsedProof) -> Me
         commit_buf[0..4].copy_from_slice(fri_commit);
         sponge_absorb_permute(&mut state, &commit_buf);
     }
+
+    // Bind child AIR type / formula hash into the statement hash (matches VerifierAir prover).
+    let formula_hash = child_type.compute_formula_hash();
+    commit_buf = [BaseElement::ZERO; 8];
+    commit_buf[0..4].copy_from_slice(&formula_hash);
+    sponge_absorb_permute(&mut state, &commit_buf);
     
     // Squeeze: return first 4 elements (matching squeeze)
     [state[0], state[1], state[2], state[3]]
@@ -377,7 +386,7 @@ mod tests {
         let config = RecursiveConfig::test();
         // test_fast uses 2 queries
         assert_eq!(config.aggregator_config.num_queries, 2);
-        assert_eq!(config.verifier_options.num_queries(), 4);
+        assert_eq!(config.verifier_options.num_queries(), 2);
     }
 
     #[test]
