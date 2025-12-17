@@ -9,7 +9,7 @@ mod tests {
     use crate::stark::verifier_air::{
         fri::fold_evaluation,
         merkle::{MerkleDigest, MerkleTree, rpo_compress},
-        ood_eval::evaluate_aggregator_constraints,
+        ood_eval::{evaluate_child_constraints, ChildAirType},
         transcript::{derive_challenges, Transcript},
         trace::VerifierTraceBuilder,
     };
@@ -91,31 +91,27 @@ mod tests {
     /// Test OOD constraint evaluation
     #[test]
     fn test_ood_constraint_evaluation() {
-        // Simulate a valid VDF step
-        // col0[i+1] = col0[i]^3 + col1[i]
-        // col1[i+1] = col0[i]
+        // Simulate a valid VDF step (matches `encode_vdf_formula()`):
+        // next[0] = curr[0]^3 + 1
         let col0 = BaseElement::new(3);
-        let col1 = BaseElement::new(5);
+        let col1 = BaseElement::new(5); // unused by the VDF transition constraint
 
-        // Compute correct next values
-        let next0 = col0 * col0 * col0 + col1; // 3^3 + 5 = 32
-        let next1 = col0; // 3
+        let next0 = col0 * col0 * col0 + BaseElement::ONE; // 3^3 + 1 = 28
+        let next1 = BaseElement::new(123); // arbitrary
 
-        // Evaluate constraints
-        let constraints = evaluate_aggregator_constraints(
+        let constraints = evaluate_child_constraints(
             &[col0, col1],
             &[next0, next1],
+            &ChildAirType::generic_vdf(),
         );
-
-        // Should be zero for valid transition
+        assert_eq!(constraints.len(), 1);
         assert_eq!(constraints[0], BaseElement::ZERO);
-        assert_eq!(constraints[1], BaseElement::ZERO);
 
-        // Invalid transition should give non-zero constraints
-        let bad_next0 = BaseElement::new(30); // Wrong!
-        let bad_constraints = evaluate_aggregator_constraints(
+        let bad_next0 = BaseElement::new(30);
+        let bad_constraints = evaluate_child_constraints(
             &[col0, col1],
             &[bad_next0, next1],
+            &ChildAirType::generic_vdf(),
         );
         assert_ne!(bad_constraints[0], BaseElement::ZERO);
     }
@@ -258,12 +254,12 @@ mod tests {
         
         // 3. Simulate OOD evaluation
         let ood_current = vec![BaseElement::new(5), BaseElement::new(7)];
-        // Compute valid next step
-        let next0 = ood_current[0] * ood_current[0] * ood_current[0] + ood_current[1];
-        let ood_next = vec![next0, ood_current[0]];
+        // Compute valid next step for the generic VDF formula: next[0] = curr[0]^3 + 1
+        let next0 = ood_current[0] * ood_current[0] * ood_current[0] + BaseElement::ONE;
+        let ood_next = vec![next0, BaseElement::new(123)];
 
         // 4. Verify constraints at OOD point
-        let constraints = evaluate_aggregator_constraints(&ood_current, &ood_next);
+        let constraints = evaluate_child_constraints(&ood_current, &ood_next, &ChildAirType::generic_vdf());
         assert!(constraints.iter().all(|c| *c == BaseElement::ZERO));
 
         // 5. Verify Merkle paths for queried positions

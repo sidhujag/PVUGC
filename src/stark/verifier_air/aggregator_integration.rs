@@ -56,7 +56,8 @@ impl RecursiveConfig {
                 0,  // grinding_factor
                 winterfell::FieldExtension::None,
                 2,  // FRI folding factor
-                31, // max FRI layers
+                // Production-style terminal remainder (degree ≤ 31).
+                31,
                 winterfell::BatchingMethod::Linear,
                 winterfell::BatchingMethod::Linear,
             ),
@@ -135,7 +136,7 @@ impl RecursiveVerifier {
 
         // Build the verification trace
         self.verifier_prover
-            .build_verification_trace(&parsed, ChildAirType::generic_aggregator_vdf())
+            .build_verification_trace(&parsed, ChildAirType::aggregator_air())
     }
 
     /// Get the public inputs for the Verifier STARK
@@ -181,14 +182,14 @@ impl RecursiveVerifier {
         ];
         
         VerifierPublicInputs {
-            statement_hash: compute_statement_hash_from_parsed(&parsed, &ChildAirType::generic_aggregator_vdf()),
+            statement_hash: compute_statement_hash_from_parsed(&parsed, &ChildAirType::aggregator_air()),
             trace_commitment: parsed.trace_commitment,
             comp_commitment: parsed.comp_commitment,
             fri_commitments: parsed.fri_commitments.clone(),
             num_queries: parsed.num_queries,
             proof_trace_len: parsed.trace_len,
             g_trace,
-            pub_result: aggregator_pub_inputs.result,
+            pub_result: aggregator_pub_inputs.pub_result,
             expected_checkpoint_count: expected_checkpoints,
             params_digest,
             expected_mode_counter,
@@ -377,7 +378,6 @@ pub fn run_recursive_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stark::aggregator_air::generate_aggregator_proof_with_config;
     use crate::stark::verifier_air::VERIFIER_TRACE_WIDTH;
     use winterfell::Trace;
 
@@ -402,19 +402,31 @@ mod tests {
     fn test_aggregator_to_verifier_trace() {
         println!("\n=== Aggregator → Verifier Trace Test ===\n");
 
-        // Step 1: Create a simulated application statement hash
-        let app_statement_hash = [
-            BaseElement::new(1),
-            BaseElement::new(2),
-            BaseElement::new(3),
-            BaseElement::new(4),
-        ];
-        println!("✓ Created application statement hash");
+        // Step 1: Generate a small app proof (Add2) and wrap it in a leaf AggregatorAir proof.
+        let app_options = winterfell::ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+        let (app_proof, app_trace) = crate::stark::tests::helpers::add2::generate_test_add2_proof_rpo_with_options(
+            BaseElement::ZERO,
+            8,
+            app_options,
+        );
+        let app_result = app_trace.get(1, app_trace.length() - 1);
 
-        // Step 2: Generate aggregator proof
         let config = AggregatorConfig::test_fast();
-        let result = generate_aggregator_proof_with_config(app_statement_hash, &config);
-        let (proof, pub_inputs, _trace) = result.expect("Aggregator proof generation failed");
+        let (proof, pub_inputs, _trace) =
+            crate::stark::aggregator_air::prove_aggregator_leaf_from_app::<crate::stark::tests::helpers::add2::Add2Air>(
+                &config,
+                app_proof,
+                app_result,
+                ChildAirType::generic_add2(),
+            )
+            .expect("Aggregator leaf proof generation failed");
+
         println!("✓ Generated aggregator proof (trace_len={})", proof.context.trace_info().length());
 
         // Step 3: Build verification trace
@@ -434,18 +446,31 @@ mod tests {
     fn test_full_recursive_pipeline() {
         println!("\n=== Full Recursive Pipeline Test ===\n");
 
-        // Step 1: Create application statement hash
-        let app_statement_hash = [
-            BaseElement::new(7),
-            BaseElement::new(8),
-            BaseElement::new(9),
-            BaseElement::new(10),
-        ];
+        // Step 1: Generate a small app proof (Add2).
+        let app_options = winterfell::ProofOptions::new(
+            2, 8, 0,
+            winterfell::FieldExtension::None,
+            2, 31,
+            winterfell::BatchingMethod::Linear,
+            winterfell::BatchingMethod::Linear,
+        );
+        let (app_proof, app_trace) = crate::stark::tests::helpers::add2::generate_test_add2_proof_rpo_with_options(
+            BaseElement::ZERO,
+            8,
+            app_options,
+        );
+        let app_result = app_trace.get(1, app_trace.length() - 1);
 
-        // Step 2: Generate aggregator proof
+        // Step 2: Generate AggregatorAir *leaf* proof which verifies the app proof.
         let agg_config = AggregatorConfig::test_fast();
-        let result = generate_aggregator_proof_with_config(app_statement_hash, &agg_config);
-        let (proof, pub_inputs, _trace) = result.expect("Aggregator proof generation failed");
+        let (proof, pub_inputs, _trace) =
+            crate::stark::aggregator_air::prove_aggregator_leaf_from_app::<crate::stark::tests::helpers::add2::Add2Air>(
+                &agg_config,
+                app_proof,
+                app_result,
+                ChildAirType::generic_add2(),
+            )
+            .expect("Aggregator leaf proof generation failed");
 
         println!("Aggregator proof generated:");
         println!("  - Trace length: {}", proof.context.trace_info().length());
@@ -463,29 +488,5 @@ mod tests {
         println!("  - Statement hash: {:?}", result.statement_hash);
         // Statement hash should be deterministic and non-zero for this non-trivial pub input.
         assert_ne!(result.statement_hash, [BaseElement::ZERO; 4]);
-    }
-
-    #[test]
-    fn test_statement_hash_binding() {
-        let pub_inputs = AggregatorPublicInputs {
-            result: BaseElement::new(1),
-            children_root: [BaseElement::new(3), BaseElement::new(4), BaseElement::new(5), BaseElement::new(6)],
-            initial_state: [BaseElement::new(7), BaseElement::new(8), BaseElement::new(9), BaseElement::new(10)],
-            final_state: [BaseElement::new(11), BaseElement::new(12), BaseElement::new(13), BaseElement::new(14)],
-            level: 1,
-            start_idx: 0,
-            end_idx: 1,
-            context_hash: [BaseElement::new(15), BaseElement::new(16), BaseElement::new(17), BaseElement::new(18)],
-            interpreter_hash: [BaseElement::new(19), BaseElement::new(20), BaseElement::new(21), BaseElement::new(22)],
-            params_digest: [BaseElement::new(23), BaseElement::new(24), BaseElement::new(25), BaseElement::new(26)],
-        };
-
-        let hash = hash_aggregator_statement(&pub_inputs);
-
-        // Mutating any field should change the statement hash.
-        let mut tweaked = pub_inputs;
-        tweaked.context_hash[0] = tweaked.context_hash[0] + BaseElement::ONE;
-        let hash2 = hash_aggregator_statement(&tweaked);
-        assert_ne!(hash, hash2);
     }
 }

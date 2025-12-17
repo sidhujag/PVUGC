@@ -35,8 +35,9 @@ pub use inner_stark_full::{
 // Re-export Aggregator STARK types (two-AIR design: AggregatorAir -> VerifierAir -> Groth16).
 pub use aggregator_air::{
     AggregatorAir, AggregatorConfig, AggregatorProver, AggregatorPublicInputs,
-    ChildStatementHash, generate_aggregator_proof, generate_aggregator_proof_with_config,
     AGGREGATOR_TRACE_WIDTH,
+    build_aggregator_leaf_trace, build_aggregator_internal_trace, parse_aggregator_proof,
+    prove_aggregator_internal_from_parsed, prove_aggregator_leaf_from_app,
 };
 
 // Re-export Verifier STARK integration types

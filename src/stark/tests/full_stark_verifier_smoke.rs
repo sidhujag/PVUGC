@@ -256,12 +256,12 @@ fn debug_compare_r1cs_matrices_vdf_vs_cubic() {
 #[ignore] // Debug helper: compare host OOD equation values
 fn debug_host_ood_equation_for_verifier_air_proof() {
     use crate::stark::{
-        aggregator_air::{AggregatorAir, AggregatorConfig, generate_aggregator_proof_with_config},
+        aggregator_air::{AggregatorAir, AggregatorConfig, prove_aggregator_leaf_from_app},
         verifier_air::{constraints, proof_parser::parse_proof, ood_eval::ChildAirType, VerifierAir},
         test_utils::prove_verifier_air_over_child,
     };
     use winter_crypto::{hashers::Rp64_256, Digest, ElementHasher};
-    use winterfell::{crypto::{DefaultRandomCoin, MerkleTree}, AcceptableOptions, ProofOptions, Trace};
+    use winterfell::{crypto::{DefaultRandomCoin, MerkleTree}, AcceptableOptions, ProofOptions, Prover, Trace};
     use winterfell::math::{fields::f64::BaseElement, FieldElement};
     use winter_math::StarkField;
     use winter_math::ToElements;
@@ -270,24 +270,29 @@ fn debug_host_ood_equation_for_verifier_air_proof() {
     type RandomCoin = DefaultRandomCoin<Hasher>;
     type VerifierMerkle = MerkleTree<Hasher>;
 
-    // Build Aggregator leaf (same as smoke).
+    // Build app proof and Aggregator leaf (same as smoke).
     let start = BaseElement::new(3);
     let steps = 8usize;
     let vdf_trace = super::helpers::simple_vdf::build_vdf_trace(start, steps);
     let vdf_result = vdf_trace.get(1, vdf_trace.length() - 1);
-    let app_statement_hash = {
-        let digest = Hasher::hash_elements(&[vdf_result]);
-        let bytes = digest.as_bytes();
-        [
-            BaseElement::new(u64::from_le_bytes(bytes[0..8].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[8..16].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[16..24].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[24..32].try_into().unwrap())),
-        ]
-    };
     let agg_cfg = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _agg_trace) =
-        generate_aggregator_proof_with_config(app_statement_hash, &agg_cfg).unwrap();
+    let vdf_options = ProofOptions::new(
+        2, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    let vdf_proof = super::helpers::simple_vdf::VdfProver::<Hasher>::new(vdf_options)
+        .prove(vdf_trace)
+        .expect("VDF proof failed");
+    let (agg_proof, agg_pub_inputs, _agg_trace) = prove_aggregator_leaf_from_app::<super::helpers::simple_vdf::VdfAir>(
+        &agg_cfg,
+        vdf_proof,
+        vdf_result,
+        ChildAirType::generic_vdf(),
+    )
+    .unwrap();
     let acceptable_agg = AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
     winterfell::verify::<AggregatorAir, Hasher, RandomCoin, VerifierMerkle>(
         agg_proof.clone(),
@@ -306,7 +311,7 @@ fn debug_host_ood_equation_for_verifier_air_proof() {
         winterfell::BatchingMethod::Linear,
     );
     let (ver_proof, ver_pub_inputs) =
-        prove_verifier_air_over_child(&parsed_child, ChildAirType::generic_aggregator_vdf(), verifier_options.clone());
+        prove_verifier_air_over_child(&parsed_child, ChildAirType::aggregator_air(), verifier_options.clone());
     let acceptable_ver = AcceptableOptions::OptionSet(vec![verifier_options]);
     winterfell::verify::<VerifierAir, Hasher, RandomCoin, VerifierMerkle>(
         ver_proof.clone(),
@@ -412,7 +417,7 @@ fn debug_host_ood_equation_for_verifier_air_proof() {
 #[ignore] // Debug helper: pinpoint first transition constraint mismatch (AIR vs R1CS evaluator)
 fn debug_compare_air_vs_r1cs_transition_constraints_at_z() {
     use crate::stark::{
-        aggregator_air::{AggregatorAir, AggregatorConfig, generate_aggregator_proof_with_config},
+        aggregator_air::{AggregatorAir, AggregatorConfig, prove_aggregator_leaf_from_app},
         verifier_air::{constraints, hash_chiplet, proof_parser::parse_proof, ood_eval::ChildAirType, VerifierAir},
         test_utils::prove_verifier_air_over_child,
     };
@@ -424,7 +429,7 @@ fn debug_compare_air_vs_r1cs_transition_constraints_at_z() {
     use ark_r1cs_std::R1CSVar;
 
     use winter_crypto::{hashers::Rp64_256, Digest, ElementHasher};
-    use winterfell::{crypto::{DefaultRandomCoin, MerkleTree}, AcceptableOptions, ProofOptions, Trace};
+    use winterfell::{crypto::{DefaultRandomCoin, MerkleTree}, AcceptableOptions, ProofOptions, Prover, Trace};
     use winterfell::math::{fields::f64::BaseElement, FieldElement, ToElements};
     use winter_math::StarkField;
 
@@ -432,24 +437,29 @@ fn debug_compare_air_vs_r1cs_transition_constraints_at_z() {
     type RandomCoin = DefaultRandomCoin<Hasher>;
     type VerifierMerkle = MerkleTree<Hasher>;
 
-    // 1) Build AggregatorAir proof (leaf wrapper), then wrap with VerifierAir (same as smoke).
+    // 1) Build app proof + AggregatorAir leaf proof, then wrap with VerifierAir (same as smoke).
     let start = BaseElement::new(3);
     let steps = 8usize;
     let vdf_trace = super::helpers::simple_vdf::build_vdf_trace(start, steps);
     let vdf_result = vdf_trace.get(1, vdf_trace.length() - 1);
-    let app_statement_hash = {
-        let digest = Hasher::hash_elements(&[vdf_result]);
-        let bytes = digest.as_bytes();
-        [
-            BaseElement::new(u64::from_le_bytes(bytes[0..8].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[8..16].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[16..24].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[24..32].try_into().unwrap())),
-        ]
-    };
     let agg_cfg = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _agg_trace) =
-        generate_aggregator_proof_with_config(app_statement_hash, &agg_cfg).unwrap();
+    let vdf_options = ProofOptions::new(
+        2, 8, 0,
+        winterfell::FieldExtension::None,
+        2, 31,
+        winterfell::BatchingMethod::Linear,
+        winterfell::BatchingMethod::Linear,
+    );
+    let vdf_proof = super::helpers::simple_vdf::VdfProver::<Hasher>::new(vdf_options)
+        .prove(vdf_trace)
+        .expect("VDF proof failed");
+    let (agg_proof, agg_pub_inputs, _agg_trace) = prove_aggregator_leaf_from_app::<super::helpers::simple_vdf::VdfAir>(
+        &agg_cfg,
+        vdf_proof,
+        vdf_result,
+        ChildAirType::generic_vdf(),
+    )
+    .unwrap();
     let acceptable_agg = AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
     winterfell::verify::<AggregatorAir, Hasher, RandomCoin, VerifierMerkle>(
         agg_proof.clone(),
@@ -467,7 +477,7 @@ fn debug_compare_air_vs_r1cs_transition_constraints_at_z() {
         winterfell::BatchingMethod::Linear,
     );
     let (ver_proof, ver_pub_inputs) =
-        prove_verifier_air_over_child(&parsed_child, ChildAirType::generic_aggregator_vdf(), verifier_options.clone());
+        prove_verifier_air_over_child(&parsed_child, ChildAirType::aggregator_air(), verifier_options.clone());
     let acceptable_ver = AcceptableOptions::OptionSet(vec![verifier_options]);
     winterfell::verify::<VerifierAir, Hasher, RandomCoin, VerifierMerkle>(
         ver_proof.clone(),
@@ -603,7 +613,7 @@ fn debug_compare_air_vs_r1cs_transition_constraints_at_z() {
 #[test]
 #[ignore] // Debug helper: locate first failing VerifierAir transition constraint #21 (fri[6])
 fn debug_verifier_over_aggregator_constraint_21() {
-    use crate::stark::aggregator_air::{AggregatorAir, AggregatorConfig, generate_aggregator_proof_with_config};
+    use crate::stark::aggregator_air::{AggregatorAir, AggregatorConfig, prove_aggregator_leaf_from_app};
     use crate::stark::tests::helpers::simple_vdf::{build_vdf_trace, VdfProver};
     use crate::stark::verifier_air::{
         aggregator_integration::{RecursiveConfig, RecursiveVerifier},
@@ -639,20 +649,15 @@ fn debug_verifier_over_aggregator_constraint_21() {
         &acceptable_vdf,
     ).expect("VDF verify");
 
-    let app_statement_hash = {
-        use winter_crypto::{Digest, ElementHasher};
-        let digest = Rp64_256::hash_elements(&[vdf_result]);
-        let bytes = digest.as_bytes();
-        [
-            BaseElement::new(u64::from_le_bytes(bytes[0..8].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[8..16].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[16..24].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[24..32].try_into().unwrap())),
-        ]
-    };
     let agg_cfg = AggregatorConfig::test_fast();
     let (agg_proof, agg_pub_inputs, _agg_trace) =
-        generate_aggregator_proof_with_config(app_statement_hash, &agg_cfg).expect("Aggregator leaf proof failed");
+        prove_aggregator_leaf_from_app::<crate::stark::tests::helpers::simple_vdf::VdfAir>(
+            &agg_cfg,
+            vdf_proof,
+            vdf_result,
+            crate::stark::verifier_air::ood_eval::ChildAirType::generic_vdf(),
+        )
+        .expect("Aggregator leaf proof failed");
     let acceptable_agg = AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
     winterfell::verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
         agg_proof.clone(),

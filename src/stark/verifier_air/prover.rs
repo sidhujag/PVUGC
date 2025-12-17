@@ -374,9 +374,12 @@ pub fn append_proof_verification_with_options(
         );
         
         // Use constraint coefficients from Fiat-Shamir.
-        // For VerifierAir children we need 32 transition + 8 boundary coefficients.
+        // Verifier-style children (VerifierAir / AggregatorAir) use 8 boundary assertions.
         let num_constraints = child_type.num_constraints();
-        let needed_coeffs = if matches!(child_type, super::ood_eval::ChildAirType::VerifierAir) {
+        let needed_coeffs = if matches!(
+            child_type,
+            super::ood_eval::ChildAirType::VerifierAir | super::ood_eval::ChildAirType::AggregatorAir
+        ) {
             num_constraints + 8
         } else {
             num_constraints + 1
@@ -406,6 +409,15 @@ pub fn append_proof_verification_with_options(
                 &proof_data.verifier_params_digest,
             )
         } else {
+            // For verifier-style children (AggregatorAir), we must evaluate constraints at z using
+            // periodic columns and the child's real public inputs.
+            let verifier_style_pi = if matches!(child_type, super::ood_eval::ChildAirType::AggregatorAir) {
+                Some(super::VerifierPublicInputs::from_elements_exact(
+                    &proof_data.pub_inputs_elements,
+                ))
+            } else {
+                None
+            };
             builder.verify_ood_constraints_typed(
             &ood_frame,
             proof_data.z,
@@ -413,6 +425,9 @@ pub fn append_proof_verification_with_options(
             proof_data.trace_len,
             &coeffs,
             proof_data.pub_result,
+            proof_data.verifier_expected_checkpoint_count,
+            proof_data.verifier_expected_mode_counter,
+            verifier_style_pi.as_ref(),
             child_type.clone(),
             )
         };
@@ -652,7 +667,8 @@ pub fn append_proof_verification_with_options(
     //
     // Process per-query so that the x-coordinate can be chained across layers as x_{i+1}=x_i^2
     // and so that `IDX_REG` is treated as the persistent query index (Q_IDX) for that slot.
-    let mut final_folded_values: Vec<BaseElement> = Vec::new();
+    // Track terminal checks across queries.
+    let mut first_terminal_val: Option<BaseElement> = None;
 
     let num_layers = proof_data.fri_layers.len();
     if num_layers > 0 {
@@ -664,12 +680,13 @@ pub fn append_proof_verification_with_options(
                 let _d = builder.merge_digest_with_int(seed_nonce, (q_idx as u64) + 1);
                 builder.capture_fri4_equals_hash0();
                 let pos = builder.decompose_fri4_u64_canonical(0, domain_bits) as usize;
-                if let Some(p) = proof_data.query_positions.get(q_idx) {
-                    if pos != *p {
+                // Compare against the per-slot (raw draw order) position we actually use for openings.
+                if let Some(tq) = proof_data.trace_queries.get(q_idx) {
+                    if pos != tq.position {
                         #[cfg(any(test, debug_assertions))]
                         eprintln!(
                             "[verifier] derived FRI query position mismatch: derived={}, proof={}",
-                            pos, *p
+                            pos, tq.position
                         );
                         all_valid = false;
                     }
@@ -679,15 +696,12 @@ pub fn append_proof_verification_with_options(
                 builder.set_merkle_index(0);
             }
 
-            // Seed x for layer 0 from the proof’s opened x (todo(3) will derive this from IDX_REG).
-            if let Some(q0) = proof_data.fri_layers[0].queries.get(q_idx) {
-                builder.set_fri_x(q0.x);
-            }
             // Compute x once per query from the transcript-bound Q_IDX (IDX_REG), then
             // carry it across layers by squaring on each FriFold.
-            builder.xexp_init_from_qidx();
+            builder.xexp_init_from_qidx(proof_data.g_lde);
             builder.xexp_run_32();
 
+            let mut final_val_for_query = BaseElement::ZERO;
             for layer_idx in 0..num_layers {
                 let layer = &proof_data.fri_layers[layer_idx];
                 let query = match layer.queries.get(q_idx) {
@@ -727,39 +741,51 @@ pub fn append_proof_verification_with_options(
                 // DEEP check at layer 0: compute DEEP(x) in-trace and enforce it matches the committed
                 // layer-0 opened value (selected by swap bit).
                 if layer_idx == 0 {
-                    // Trace terms (AggregatorAir has trace_width=2).
+                    // Trace terms: for each trace column i,
+                    //   carry[3] += gamma_i * (T_i(x) - T_i(z))
+                    //   carry[4] += gamma_i * (T_i(x) - T_i(zg))
                     if let Some(trace_q) = proof_data.trace_queries.get(q_idx) {
-                        // gamma_0, gamma_1
-                        if proof_data.deep_coeffs.len() >= 2 && trace_q.values.len() >= 2 {
-                            builder.deep_accumulate(
-                                trace_q.values[0],
-                                proof_data.ood_trace_current[0],
-                                proof_data.ood_trace_next[0],
-                                proof_data.deep_coeffs[0],
-                            );
-                            builder.deep_accumulate(
-                                trace_q.values[1],
-                                proof_data.ood_trace_current[1],
-                                proof_data.ood_trace_next[1],
-                                proof_data.deep_coeffs[1],
-                            );
-                        } else {
+                        let tw = proof_data.trace_width;
+                        if trace_q.values.len() < tw
+                            || proof_data.ood_trace_current.len() < tw
+                            || proof_data.ood_trace_next.len() < tw
+                            || proof_data.deep_coeffs.len() < tw
+                        {
                             all_valid = false;
+                        } else {
+                            for i in 0..tw {
+                                builder.deep_accumulate(
+                                    trace_q.values[i],
+                                    proof_data.ood_trace_current[i],
+                                    proof_data.ood_trace_next[i],
+                                    proof_data.deep_coeffs[i],
+                                );
+                            }
                         }
                     } else {
                         all_valid = false;
                     }
-                    // Comp term (AggregatorAir has comp_width=1).
+
+                    // Composition terms: for each composition column j,
+                    // use gamma_{tw + j} and the committed C_j(x), C_j(z), C_j(zg).
                     if let Some(comp_q) = proof_data.comp_queries.get(q_idx) {
-                        if proof_data.deep_coeffs.len() >= 3 && !comp_q.values.is_empty() {
-                            builder.deep_accumulate(
-                                comp_q.values[0],
-                                proof_data.ood_comp_current[0],
-                                proof_data.ood_comp_next[0],
-                                proof_data.deep_coeffs[2],
-                            );
-                        } else {
+                        let tw = proof_data.trace_width;
+                        let cw = proof_data.comp_width;
+                        if comp_q.values.len() < cw
+                            || proof_data.ood_comp_current.len() < cw
+                            || proof_data.ood_comp_next.len() < cw
+                            || proof_data.deep_coeffs.len() < tw + cw
+                        {
                             all_valid = false;
+                        } else {
+                            for j in 0..cw {
+                                builder.deep_accumulate(
+                                    comp_q.values[j],
+                                    proof_data.ood_comp_current[j],
+                                    proof_data.ood_comp_next[j],
+                                    proof_data.deep_coeffs[tw + j],
+                                );
+                            }
                         }
                     } else {
                         all_valid = false;
@@ -776,67 +802,26 @@ pub fn append_proof_verification_with_options(
 
                 // Fold (AIR chooses canonical ordering using carry[5]) and store folded in carry[7].
                 let folded = builder.fri_fold(query.f_x, query.f_neg_x, layer.beta);
+                final_val_for_query = folded;
+            }
 
-                if layer_idx + 1 == num_layers {
-                    final_folded_values.push(folded);
+            // === Terminal check for this query (must happen while carry[1] is this query's x_terminal) ===
+            if proof_data.fri_terminal_is_constant {
+                if let Some(first) = first_terminal_val {
+                    if !builder.verify_eq(final_val_for_query, first) {
+                        #[cfg(any(test, debug_assertions))]
+                        eprintln!("[verifier] FRI terminal(constant) failed");
+                        all_valid = false;
+                    }
+                } else {
+                    first_terminal_val = Some(final_val_for_query);
                 }
-            }
-        }
-    }
-
-    // === Phase 8: FRI Terminal Verification ===
-    // Verify that the final folded values are consistent.
-    // For Constant terminal: all final values must be equal
-    // For Poly terminal: final values must match remainder polynomial evaluation
-    
-    if !final_folded_values.is_empty() {
-        if proof_data.fri_terminal_is_constant {
-            // Constant terminal: all values should equal the first value
-            let first_val = final_folded_values[0];
-            for &final_val in final_folded_values[1..].iter() {
-                if !builder.verify_eq(final_val, first_val) {
-                    #[cfg(any(test, debug_assertions))]
-                    eprintln!("[verifier] FRI terminal(constant) failed");
-                    all_valid = false;
-                }
-            }
-        } else if !proof_data.fri_remainder_coeffs.is_empty() && !proof_data.fri_layers.is_empty() {
-            // Polynomial terminal: values should match P(x) at x in the TERMINAL domain
-            // 
-            // The terminal domain has generator g_terminal = g_lde^(2^num_layers)
-            // x_terminal = offset * g_terminal^terminal_pos
-            //
-            // This matches R1CS implementation in fri.rs lines 293-332
-            
-            let num_layers = proof_data.fri_layers.len();
-            
-            // Compute g_terminal = g_lde^(2^num_layers) by repeated squaring
-            let mut g_terminal = proof_data.g_lde;
-            for _ in 0..num_layers {
-                g_terminal = g_terminal * g_terminal;
-            }
-            
-            for (i, &final_val) in final_folded_values.iter().enumerate() {
-                // Use the (sorted, unique) query position parsed from the proof, and fold it down
-                // by dividing by 2 once per layer (folding factor = 2).
-                let mut terminal_pos = proof_data.query_positions.get(i).copied().unwrap_or(0);
-                for _ in 0..num_layers {
-                    terminal_pos >>= 1;
-                }
-                
-                // Compute x_terminal = offset * g_terminal^terminal_pos
-                let x_terminal = proof_data.domain_offset * g_terminal.exp(terminal_pos as u64);
-                
-                // Terminal check in-trace: for folding_factor=2, remainder degree < 2, so we only
-                // support c0 + c1*x here (missing coeffs treated as 0).
-                let c0 = proof_data.fri_remainder_coeffs.get(0).copied().unwrap_or(BaseElement::ZERO);
-                let c1 = proof_data.fri_remainder_coeffs.get(1).copied().unwrap_or(BaseElement::ZERO);
-                builder.set_fri_x(x_terminal);
-                if !builder.verify_fri_terminal_poly(final_val, c0, c1) {
-                    #[cfg(any(test, debug_assertions))]
-                    eprintln!("[verifier] FRI terminal(poly) failed");
-                    all_valid = false;
-                }
+            } else if !proof_data.fri_remainder_coeffs.is_empty() {
+                // Polynomial terminal: evaluate remainder polynomial in-AIR (fixed 32-step Horner).
+                // Coefficients are already in Winterfell's Horner-rev order (high -> low).
+                //
+                // NOTE: the final equality is enforced in AIR by the DeepCompose(mode=2) row emitted here.
+                builder.verify_fri_terminal_poly_deg31(&proof_data.fri_remainder_coeffs);
             }
         }
     }
@@ -1061,6 +1046,10 @@ pub struct ParsedProof {
     pub comp_width: usize,
     pub trace_len: usize,
     pub lde_blowup: usize,
+    /// Constraint evaluation domain size: `trace_len * ce_blowup_factor` (from AIR context).
+    pub ce_domain_size: usize,
+    /// Number of transition exemptions (from AIR context).
+    pub num_transition_exemptions: usize,
     pub num_queries: usize,
     pub num_constraints: usize,
     pub num_fri_layers: usize,
@@ -1078,13 +1067,43 @@ pub struct ParsedProof {
 impl ParsedProof {
     /// Convert proof context to field elements for transcript
     pub fn context_to_elements(&self) -> Vec<BaseElement> {
-        vec![
-            BaseElement::new(self.trace_width as u64),
-            BaseElement::new(self.comp_width as u64),
+        // This context is used by the statement-hash sponge to bind verification parameters
+        // (and thus remove “free knobs” like domain size / exemptions / FRI remainder policy).
+        //
+        // We intentionally include the same core fields Winterfell uses for FS seeding
+        // (trace_info pack + options), plus recursion-relevant derived parameters.
+
+        // TraceInfo layout pack (matches winterfell `TraceInfo::to_elements()` for 0/1 aux segments).
+        let mut trace_info_pack = self.trace_width as u32;
+        let num_aux_segments: u32 = if self.aux_trace_width > 0 { 1 } else { 0 };
+        trace_info_pack = (trace_info_pack << 8) | num_aux_segments;
+        if num_aux_segments == 1 {
+            trace_info_pack = (trace_info_pack << 8) | (self.aux_trace_width as u32);
+            trace_info_pack = (trace_info_pack << 8) | (self.num_aux_segment_rands as u32);
+        }
+
+        let mut elems = vec![
+            BaseElement::new(trace_info_pack as u64),
             BaseElement::new(self.trace_len as u64),
-            BaseElement::new(self.lde_blowup as u64),
+            // Goldilocks modulus bytes LE: 0xFFFFFFFF00000001 => halves: 0x00000001, 0xFFFFFFFF
+            BaseElement::new(1u64),
+            BaseElement::new(0xFFFF_FFFFu64),
+            BaseElement::new(self.num_constraints as u64),
+            BaseElement::new(self.proof_options_packed),
+            BaseElement::new(self.grinding_factor as u64),
             BaseElement::new(self.num_queries as u64),
-        ]
+            // Derived parameters used by OOD/DEEP/FRI verification.
+            BaseElement::new(self.ce_domain_size as u64),
+            BaseElement::new(self.num_transition_exemptions as u64),
+            self.domain_offset,
+            self.g_lde,
+        ];
+
+        // Pad to a multiple of 8 so the statement-hash sponge schedule is stable.
+        while elems.len() % 8 != 0 {
+            elems.push(BaseElement::ZERO);
+        }
+        elems
     }
 }
 
@@ -1188,6 +1207,8 @@ mod tests {
             comp_width: 1,
             trace_len: 8,
             lde_blowup: 8,
+            ce_domain_size: 8, // test default; real value comes from AIR context
+            num_transition_exemptions: 1,
             num_queries: 2,
             num_constraints: 2,
             num_fri_layers: 2,
@@ -1213,9 +1234,9 @@ mod tests {
         let proof = make_test_proof();
         let elements = proof.context_to_elements();
         
-        assert_eq!(elements.len(), 5);
-        assert_eq!(elements[0], BaseElement::new(2)); // trace_width
-        assert_eq!(elements[2], BaseElement::new(8)); // trace_len
+        assert!(elements.len() % 8 == 0);
+        // trace_len is the 2nd element in the packed context.
+        assert_eq!(elements[1], BaseElement::new(8)); // trace_len
     }
 
     #[test]
@@ -1231,7 +1252,7 @@ mod tests {
         let proof = make_test_proof();
         let trace = prover.build_verification_trace(
             &proof,
-            crate::stark::verifier_air::ood_eval::ChildAirType::generic_aggregator_vdf(),
+            crate::stark::verifier_air::ood_eval::ChildAirType::aggregator_air(),
         );
 
         use winterfell::Trace;

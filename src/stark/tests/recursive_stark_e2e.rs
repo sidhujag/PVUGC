@@ -13,20 +13,20 @@
 use winterfell::{
     crypto::{DefaultRandomCoin, MerkleTree},
     math::{fields::f64::BaseElement, FieldElement},
-    AcceptableOptions, Trace,
+    AcceptableOptions, Prover, Trace,
 };
 use winter_crypto::hashers::Rp64_256;
 use winter_crypto::ElementHasher;
 
 use crate::stark::{
-    aggregator_air::{AggregatorAir, AggregatorConfig, generate_aggregator_proof_with_config},
+    aggregator_air::{AggregatorAir, AggregatorConfig, prove_aggregator_leaf_from_app},
     verifier_air::{
         proof_parser::parse_proof,
         ood_eval::ChildAirType,
         VerifierAir,
     },
     test_utils::prove_verifier_air_over_child,
-    tests::helpers::add2::{generate_test_add2_proof_rpo_with_options, Add2Air},
+    tests::helpers::simple_vdf::{build_vdf_trace, VdfAir, VdfProver},
 };
 
 type Hasher = Rp64_256;
@@ -41,7 +41,7 @@ fn fast_test_options() -> winterfell::ProofOptions {
         0,  // grinding_factor
         winterfell::FieldExtension::None,
         2,  // FRI folding factor
-        31, // max FRI remainder degree = 2^k - 1 (production-like)
+        31, // production-style terminal remainder (degree ≤ 31)
         winterfell::BatchingMethod::Linear,
         winterfell::BatchingMethod::Linear,
     )
@@ -61,30 +61,33 @@ fn digest_to_merkle_digest<D: winter_crypto::Digest>(digest: &D) -> [BaseElement
 fn test_e2e_add2_app_to_aggregator_air_to_verifier_air() {
 
     // -------------------------------------------------------------------------
-    // Step 1: Generate Application STARK (Add2)
+    // Step 1: Generate Application STARK (simple VDF)
     // -------------------------------------------------------------------------
     let steps = 8;
     let options = fast_test_options();
-    let (app_proof, app_trace) =
-        generate_test_add2_proof_rpo_with_options(BaseElement::ZERO, steps, options.clone());
+    let start = BaseElement::ZERO;
+    let app_trace = build_vdf_trace(start, steps);
     let app_result = app_trace.get(1, app_trace.length() - 1);
+    let app_proof = VdfProver::<Hasher>::new(options.clone())
+        .prove(app_trace.clone())
+        .expect("VDF proof generation failed");
 
-    // Verify Add2 proof off-chain
+    // Verify VDF proof off-chain
     let acceptable = AcceptableOptions::OptionSet(vec![options.clone()]);
-    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(
+    winterfell::verify::<VdfAir, Hasher, RandomCoin, VerifierMerkle>(
         app_proof.clone(),
         app_result,
         &acceptable,
     )
-    .expect("Add2 proof should be valid");
+    .expect("VDF proof should be valid");
 
     // -------------------------------------------------------------------------
     // Step 2: AggregatorAir leaf wrapper over the app statement hash
     // -------------------------------------------------------------------------
-    let app_statement_hash = digest_to_merkle_digest(&Hasher::hash_elements(&[app_result]));
     let agg_cfg = AggregatorConfig::test_fast();
     let (agg_proof, agg_pub_inputs, _agg_trace) =
-        generate_aggregator_proof_with_config(app_statement_hash, &agg_cfg).expect("AggregatorAir proof failed");
+        prove_aggregator_leaf_from_app::<VdfAir>(&agg_cfg, app_proof.clone(), app_result, ChildAirType::generic_vdf())
+            .expect("AggregatorAir leaf proof failed");
 
     // Sanity: AggregatorAir verifies natively.
     let acceptable_agg = AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
@@ -102,12 +105,12 @@ fn test_e2e_add2_app_to_aggregator_air_to_verifier_air() {
     let verifier_options = winterfell::ProofOptions::new(
         2, 64, 0,
         winterfell::FieldExtension::None,
-        2, 31,
+        2, 1,
         winterfell::BatchingMethod::Linear,
         winterfell::BatchingMethod::Linear,
     );
     let (verifier_proof, verifier_pub_inputs) =
-        prove_verifier_air_over_child(&parsed_agg, ChildAirType::generic_aggregator_vdf(), verifier_options.clone());
+        prove_verifier_air_over_child(&parsed_agg, ChildAirType::aggregator_air(), verifier_options.clone());
 
     let acceptable_verifier = AcceptableOptions::OptionSet(vec![verifier_options]);
     winterfell::verify::<VerifierAir, Hasher, RandomCoin, VerifierMerkle>(
@@ -123,14 +126,16 @@ fn test_e2e_aggregator_air_leaf_statements_differ_for_different_add2_instances()
     let steps = 8;
     let options = fast_test_options();
 
-    let (p0, t0) = generate_test_add2_proof_rpo_with_options(BaseElement::new(0), steps, options.clone());
+    let t0 = build_vdf_trace(BaseElement::new(0), steps);
+    let p0 = VdfProver::<Hasher>::new(options.clone()).prove(t0.clone()).unwrap();
     let out0 = t0.get(1, t0.length() - 1);
-    let (p1, t1) = generate_test_add2_proof_rpo_with_options(BaseElement::new(5), steps, options.clone());
+    let t1 = build_vdf_trace(BaseElement::new(5), steps);
+    let p1 = VdfProver::<Hasher>::new(options.clone()).prove(t1.clone()).unwrap();
     let out1 = t1.get(1, t1.length() - 1);
 
     let acceptable = AcceptableOptions::OptionSet(vec![options.clone()]);
-    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(p0.clone(), out0, &acceptable).unwrap();
-    winterfell::verify::<Add2Air, Hasher, RandomCoin, VerifierMerkle>(p1.clone(), out1, &acceptable).unwrap();
+    winterfell::verify::<VdfAir, Hasher, RandomCoin, VerifierMerkle>(p0.clone(), out0, &acceptable).unwrap();
+    winterfell::verify::<VdfAir, Hasher, RandomCoin, VerifierMerkle>(p1.clone(), out1, &acceptable).unwrap();
 
     let h0 = digest_to_merkle_digest(&Hasher::hash_elements(&[out0]));
     let h1 = digest_to_merkle_digest(&Hasher::hash_elements(&[out1]));

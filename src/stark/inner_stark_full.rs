@@ -1017,9 +1017,6 @@ pub fn verify_deep_composition(
             t2_num = gl_add_light(cs.clone(), &t2_num, &weighted_zg)?;
         }
 
-        // Process composition columns
-        // removed unused debug copies
-
         for k in 0..comp_w {
             let gamma_c = gammas_gl[coeff_idx].clone();
             coeff_idx += 1;

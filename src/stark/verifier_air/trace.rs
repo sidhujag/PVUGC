@@ -201,6 +201,9 @@ impl VerifierTraceBuilder {
                 self.aux_state[1] = self.aux_state[1] + BaseElement::new(4096);
             } else if mode == 0 {
                 self.aux_state[1] = self.aux_state[1] + BaseElement::new(1u64 << 32);
+            } else if mode == 6 {
+                // FRI inter-layer link check count.
+                self.aux_state[1] = self.aux_state[1] + BaseElement::new(65536);
             }
         }
     }
@@ -495,18 +498,24 @@ impl VerifierTraceBuilder {
     /// - binds fri[4] = IDX_REG (Q_IDX)
     /// - sets carry_x = domain_offset, carry_base = g_lde
     /// - resets xexp counter carry[6] = 0
-    pub fn xexp_init_from_qidx(&mut self) {
+    pub fn xexp_init_from_qidx(&mut self, g_lde: BaseElement) {
         self.fri_state[4] = self.idx_reg;
         self.fri_state[5] = BaseElement::ZERO;
         self.fri_state[6] = BaseElement::ZERO;
         self.fri_state[7] = BaseElement::ONE;
-
-        self.carry_state[1] = BaseElement::GENERATOR; // domain_offset
-        self.carry_state[2] = BaseElement::get_root_of_unity(6); // lde_domain_size=64
-        self.carry_state[6] = BaseElement::ZERO; // xexp counter
-
         self.aux_state[2] = BaseElement::new(17);
         self.emit_row(VerifierOp::Nop);
+
+        // IMPORTANT: carry[1], carry[2], carry[6] updates happen on the *next* row.
+        // The xexp-init transition constraint (mode=17) enforces:
+        //   next.carry[1] = domain_offset
+        //   next.carry[2] = g_lde
+        //   next.carry[6] = 0
+        // So we apply these to the builder state *after* emitting the init row.
+        self.carry_state[1] = BaseElement::GENERATOR; // domain_offset
+        self.carry_state[2] = g_lde;
+        self.carry_state[6] = BaseElement::ZERO; // xexp counter
+
         // Reset swap bit after the xexp-init row (AIR enforces next carry[5] == 0).
         self.carry_state[5] = BaseElement::ZERO;
         self.aux_state[2] = BaseElement::ZERO;
@@ -518,23 +527,22 @@ impl VerifierTraceBuilder {
             let exp_cur = self.fri_state[4].as_int();
             let bit = exp_cur & 1;
             let exp_next = exp_cur >> 1;
+            // Emit the constrained step row (current -> next update is enforced by constraints).
+            self.aux_state[2] = BaseElement::new(16);
+            self.fri_state[5] = BaseElement::new(bit);
+            self.emit_row(VerifierOp::Nop);
 
-            // Update carry_x and carry_base.
+            // Advance shift register and xexp state for next row.
+            self.fri_state[4] = BaseElement::new(exp_next);
+            self.carry_state[6] = self.carry_state[6] + BaseElement::ONE;
+
+            // Apply the same update the AIR enforces for carry[1]/carry[2] on mode=16 rows.
             let x = self.carry_state[1];
             let base = self.carry_state[2];
             if bit == 1 {
                 self.carry_state[1] = x * base;
             }
             self.carry_state[2] = base * base;
-
-            // Emit the constrained step row.
-            self.aux_state[2] = BaseElement::new(16);
-            self.fri_state[5] = BaseElement::new(bit);
-            self.emit_row(VerifierOp::Nop);
-
-            // Advance shift register and xexp counter for next row.
-            self.fri_state[4] = BaseElement::new(exp_next);
-            self.carry_state[6] = self.carry_state[6] + BaseElement::ONE;
         }
         self.aux_state[2] = BaseElement::ZERO;
     }
@@ -868,17 +876,26 @@ impl VerifierTraceBuilder {
         self.fri_state[2] = x;
         self.fri_state[3] = beta;
 
+        // IMPORTANT: the AIR selects canonical ordering of (f(x), f(-x)) using carry[5] (swap bit).
+        // We must compute `g` using the same selected order so the FriFold constraint verifies.
+        let b = self.carry_state[5];
+        let one_minus_b = BaseElement::ONE - b;
+        let fx_sel = one_minus_b * f_x + b * f_neg_x;
+        let fneg_sel = b * f_x + one_minus_b * f_neg_x;
+
         // Compute folded value: g(x^2) = (f(x) + f(-x))/2 + beta * (f(x) - f(-x))/(2x)
         let two = BaseElement::new(2u64);
-        let sum = f_x + f_neg_x;
-        let diff = f_x - f_neg_x;
+        let sum = fx_sel + fneg_sel;
+        let diff = fx_sel - fneg_sel;
         let g = sum / two + beta * diff / (two * x);
 
         self.fri_state[4] = g;
         self.emit_row(VerifierOp::FriFold);
 
-        // Advance x for the next layer: x_{i+1} = x_i^2.
-        self.carry_state[1] = x * x;
+        // Advance x for the next layer:
+        // Winterfell keeps the domain offset constant across FRI layers, so:
+        //   x_next = x_cur^2 / offset  (for folding_factor=2).
+        self.carry_state[1] = (x * x) / BaseElement::GENERATOR;
         // Store folded value for inter-layer linkage checks.
         self.carry_state[7] = g;
 
@@ -921,6 +938,61 @@ impl VerifierTraceBuilder {
         self.emit_row(VerifierOp::DeepCompose);
 
         final_value == expected
+    }
+
+    /// Verify FRI terminal condition for polynomial remainder of degree ≤ 31 (32 coefficients).
+    ///
+    /// This runs a fixed 32-step Horner evaluation:
+    ///   acc_{k+1} = acc_k * x_terminal + coeff_k
+    /// where coefficients are in Winterfell's remainder order (high -> low), i.e. compatible with
+    /// `eval_horner_rev`.
+    ///
+    /// Implementation notes:
+    /// - Uses carry[3] as the Horner accumulator.
+    /// - Uses carry[4] as the Horner step counter (must end at 32).
+    /// - Uses fri[7] to supply the per-step coefficient witness.
+    /// - Final check is done via DeepCompose mode=2 equality with bindings enforced in AIR:
+    ///     fri[6] == carry[7]  (final folded value)
+    ///     fri[7] == carry[3]  (horner accumulator)
+    pub fn verify_fri_terminal_poly_deg31(&mut self, remainder_coeffs_rev: &[BaseElement]) {
+        // Fixed-length coefficients: represent the same polynomial with exactly 32 Horner steps.
+        //
+        // `remainder_coeffs_rev` is in Horner-rev order [a_d, ..., a_0].
+        // If len < 32 (e.g. dev configs with max remainder degree 1), we must **left-pad** with
+        // zeros (higher-degree coefficients) so that the trailing coefficients remain [a_d..a_0]
+        // and we do not change the polynomial.
+        let mut coeffs = [BaseElement::ZERO; 32];
+        let n = core::cmp::min(remainder_coeffs_rev.len(), 32);
+        let start = 32 - n;
+        for (i, &c) in remainder_coeffs_rev.iter().take(n).enumerate() {
+            coeffs[start + i] = c;
+        }
+
+        // Initialize accumulator and counter. These should already be 0 after the last root-check,
+        // but we set them explicitly for the builder's internal state.
+        self.carry_state[3] = BaseElement::ZERO; // acc
+        self.carry_state[4] = BaseElement::ZERO; // ctr
+
+        let x = self.carry_state[1];
+        for k in 0..32 {
+            // Use Nop submode 18 for Horner steps.
+            self.aux_state[2] = BaseElement::new(18);
+            // Coefficient is provided via fri[7].
+            self.fri_state[7] = coeffs[k];
+            self.emit_row(VerifierOp::Nop);
+
+            // Mirror the constrained state update.
+            self.carry_state[3] = self.carry_state[3] * x + coeffs[k];
+            self.carry_state[4] = self.carry_state[4] + BaseElement::ONE;
+        }
+
+        // Final terminal equality row (DeepCompose mode=2).
+        // LHS is the true folded terminal value (carry[7]); RHS is Horner(acc).
+        self.fri_state[6] = self.carry_state[7];
+        self.fri_state[7] = self.carry_state[3];
+        self.aux_state[2] = BaseElement::new(2u64);
+        self.emit_row(VerifierOp::DeepCompose);
+        self.aux_state[2] = BaseElement::ZERO;
     }
 
     /// Accumulate one DEEP term into carry[3] and carry[4] (t1_num and t2_num).
@@ -1133,17 +1205,18 @@ impl VerifierTraceBuilder {
         trace_len: usize,
         constraint_coeffs: &Vec<BaseElement>,
         pub_result: BaseElement,
+        expected_checkpoint_count: usize,
+        expected_mode_counter: usize,
+        verifier_style_pub_inputs: Option<&super::VerifierPublicInputs>,
         child_type: super::ood_eval::ChildAirType,
     ) -> bool {
-        use super::ood_eval::{OodParams, verify_ood_constraint_equation_typed, evaluate_child_constraints};
+        use super::ood_eval::{evaluate_child_constraints, evaluate_verifier_constraints_at};
 
         // Domain values
         let z_pow_n = z.exp((trace_len as u64).into());
         let g_pow_n_minus_1 = g_trace.exp(((trace_len - 1) as u64).into());
         let exemption = z - g_pow_n_minus_1;
         let zerofier_num = z_pow_n - BaseElement::ONE;
-        let exemption_sq = exemption * exemption;
-
         // Combine C(z) from all composition columns: Σ C_i(z) * z^(i*n)
         let mut c_combined = BaseElement::ZERO;
         let mut z_pow_in = BaseElement::ONE;
@@ -1152,12 +1225,22 @@ impl VerifierTraceBuilder {
             z_pow_in *= z_pow_n;
         }
 
-        // Transition constraints (child-type-specific evaluator; for Generic this interprets the formula).
-        let constraints = evaluate_child_constraints(
-            &ood_frame.trace_current,
-            &ood_frame.trace_next,
-            &child_type,
-        );
+        // Transition constraints.
+        // - Generic: formula interpreter (doesn't depend on periodic columns or verifier pub inputs).
+        // - Verifier-style: depends on periodic columns + verifier public inputs.
+        let constraints = match child_type {
+            super::ood_eval::ChildAirType::VerifierAir | super::ood_eval::ChildAirType::AggregatorAir => {
+                let pi = verifier_style_pub_inputs.expect("missing verifier-style pub inputs for OOD evaluation");
+                evaluate_verifier_constraints_at(
+                    &ood_frame.trace_current,
+                    &ood_frame.trace_next,
+                    z,
+                    trace_len,
+                    pi,
+                )
+            }
+            _ => evaluate_child_constraints(&ood_frame.trace_current, &ood_frame.trace_next, &child_type),
+        };
         
         // Combine constraints with coefficients.
         let mut transition_sum = BaseElement::ZERO;
@@ -1167,28 +1250,58 @@ impl VerifierTraceBuilder {
             }
         }
 
-        // Boundary constraint:
-        // - VerifierAir children use aux[3] as the boundary column (checkpoint counter).
-        // - Generic/app children use col 1 (standard result column in app AIRs in this repo).
-        let boundary_col = if matches!(child_type, super::ood_eval::ChildAirType::VerifierAir) {
-            super::constraints::AUX_START + 3
-        } else {
-            1
-        };
-        // Boundary constraint numerator evaluation: f(z) - b(z).
-        // Divisor for the single last-step boundary is (z - g^(n-1)).
-        let boundary_value = ood_frame.trace_current.get(boundary_col)
-            .copied()
-            .unwrap_or(BaseElement::ZERO) - pub_result;
         let num_constraints = child_type.num_constraints();
-        let boundary_coeff = constraint_coeffs.get(num_constraints)
-            .copied()
-            .unwrap_or(BaseElement::ZERO);
-        let boundary_sum = boundary_coeff * boundary_value;
 
-        // LHS/RHS (multiply-through form used by this verifier trace schedule)
-        let lhs = transition_sum * exemption_sq + boundary_sum * zerofier_num;
-        let rhs = c_combined * zerofier_num * exemption;
+        // Boundary evaluation (AIR-specific).
+        let boundary_eval = match child_type {
+            super::ood_eval::ChildAirType::Generic { .. } => {
+                // Demo shape assumption: single last-row assertion, column 1 == pub_result.
+                let col = 1usize;
+                let num = ood_frame.trace_current.get(col).copied().unwrap_or(BaseElement::ZERO) - pub_result;
+                let beta = constraint_coeffs.get(num_constraints).copied().unwrap_or(BaseElement::ZERO);
+                beta * num / exemption
+            }
+            super::ood_eval::ChildAirType::VerifierAir | super::ood_eval::ChildAirType::AggregatorAir => {
+                // Matches `VerifierAir::get_assertions()` (8 single-step assertions).
+                let denom0 = z - BaseElement::ONE;
+                let beta0 = constraint_coeffs[num_constraints + 0];
+                let beta1 = constraint_coeffs[num_constraints + 1];
+                let beta2 = constraint_coeffs[num_constraints + 2];
+                let beta3 = constraint_coeffs[num_constraints + 3];
+                let beta4 = constraint_coeffs[num_constraints + 4];
+                let beta5 = constraint_coeffs[num_constraints + 5];
+                let beta6 = constraint_coeffs[num_constraints + 6];
+                let beta7 = constraint_coeffs[num_constraints + 7];
+
+                let hs0 = ood_frame.trace_current.get(super::NUM_SELECTORS + 0).copied().unwrap_or(BaseElement::ZERO);
+                let hs1 = ood_frame.trace_current.get(super::NUM_SELECTORS + 1).copied().unwrap_or(BaseElement::ZERO);
+                let hs2 = ood_frame.trace_current.get(super::NUM_SELECTORS + 2).copied().unwrap_or(BaseElement::ZERO);
+                let hs3 = ood_frame.trace_current.get(super::NUM_SELECTORS + 3).copied().unwrap_or(BaseElement::ZERO);
+                let aux1 = ood_frame.trace_current.get(super::constraints::AUX_START + 1).copied().unwrap_or(BaseElement::ZERO);
+                let aux3 = ood_frame.trace_current.get(super::constraints::AUX_START + 3).copied().unwrap_or(BaseElement::ZERO);
+
+                let e0 = beta0 * hs0 / denom0;
+                let e1 = beta1 * hs1 / denom0;
+                let e2 = beta2 * hs2 / denom0;
+                let e3 = beta3 * hs3 / denom0;
+                let e4 = beta4 * aux1 / denom0;
+                let e5 = beta5 * aux3 / denom0;
+
+                let denom_last = exemption;
+                let mode_expected = BaseElement::new(expected_mode_counter as u64);
+                let ckpt_expected = BaseElement::new(expected_checkpoint_count as u64);
+                let e6 = beta6 * (aux1 - mode_expected) / denom_last;
+                let e7 = beta7 * (aux3 - ckpt_expected) / denom_last;
+
+                e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7
+            }
+        };
+
+        // LHS/RHS (rational form matching Winterfell's verifier):
+        //   transition_combined(z) / transition_divisor(z) + boundary_combined(z) == C(z)
+        let transition_divisor = zerofier_num / exemption;
+        let lhs = transition_sum / transition_divisor + boundary_eval;
+        let rhs = c_combined;
 
         // Store witness into fri[6], fri[7] and enforce equality with the DeepCompose equality constraint.
         self.fri_state[6] = lhs;
@@ -1196,9 +1309,8 @@ impl VerifierTraceBuilder {
         self.aux_state[2] = BaseElement::ONE; // OOD mode
         self.emit_row(VerifierOp::DeepCompose);
 
-        // Host-side consistency checker.
-        let params = OodParams { z, trace_len, g_trace, constraint_coeffs: constraint_coeffs.clone(), pub_result };
-        verify_ood_constraint_equation_typed(ood_frame, &params, &child_type).is_ok()
+        // Return local result used to decide accept/reject.
+        lhs == rhs
     }
 
     /// OOD verification for a VerifierAir *child proof*.
@@ -1416,7 +1528,15 @@ impl VerifierTraceBuilder {
     pub fn finalize(mut self) -> TraceTable<BaseElement> {
         // Ensure trace length is power of 2
         let current_len = self.row;
-        let target_len = current_len.next_power_of_two().max(8);
+        // Keep verifier-style traces at a fixed length for a universal verifier shape.
+        // NOTE: If schedule grows beyond this, we must bump this constant (and regenerate keys).
+        let target_len = 8192usize;
+        debug_assert!(
+            current_len <= target_len,
+            "verifier trace overflow: current_len={} target_len={}",
+            current_len,
+            target_len
+        );
 
         // Reset aux[0] to 7 for Nop padding
         // Nop constraints require aux[0] = 7, but previous ops may have set it differently
@@ -1548,6 +1668,9 @@ mod tests {
             trace_len,
             &constraint_coeffs.to_vec(),
             pub_result,
+            0,
+            0,
+            None,
             ChildAirType::generic_vdf(),
         );
         assert!(result, "OOD constraint verification should pass for valid transition");

@@ -65,13 +65,42 @@ use winterfell::{
 /// - 3 selector columns
 /// - 12 hash state columns (RPO-256)
 /// - 8 FRI/DEEP working columns
-/// - 1 dedicated Merkle index register column
-/// - 4 expected-root register columns
-/// - 1 querygen step-counter column
+/// - 1 dedicated index register column (`IDX_REG`, persistent query slot index Q_IDX)
+/// - 4 expected-root register columns (loaded from public inputs; used by root checks)
+/// - 1 QueryGen step-counter column (`QGEN_CTR`, enforces microprogram sequencing)
 /// - 1 root-kind selector column
 /// - 8 carry/register columns (cross-op binding; always copied unless explicitly updated)
 /// - 4 auxiliary columns
 pub const VERIFIER_TRACE_WIDTH: usize = 42;
+
+/// Transition-constraint base degrees for `VerifierAir` / verifier-style AIRs.
+///
+/// IMPORTANT: this array is ordered by the **constraint emission order** in
+/// `crate::stark::verifier_air::constraints::evaluate_all()` (i.e. “constraint #i”),
+/// NOT by the **trace column index layout** (`IDX_REG`, `ROOT_REG_START`, `QGEN_CTR`, ...).
+/// Thus it is normal that degrees for `IDX_REG` and `QGEN_CTR` constraints are adjacent here,
+/// even though the `ROOT_REG[0..3]` columns sit between them in the trace.
+///
+/// Winterfell validates these degrees against the compiled evaluator; if constraint logic changes,
+/// this table must be updated to match.
+pub(crate) const VERIFIER_TRANSITION_DEGREE_BASES: [usize; VERIFIER_TRACE_WIDTH] = [
+    // selectors (3)
+    2, 2, 2,
+    // hash state (12)
+    45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45,
+    // fri/deep working (8)
+    23, 23, 23, 23, 23, 23, 23, 23,
+    // idx_reg (1), qgen_ctr (1)
+    32, 33,
+    // root_reg[0..3] (4)
+    41, 40, 40, 40,
+    // root_kind (1)
+    8,
+    // carry[0..7] (8)
+    17, 16, 1, 18, 18, 32, 16, 4,
+    // aux[0..3] (4)
+    10, 9, 17, 3,
+];
 
 /// Number of hash state columns (RPO-256 state)
 pub const HASH_STATE_WIDTH: usize = 12;
@@ -210,6 +239,61 @@ impl ToElements<BaseElement> for VerifierPublicInputs {
 }
 
 impl VerifierPublicInputs {
+    /// Reconstruct `VerifierPublicInputs` from the exact `to_elements()` layout.
+    ///
+    /// This is used by the recursive verifier to evaluate verifier-style constraints at the OOD point.
+    /// It must stay in sync with `VerifierPublicInputs::to_elements()`.
+    pub fn from_elements_exact(elems: &[BaseElement]) -> Self {
+        assert!(
+            elems.len() >= 22 && (elems.len() - 22) % 4 == 0,
+            "invalid VerifierPublicInputs element length: {}",
+            elems.len()
+        );
+
+        let fri_len = (elems.len() - 22) / 4;
+        assert!(fri_len >= 1, "expected at least 1 FRI commitment (padding included)");
+
+        let mut statement_hash = [BaseElement::ZERO; 4];
+        statement_hash.copy_from_slice(&elems[0..4]);
+        let mut trace_commitment = [BaseElement::ZERO; 4];
+        trace_commitment.copy_from_slice(&elems[4..8]);
+        let mut comp_commitment = [BaseElement::ZERO; 4];
+        comp_commitment.copy_from_slice(&elems[8..12]);
+
+        let mut fri_commitments = Vec::with_capacity(fri_len);
+        for i in 0..fri_len {
+            let start = 12 + 4 * i;
+            let mut d = [BaseElement::ZERO; 4];
+            d.copy_from_slice(&elems[start..start + 4]);
+            fri_commitments.push(d);
+        }
+
+        let tail = 12 + 4 * fri_len;
+        let num_queries = elems[tail + 0].as_int() as usize;
+        let proof_trace_len = elems[tail + 1].as_int() as usize;
+        let g_trace = elems[tail + 2];
+        let pub_result = elems[tail + 3];
+        let expected_checkpoint_count = elems[tail + 4].as_int() as usize;
+        let expected_mode_counter = elems[tail + 5].as_int() as usize;
+
+        let mut params_digest = [BaseElement::ZERO; 4];
+        params_digest.copy_from_slice(&elems[tail + 6..tail + 10]);
+
+        Self {
+            statement_hash,
+            trace_commitment,
+            comp_commitment,
+            fri_commitments,
+            num_queries,
+            proof_trace_len,
+            g_trace,
+            pub_result,
+            expected_checkpoint_count,
+            params_digest,
+            expected_mode_counter,
+        }
+    }
+
     /// Compute expected checkpoint count from proof parameters
     /// 
     /// Formula: 1 (statement hash) + 1 (OOD) + num_queries * (2 + 1 + num_fri_layers + 1)
@@ -225,8 +309,15 @@ impl VerifierPublicInputs {
             // No FRI: statement hash + OOD + params digest + (trace + comp) Merkle per query
             3 + num_queries * 2
         } else {
-            // With FRI: statement hash + OOD + params digest + (trace + comp + DEEP + FRI layers + terminal) per query
-            3 + num_queries * (2 + 1 + num_fri_layers + 1)
+            // With FRI:
+            // - 3 global checkpoints: statement-hash + OOD + params-digest
+            // - per query:
+            //   - 2 Merkle roots (trace + comp)
+            //   - 1 DEEP check
+            //   - num_fri_layers Merkle roots (FRI layers)
+            //   - 1 terminal check
+            //   - (num_fri_layers - 1) inter-layer link checks
+            3 + num_queries * (2 + 1 + num_fri_layers + 1) + num_queries * num_fri_layers.saturating_sub(1)
         }
     }
     
@@ -266,129 +357,11 @@ impl Air for VerifierAir {
     type PublicInputs = VerifierPublicInputs;
 
     fn new(trace_info: TraceInfo, pub_inputs: Self::PublicInputs, options: ProofOptions) -> Self {
-        // Define transition constraint degrees
-        //
-        // With full RPO verification:
-        // - Lagrange interpolation for round constants: degree 6 in round_counter
-        // - S-box (x^7): degree 7
-        // - Combined with op_flag: very high degree (~50)
-        //
-        // We set high degrees to accommodate the RPO constraints.
-        let mut degrees = Vec::new();
-
-        // Selector binary constraints (3): degree 2
-        for _ in 0..NUM_SELECTORS {
-            degrees.push(TransitionConstraintDegree::new(2));
-        }
-
-        // Hash state constraints (12): 
-        // For Permute: op.is_permute (deg 3) * sbox(candidate) - mid (deg 7)
-        //   where candidate = inv_mds(next - ark2) and mid = mds(sbox(current)) + ark1
-        //   Lagrange interpolation for ark1/ark2 adds degree 6 (product of 6 terms)
-        //   Total: 3 + 7 + 6 = 16, but actual evaluation may simplify
-        // With RPO verification: degree 45 (Lagrange*6 + S-box*7 + op_flag*3 ≈ 44)
-        for _ in 0..HASH_STATE_WIDTH {
-            degrees.push(TransitionConstraintDegree::new(45));
-        }
-
-        // FRI/DEEP working constraints (8):
-        // Columns 0-3, 5, 7: copy constraint (both_not_special * copy)
-        // Column 4: FRI folding (op.is_fri * fold + both_not_special * copy)
-        // Column 6: OOD verification (op.is_deep * ood + both_not_special * copy)
-        //
-        // Degree analysis:
-        // - op.is_X flags: degree 3 (product of 3 selector terms)
-        // - both_not_special: For FRI column constraints, this involves selector products
-        //   but the effective degree when combined with copy_constraint varies by trace
-        // - copy_constraint: degree 1
-        // - fri_fold_constraint: degree 1 (linear in trace)
-        //
-        // IMPORTANT: The declared degree must match what Winterfell computes from
-        // the actual trace evaluation. For most FRI columns, degree 6 works.
-        for i in 0..8 {
-            match i {
-                0 => {
-                    // fri[0] participates in higher-degree DEEP/terminal/linkage bindings.
-                    degrees.push(TransitionConstraintDegree::new(16));
-                }
-                4 | 5 | 6 | 7 => {
-                    // QueryGen / folding / equality columns have higher-degree gating.
-                    degrees.push(TransitionConstraintDegree::new(22));
-                }
-                _ => {
-                    // Default copy / low-degree binding columns.
-                    degrees.push(TransitionConstraintDegree::new(10));
-                }
-            }
-        }
-
-        // Dedicated index register column (1):
-        // - root check: op.is_deep(3) * is_root_check(6) * idx(1) = degree 10
-        // - merkle idx update: op.is_init(3) * l11(3) * (idx - (2*idx_next+dir))(1) = degree 7
-        // - export: is_export_nop (deg 11) * (idx_next - acc)(1) = degree 12
-        // - export sequencing: next_is_export_nop (11) * (1 - is_zerocheck_nop) (11) = degree 22
-        // - copy: (1 - op.is_init*l11 - is_export_nop) * (idx_next-idx)(1) ≈ degree 12
-        degrees.push(TransitionConstraintDegree::new(30));
-
-        // QueryGen step counter column (1):
-        // Copy by default; reset/increment on Nop sub-modes; plus export gating.
-        //
-        // NOTE: degree must match Winterfell's computed degree exactly.
-        degrees.push(TransitionConstraintDegree::new(31));
-
-        // Expected-root register columns (4):
-        // These bind Merkle root checks to the same digest value used elsewhere in the trace.
-        // Each column enforces:
-        // - copy by default
-        // - update on Init(kind=LOAD_ROOT4) rows: root_next = fri_curr[i]
-        // - used on DeepCompose root-check rows: hash_state[i] == root_curr
-        //
-        // Degree is dominated by the root-load + binding selectors.
-        // Column 0 additionally includes the `root_kind` range-check polynomial.
-        //
-        // NOTE: Increasing MAX_FRI_LAYERS increases the degree of the root-kind selector basis,
-        // so these declared degrees must be updated accordingly.
-        degrees.push(TransitionConstraintDegree::new(41)); // root_reg[0]
-        for _ in 0..3 {
-            degrees.push(TransitionConstraintDegree::new(40)); // root_reg[1..3]
-        }
-
-        // Root-kind selector column (1):
-        // Copy by default; allowed to change only when next row is Init(kind=LOAD_ROOT4).
-        degrees.push(TransitionConstraintDegree::new(8));
-
-        // Carry/register columns (8): copied by default, selectively updated by mode-tag polynomials.
-        // NOTE: these must match actual degrees exactly (validated by Winterfell in debug builds).
-        let carry_degrees = [16usize, 15, 15, 17, 17, 31, 15, 4];
-        for d in carry_degrees {
-            degrees.push(TransitionConstraintDegree::new(d));
-        }
-
-        // Auxiliary constraints (4):
-        // aux[0]: degree 10 (round counter range check: is_permute*prod(rc-i) for i in 0..7)
-        // aux[1]: degree 8 (mode counter: is_deep * is_mode_4/5 normalized selectors)
-        // aux[2]: mode value - unconstrained
-        // aux[3]: degree 3 (checkpoint counter: aux_next - aux_curr - op.is_deep)
-        for i in 0..4 {
-            if i == 0 {
-                // Round counter: max(is_permute*7-term-product, basic_ops*(rc-7))
-                // = max(3+7, 3+1) = degree 10
-                degrees.push(TransitionConstraintDegree::new(10));
-            } else if i == 1 {
-                // Mode counter: aux[1]_next = aux[1]_curr + is_deep * (is_mode_4 + is_mode_5 * 64)
-                // is_deep = degree 3, is_mode_4/5 = degree 5
-                // Total: 3 + 6 = degree 9
-                degrees.push(TransitionConstraintDegree::new(9));
-            } else if i == 3 {
-                // Checkpoint counter: aux_next - aux_curr - op.is_deep
-                // op.is_deep = s2 * s1 * (1 - s0) = degree 3
-                degrees.push(TransitionConstraintDegree::new(3));
-            } else {
-                // aux[2]: mode value. On Nop rows, constrained to {0,6,7,8,9,10,11,12,13,14,15,16,17}.
-                // op.is_nop(3) * degree-13 product = degree 16
-                degrees.push(TransitionConstraintDegree::new(16));
-            }
-        }
+        let degrees: Vec<TransitionConstraintDegree> = VERIFIER_TRANSITION_DEGREE_BASES
+            .iter()
+            .map(|&d| TransitionConstraintDegree::new(d))
+            .collect();
+        debug_assert_eq!(degrees.len(), VERIFIER_TRACE_WIDTH);
 
         // Boundary assertions:
         // - 4 initial capacity zeros (columns 3-6)

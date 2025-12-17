@@ -103,6 +103,8 @@ where
     // We derive it by reconstructing the AIR from the proof context.
     let air = A::new(trace_info.clone(), pub_inputs.clone(), options.clone());
     let comp_width = air.context().num_constraint_composition_columns();
+    let ce_domain_size = air.context().ce_domain_size();
+    let num_transition_exemptions = air.context().num_transition_exemptions();
 
     // Parse OOD frame - these are the actual evaluations at the OOD point z
     let (trace_ood_frame, comp_ood_frame) = proof
@@ -335,7 +337,8 @@ where
         // FRI verification data
         fri_remainder_coeffs,
         fri_terminal_is_constant,
-        query_positions: raw_query_positions,
+        // Keep the canonical verifier order (sorted unique) to align with openings in the proof.
+        query_positions,
         deep_coeffs,
         domain_offset,
         g_lde,
@@ -345,6 +348,8 @@ where
         comp_width,
         trace_len,
         lde_blowup,
+        ce_domain_size,
+        num_transition_exemptions,
         num_queries,
         num_constraints,
         num_fri_layers,

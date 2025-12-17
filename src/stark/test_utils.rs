@@ -26,7 +26,7 @@ use super::verifier_air::proof_parser::parse_proof;
 use super::tests::helpers::cubic_fib::{CubicFibAir};
 use super::tests::helpers::simple_vdf::{build_vdf_trace, VdfAir, VdfProver};
 use super::verifier_air::ood_eval::ChildAirType;
-use super::aggregator_air::generate_verifying_aggregator_proof;
+use super::aggregator_air::{AggregatorAir, AggregatorConfig, prove_aggregator_internal_from_parsed, prove_aggregator_leaf_from_app};
 use super::verifier_air::{prover::VerifierProver, VerifierPublicInputs};
 use super::{AirParams, FullStarkVerifierCircuit, StarkInnerFr};
 use crate::stark::gadgets::fri::FriTerminalKind;
@@ -289,6 +289,7 @@ pub(crate) fn prove_verifier_air_over_child(
     let expected_checkpoint_count =
         trace.get(crate::stark::verifier_air::constraints::AUX_START + 3, last).as_int() as usize;
 
+
     let statement_hash = compute_statement_hash_sponge(child, &child_type);
     let params_digest = [
         BaseElement::new(child.trace_len as u64),
@@ -320,7 +321,6 @@ pub(crate) fn prove_verifier_air_over_child(
 
 fn build_vdf_recursive_stark_instance_leaf_wrapper(start_value: u64, steps: usize) -> VdfStarkInstance {
     use super::verifier_air::VerifierAir;
-    use super::aggregator_air::{AggregatorAir, AggregatorConfig, generate_aggregator_proof_with_config};
     use super::verifier_air::aggregator_integration::RecursiveConfig;
     
     // Step 1: Generate VDF STARK proof
@@ -348,21 +348,15 @@ fn build_vdf_recursive_stark_instance_leaf_wrapper(start_value: u64, steps: usiz
     )
     .expect("VDF verification failed");
     
-    // Step 2: Build legacy AggregatorAir leaf wrapper around the app proof statement hash.
-    let app_statement_hash = {
-        use winter_crypto::{Digest, ElementHasher};
-        let digest = Rp64_256::hash_elements(&[vdf_result]);
-        let bytes = digest.as_bytes();
-        [
-            BaseElement::new(u64::from_le_bytes(bytes[0..8].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[8..16].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[16..24].try_into().unwrap())),
-            BaseElement::new(u64::from_le_bytes(bytes[24..32].try_into().unwrap())),
-        ]
-    };
+    // Step 2: Build AggregatorAir leaf proof which verifies the VDF proof.
     let agg_cfg = AggregatorConfig::test_fast();
-    let (agg_proof, agg_pub_inputs, _agg_trace) =
-        generate_aggregator_proof_with_config(app_statement_hash, &agg_cfg).expect("Aggregator leaf proof failed");
+    let (agg_proof, agg_pub_inputs, _agg_trace) = prove_aggregator_leaf_from_app::<VdfAir>(
+        &agg_cfg,
+        vdf_proof.clone(),
+        vdf_result,
+        ChildAirType::generic_vdf(),
+    )
+    .expect("Aggregator leaf proof failed");
 
     // Sanity: verify AggregatorAir proof natively.
     let acceptable_agg = winterfell::AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
@@ -379,7 +373,7 @@ fn build_vdf_recursive_stark_instance_leaf_wrapper(start_value: u64, steps: usiz
         &agg_proof,
         &agg_pub_inputs,
         recursive,
-        ChildAirType::generic_aggregator_vdf(),
+        ChildAirType::aggregator_air(),
     )
     .expect("VerifierAir wrapper proving failed");
 
@@ -455,47 +449,36 @@ pub fn build_verifying_aggregator_instance(
     let parsed0 = parse_proof::<VdfAir>(&vdf0_proof, &vdf0_result);
     let parsed1 = parse_proof::<VdfAir>(&vdf1_proof, &vdf1_result);
     
-    // Step 4: Generate Verifying Aggregator proof
-    // This proof uses VerifierAir constraints (27 columns)
-    // NOTE: VerifierAir has degree-7 constraints (RPO S-box), so needs blowup >= 64
-    let agg_options = ProofOptions::new(
-        2, 64, 0,  // blowup=64 for degree-7 constraints
-        winterfell::FieldExtension::None,
-        2, 31,
-        winterfell::BatchingMethod::Linear,
-        winterfell::BatchingMethod::Linear,
-    );
-    let (agg_proof, agg_pub_inputs, _agg_trace) = 
-        generate_verifying_aggregator_proof(
-            &parsed0,
-            crate::stark::verifier_air::ood_eval::ChildAirType::generic_vdf(),
-            Some((
-                &parsed1,
-                crate::stark::verifier_air::ood_eval::ChildAirType::generic_vdf(),
-            )),
-            // Policy: expected child-proof params digest (must match both children).
-            // NOTE: In production this must be protocol-fixed, not derived from proofs.
-            // For this test helper we keep it derived for now.
-            [
-                BaseElement::new(parsed0.trace_len as u64),
-                BaseElement::new(parsed0.lde_blowup as u64),
-                BaseElement::new(parsed0.num_queries as u64),
-                BaseElement::new(((parsed0.fri_folding_factor as u64) << 32) | (parsed0.grinding_factor as u64)),
-            ],
-            agg_options.clone(),
-        )
-            .expect("Verifying Aggregator proof failed");
-    
-    // Verify the aggregator proof (sanity check)
-    let acceptable_agg = winterfell::AcceptableOptions::OptionSet(vec![agg_options]);
-    winterfell::verify::<VerifierAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
+    // Step 4: Prove an internal AggregatorAir node which verifies both VDF proofs.
+    let agg_cfg = AggregatorConfig::test_fast();
+    let (agg_proof, agg_pub_inputs, _agg_trace) = prove_aggregator_internal_from_parsed(
+        &agg_cfg,
+        &parsed0,
+        ChildAirType::generic_vdf(),
+        Some((&parsed1, ChildAirType::generic_vdf())),
+    )
+    .expect("Aggregator internal proof failed");
+
+    // Sanity: verify AggregatorAir proof natively.
+    let acceptable_agg = winterfell::AcceptableOptions::OptionSet(vec![agg_cfg.to_proof_options()]);
+    winterfell::verify::<AggregatorAir, Rp64_256, DefaultRandomCoin<Rp64_256>, MerkleTree<Rp64_256>>(
         agg_proof.clone(),
         agg_pub_inputs.clone(),
         &acceptable_agg,
-    ).expect("Verifying Aggregator verification failed");
-    
-    // Step 5: Build the Groth16 circuit directly from the VerifierAir proof.
-    build_verifier_air_instance(agg_proof, agg_pub_inputs)
+    )
+    .expect("Aggregator internal verification failed");
+
+    // Step 5: Wrap AggregatorAir in VerifierAir, then build Groth16 circuit.
+    let recursive = super::verifier_air::aggregator_integration::RecursiveConfig::test();
+    let verifier_result = super::verifier_stark_groth16::prove_verifier_stark(
+        &agg_proof,
+        &agg_pub_inputs,
+        recursive,
+        ChildAirType::aggregator_air(),
+    )
+    .expect("VerifierAir wrapper proving failed");
+
+    build_verifier_air_instance(verifier_result.proof, verifier_result.pub_inputs)
 }
 
 /// Build a Groth16 instance from a VerifierAir proof

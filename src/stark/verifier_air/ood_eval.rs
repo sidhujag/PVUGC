@@ -36,6 +36,7 @@
 //! 3. Understanding the verification flow
 
 use winterfell::math::{fields::f64::BaseElement, FieldElement};
+use winterfell::math::StarkField;
 
 // ============================================================================
 // FORMULA-AS-WITNESS: Generic Constraint Encoding
@@ -245,54 +246,6 @@ pub fn encode_vdf_formula() -> EncodedFormula {
                         coeff: 1,
                         coeff_neg: true,
                         vars: vec![], // Empty vars = constant
-                    },
-                ],
-            },
-        ],
-    }
-}
-
-/// Encode 2-column VDF-like constraints (legacy Aggregator style)
-/// - c0: next[0] - curr[0]^3 - curr[1] = 0
-/// - c1: next[1] - curr[0] = 0
-/// 
-/// NOTE: This is different from simple_vdf.rs! Use encode_vdf_formula() for VdfAir.
-pub fn encode_aggregator_vdf_formula() -> EncodedFormula {
-    EncodedFormula {
-        trace_width: 2,
-        constraints: vec![
-            // Constraint 0: next[0] - curr[0]^3 - curr[1] = 0
-            EncodedConstraint {
-                monomials: vec![
-                    Monomial {
-                        coeff: 1,
-                        coeff_neg: false,
-                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 0, power: 1 }],
-                    },
-                    Monomial {
-                        coeff: 1,
-                        coeff_neg: true,
-                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 3 }],
-                    },
-                    Monomial {
-                        coeff: 1,
-                        coeff_neg: true,
-                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 1, power: 1 }],
-                    },
-                ],
-            },
-            // Constraint 1: next[1] - curr[0] = 0
-            EncodedConstraint {
-                monomials: vec![
-                    Monomial {
-                        coeff: 1,
-                        coeff_neg: false,
-                        vars: vec![VarRef { col_type: ColType::Next, col_idx: 1, power: 1 }],
-                    },
-                    Monomial {
-                        coeff: 1,
-                        coeff_neg: true,
-                        vars: vec![VarRef { col_type: ColType::Current, col_idx: 0, power: 1 }],
                     },
                 ],
             },
@@ -563,6 +516,13 @@ pub enum ChildAirType {
     /// Full STARK verification constraints (hash, Merkle, FRI, OOD)
     /// Used for recursive verification (VerifierAir verifying VerifierAir)
     VerifierAir,
+
+    /// AggregatorAir proof (two-AIR architecture).
+    ///
+    /// The current AggregatorAir skeleton reuses the verifier-style trace layout and
+    /// constraint system, but we still bind a distinct protocol identifier into the
+    /// statement hash to prevent AIR confusion at the protocol layer.
+    AggregatorAir,
     
     /// Generic mode: formula provided as witness
     /// Contains (formula, expected_circuit_hash)
@@ -579,6 +539,7 @@ impl ChildAirType {
     pub fn trace_width(&self) -> usize {
         match self {
             ChildAirType::VerifierAir => super::VERIFIER_TRACE_WIDTH,
+            ChildAirType::AggregatorAir => super::VERIFIER_TRACE_WIDTH,
             ChildAirType::Generic { formula, .. } => formula.trace_width,
         }
     }
@@ -587,6 +548,7 @@ impl ChildAirType {
     pub fn num_constraints(&self) -> usize {
         match self {
             ChildAirType::VerifierAir => super::VERIFIER_TRACE_WIDTH,
+            ChildAirType::AggregatorAir => super::VERIFIER_TRACE_WIDTH,
             ChildAirType::Generic { formula, .. } => formula.constraints.len(),
         }
     }
@@ -620,19 +582,12 @@ impl ChildAirType {
         ChildAirType::Generic { formula, circuit_hash }
     }
     
-    /// Create a generic Aggregator VDF type using pre-encoded formula
-    /// Convenience constructor for AggregatorAir proofs (2 constraints)
-    /// 
-    /// NOTE: This is different from `generic_vdf()` which is for VdfAir.
-    /// AggregatorAir has constraints: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
-    pub fn generic_aggregator_vdf() -> Self {
-        let formula = encode_aggregator_vdf_formula();
-        let circuit_hash = formula.compute_hash();
-        ChildAirType::Generic { formula, circuit_hash }
-    }
-
     pub fn verifier_air() -> Self {
         ChildAirType::VerifierAir
+    }
+
+    pub fn aggregator_air() -> Self {
+        ChildAirType::AggregatorAir
     }
 
     /// Create a generic Add2 type using pre-encoded formula.
@@ -657,6 +612,7 @@ impl ChildAirType {
             //
             // This must be treated as a protocol constant: changing it invalidates old proofs.
             ChildAirType::VerifierAir => verifier_air_formula_hash(),
+            ChildAirType::AggregatorAir => aggregator_air_formula_hash(),
             // Generic mode: return the formula's hash
             ChildAirType::Generic { formula, circuit_hash: _ } => formula.compute_hash(),
         }
@@ -673,6 +629,18 @@ pub fn verifier_air_formula_hash() -> [BaseElement; 4] {
     [
         BaseElement::new(0x5645_5249_4649_4552u64), // "VERIFIER" (packed)
         BaseElement::new(0x4149_525F_5631_0000u64), // "AIR_V1\0\0"
+        BaseElement::new(0x5056_5547_4300_0000u64), // "PVUGC\0\0\0"
+        BaseElement::new(1u64),
+    ]
+}
+
+/// Versioned identifier for the hardcoded AggregatorAir constraint system.
+///
+/// This is a protocol constant, distinct from `verifier_air_formula_hash()`.
+pub fn aggregator_air_formula_hash() -> [BaseElement; 4] {
+    [
+        BaseElement::new(0x4147_4752_4547_4154u64), // "AGGREGAT" (packed)
+        BaseElement::new(0x4f52_5f41_4952_0000u64), // "OR_AIR\0\0"
         BaseElement::new(0x5056_5547_4300_0000u64), // "PVUGC\0\0\0"
         BaseElement::new(1u64),
     ]
@@ -703,7 +671,10 @@ pub fn evaluate_child_constraints(
     child_type: &ChildAirType,
 ) -> Vec<BaseElement> {
     match child_type {
+        // NOTE: Verifier-style constraints depend on periodic columns + public inputs.
+        // Do not call this arm for verifier-style OOD checks; use `evaluate_verifier_constraints_at()` instead.
         ChildAirType::VerifierAir => evaluate_verifier_constraints(trace_current, trace_next),
+        ChildAirType::AggregatorAir => evaluate_verifier_constraints(trace_current, trace_next),
         ChildAirType::Generic { formula, circuit_hash } => {
             // Verify formula hash matches expected
             if !verify_formula_hash(formula, circuit_hash) {
@@ -730,21 +701,6 @@ pub fn evaluate_vdf_like_constraints(
     evaluate_formula(&formula, trace_current, trace_next)
 }
 
-/// Evaluate AggregatorAir constraints using formula-as-witness
-/// 
-/// Two constraints:
-/// - constraint0: next[0] = curr[0]^3 + curr[1]
-/// - constraint1: next[1] = curr[0]
-/// 
-/// NOTE: This matches AggregatorAir from aggregator_air.rs, NOT VdfAir.
-pub fn evaluate_aggregator_constraints(
-    trace_current: &[BaseElement],
-    trace_next: &[BaseElement],
-) -> Vec<BaseElement> {
-    let formula = encode_aggregator_vdf_formula();
-    evaluate_formula(&formula, trace_current, trace_next)
-}
-
 /// Verifier AIR constraints
 /// 
 /// This evaluates all transition constraints for the Verifier/Aggregator AIR.
@@ -765,7 +721,7 @@ fn evaluate_verifier_constraints(
     let next_vec: Vec<_> = trace_next.iter().take(VERIFIER_TRACE_WIDTH).copied().collect();
     let frame = EvaluationFrame::from_rows(current_vec, next_vec);
     
-    // Create dummy public inputs (not used for constraint evaluation at OOD point)
+    // Create dummy public inputs (ONLY safe for non-verifier-style callers).
     let pub_inputs = VerifierPublicInputs {
         statement_hash: [BaseElement::ZERO; 4],
         trace_commitment: [BaseElement::ZERO; 4],
@@ -783,6 +739,58 @@ fn evaluate_verifier_constraints(
     let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
     evaluate_all(&frame, &[], &mut result, &pub_inputs);
     
+    result
+}
+
+/// Evaluates Verifier-style constraints at an OOD point (verifier-exact).
+///
+/// This is needed when verifying `ChildAirType::{VerifierAir, AggregatorAir}`: their
+/// transition constraints depend on:
+/// - periodic columns (RPO cycle selectors + round constants)
+/// - public inputs (statement hash, expected counters, g_trace, etc.)
+pub fn evaluate_verifier_constraints_at(
+    trace_current: &[BaseElement],
+    trace_next: &[BaseElement],
+    z: BaseElement,
+    trace_len: usize,
+    pub_inputs: &super::VerifierPublicInputs,
+) -> Vec<BaseElement> {
+    use super::constraints::evaluate_all;
+    use super::{hash_chiplet, VERIFIER_TRACE_WIDTH};
+    use winter_math::polynom;
+    use winterfell::EvaluationFrame;
+
+    assert!(trace_current.len() >= VERIFIER_TRACE_WIDTH);
+    assert!(trace_next.len() >= VERIFIER_TRACE_WIDTH);
+
+    // Build periodic values exactly as Winterfell does:
+    // periodic_values[j] = eval(P_j, z^(trace_len / cycle_len)),
+    // where P_j is the interpolating polynomial over the subgroup of size `cycle_len`.
+    let periodic_cols = hash_chiplet::get_periodic_column_values();
+    let mut periodic_values = Vec::with_capacity(periodic_cols.len());
+    for col in periodic_cols.iter() {
+        let m = col.len();
+        debug_assert!(m.is_power_of_two());
+        let num_cycles = trace_len / m;
+        let x_reduced = z.exp_vartime((num_cycles as u64).into());
+
+        let g_m = BaseElement::get_root_of_unity(m.ilog2());
+        let mut xs = Vec::with_capacity(m);
+        let mut cur = BaseElement::ONE;
+        for _ in 0..m {
+            xs.push(cur);
+            cur *= g_m;
+        }
+        let poly = polynom::interpolate(&xs, col, false);
+        periodic_values.push(polynom::eval(&poly, x_reduced));
+    }
+
+    let current_vec: Vec<_> = trace_current.iter().take(VERIFIER_TRACE_WIDTH).copied().collect();
+    let next_vec: Vec<_> = trace_next.iter().take(VERIFIER_TRACE_WIDTH).copied().collect();
+    let frame = EvaluationFrame::from_rows(current_vec, next_vec);
+
+    let mut result = vec![BaseElement::ZERO; VERIFIER_TRACE_WIDTH];
+    evaluate_all(&frame, &periodic_values, &mut result, pub_inputs);
     result
 }
 
@@ -815,6 +823,14 @@ pub struct OodParams {
     pub constraint_coeffs: Vec<BaseElement>,
     /// Public result (boundary constraint target)
     pub pub_result: BaseElement,
+    /// Verifier-style boundary tail: expected final checkpoint counter (aux[3]) at last row.
+    ///
+    /// Used when `child_type` is `VerifierAir` or `AggregatorAir`.
+    pub expected_checkpoint_count: usize,
+    /// Verifier-style boundary tail: expected final mode counter (aux[1]) at last row.
+    ///
+    /// Used when `child_type` is `VerifierAir` or `AggregatorAir`.
+    pub expected_mode_counter: usize,
 }
 
 /// Verify the full OOD constraint equation
@@ -865,7 +881,13 @@ pub fn verify_ood_constraint_equation_typed(
     }
     
     let num_constraints = child_type.num_constraints();
-    let num_boundary = 1; // Typically 1 boundary constraint
+    // Boundary assertions are AIR-specific.
+    // - Generic demo AIRs in this repo use a single last-row assertion.
+    // - Verifier-style AIRs (VerifierAir/AggregatorAir) use 8 single-step assertions (see `VerifierAir::get_assertions`).
+    let num_boundary = match child_type {
+        ChildAirType::VerifierAir | ChildAirType::AggregatorAir => 8,
+        ChildAirType::Generic { .. } => 1,
+    };
     if params.constraint_coeffs.len() < num_constraints + num_boundary {
         return Err(OodVerificationError::CoeffCountMismatch);
     }
@@ -883,11 +905,9 @@ pub fn verify_ood_constraint_equation_typed(
     // Exemption factor: z - g^{n-1}
     let exemption = z - g_pow_n_minus_1;
 
-    // Zerofier numerator: z^n - 1
+    // Transition divisor z(x) = (x^n - 1) / (x - g^(n-1))  (single exemption point).
     let zerofier_num = z_pow_n - BaseElement::ONE;
-
-    // exemption²
-    let exemption_sq = exemption * exemption;
+    let transition_divisor = zerofier_num / exemption;
 
     // ==============================================================
     // TRANSITION CONSTRAINTS (child AIR type specific)
@@ -898,7 +918,7 @@ pub fn verify_ood_constraint_equation_typed(
         child_type,
     );
 
-    // Combine constraints with coefficients
+    // Combine constraints with coefficients.
     let mut transition_sum = BaseElement::ZERO;
     for (i, c) in constraints.iter().enumerate() {
         if i < params.constraint_coeffs.len() {
@@ -907,50 +927,84 @@ pub fn verify_ood_constraint_equation_typed(
     }
 
     // ==============================================================
-    // BOUNDARY CONSTRAINT
-    // Assertion: column 1, step (trace_len - 1), equals pub_result
+    // BOUNDARY CONSTRAINTS (AIR-specific)
     // ==============================================================
-    // For VerifierAir children we use aux[3] (checkpoint counter) as the boundary column in the
-    // multiply-through OOD equation (mirrors `ood_eval_r1cs`).
-    let boundary_col = if matches!(child_type, ChildAirType::VerifierAir) {
-        super::constraints::AUX_START + 3
-    } else {
-        1
+    let boundary_eval = match child_type {
+        ChildAirType::Generic { .. } => {
+            // Demo shape assumption: single last-row assertion, column 1 == pub_result.
+            // Value at z is in `ood_frame.trace_current`.
+            let col = 1usize;
+            let num = ood_frame
+                .trace_current
+                .get(col)
+                .copied()
+                .unwrap_or(BaseElement::ZERO)
+                - params.pub_result;
+            let beta = params
+                .constraint_coeffs
+                .get(num_constraints)
+                .copied()
+                .unwrap_or(BaseElement::ZERO);
+            beta * num / exemption
+        }
+        ChildAirType::VerifierAir | ChildAirType::AggregatorAir => {
+            // Matches `VerifierAir::get_assertions()`:
+            // - 4 hash-state zeros at step 0
+            // - aux[1] (mode counter) == 0 at step 0
+            // - aux[3] (checkpoint counter) == 0 at step 0
+            // - aux[1] == expected_mode_counter at last step
+            // - aux[3] == expected_checkpoint_count at last step
+            //
+            // Each is a single-step boundary assertion, so divisor is (z - g^step).
+            let denom0 = z - BaseElement::ONE; // step 0 => g^0 = 1
+            let beta0 = params.constraint_coeffs[num_constraints + 0];
+            let beta1 = params.constraint_coeffs[num_constraints + 1];
+            let beta2 = params.constraint_coeffs[num_constraints + 2];
+            let beta3 = params.constraint_coeffs[num_constraints + 3];
+            let beta4 = params.constraint_coeffs[num_constraints + 4];
+            let beta5 = params.constraint_coeffs[num_constraints + 5];
+            let beta6 = params.constraint_coeffs[num_constraints + 6];
+            let beta7 = params.constraint_coeffs[num_constraints + 7];
+
+            let hs0 = ood_frame.trace_current.get(super::NUM_SELECTORS + 0).copied().unwrap_or(BaseElement::ZERO);
+            let hs1 = ood_frame.trace_current.get(super::NUM_SELECTORS + 1).copied().unwrap_or(BaseElement::ZERO);
+            let hs2 = ood_frame.trace_current.get(super::NUM_SELECTORS + 2).copied().unwrap_or(BaseElement::ZERO);
+            let hs3 = ood_frame.trace_current.get(super::NUM_SELECTORS + 3).copied().unwrap_or(BaseElement::ZERO);
+            let aux1 = ood_frame.trace_current.get(super::constraints::AUX_START + 1).copied().unwrap_or(BaseElement::ZERO);
+            let aux3 = ood_frame.trace_current.get(super::constraints::AUX_START + 3).copied().unwrap_or(BaseElement::ZERO);
+
+            let mode_expected = BaseElement::new(params.expected_mode_counter as u64);
+            let ckpt_expected = BaseElement::new(params.expected_checkpoint_count as u64);
+
+            // step 0 assertions (value == 0)
+            let e0 = beta0 * hs0 / denom0;
+            let e1 = beta1 * hs1 / denom0;
+            let e2 = beta2 * hs2 / denom0;
+            let e3 = beta3 * hs3 / denom0;
+            let e4 = beta4 * aux1 / denom0;
+            let e5 = beta5 * aux3 / denom0;
+
+            // last-step assertions
+            let denom_last = exemption; // z - g^(n-1)
+            let e6 = beta6 * (aux1 - mode_expected) / denom_last;
+            let e7 = beta7 * (aux3 - ckpt_expected) / denom_last;
+
+            e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7
+        }
     };
-    // Boundary assertion evaluation (TEMPORARY SHAPE ASSUMPTION):
-    // For `ChildAirType::Generic`, we currently assume a single boundary assertion of the form:
-    //   trace[col=1] at step (n-1) equals `pub_result`.
-    //
-    // This is NOT universal. A fully-generic app verifier must commit to, and evaluate, the
-    // complete set of boundary assertions (including divisor structure) exactly as Winterfell does.
-    let boundary_value = ood_frame
-        .trace_current
-        .get(boundary_col)
-        .copied()
-        .unwrap_or(BaseElement::ZERO)
-        - params.pub_result;
-    let beta_0 = params.constraint_coeffs.get(num_constraints)
-        .copied()
-        .unwrap_or(BaseElement::ZERO);
-    let boundary_sum = beta_0 * boundary_value;
 
-    // ==============================================================
-    // Multiply-through OOD equation (current recursion scaffold):
-    //   transition_sum * exemption² + boundary_sum * (z^n - 1)
-    //     == C(z) * (z^n - 1) * exemption
-    // ==============================================================
-    let lhs = transition_sum * exemption_sq + boundary_sum * zerofier_num;
+    // Compose the same rational constraints value Winterfell checks at z:
+    //   transition_combined(z) / transition_divisor(z) + boundary_combined(z)
+    let lhs = transition_sum / transition_divisor + boundary_eval;
 
-    // ==============================================================
-    // RHS = C(z) * (z^n - 1) * exemption
-    // ==============================================================
+    // RHS = combined constraint composition polynomial evaluation at z.
     let mut c_combined = BaseElement::ZERO;
     let mut z_pow_in = BaseElement::ONE;
     for &c_i in ood_frame.composition.iter() {
         c_combined += c_i * z_pow_in;
         z_pow_in *= z_pow_n;
     }
-    let rhs = c_combined * zerofier_num * exemption;
+    let rhs = c_combined;
 
     // Verify LHS == RHS
     if lhs != rhs {
@@ -992,36 +1046,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_aggregator_constraints_valid_transition() {
-        // Valid VDF transition: next0 = curr0^3 + curr1, next1 = curr0
-        let col0 = BaseElement::new(2);
-        let col1 = BaseElement::new(3);
-
-        // next0 = 2^3 + 3 = 11
-        // next1 = 2
-        let next0 = BaseElement::new(11);
-        let next1 = BaseElement::new(2);
-
-        let constraints = evaluate_aggregator_constraints(&[col0, col1], &[next0, next1]);
-
-        assert_eq!(constraints[0], BaseElement::ZERO);
-        assert_eq!(constraints[1], BaseElement::ZERO);
-    }
-
-    #[test]
-    fn test_aggregator_constraints_invalid_transition() {
-        // Invalid transition
-        let col0 = BaseElement::new(2);
-        let col1 = BaseElement::new(3);
-
-        // Wrong values
-        let next0 = BaseElement::new(10); // Should be 11
-        let next1 = BaseElement::new(3);  // Should be 2
-
-        let constraints = evaluate_aggregator_constraints(&[col0, col1], &[next0, next1]);
-
-        assert_ne!(constraints[0], BaseElement::ZERO);
-        assert_ne!(constraints[1], BaseElement::ZERO);
+    fn test_aggregator_air_type_id_is_stable() {
+        // AggregatorAir is identified by a fixed protocol hash.
+        let a = ChildAirType::aggregator_air().compute_formula_hash();
+        let b = ChildAirType::aggregator_air().compute_formula_hash();
+        assert_eq!(a, b);
+        assert_ne!(a, ChildAirType::verifier_air().compute_formula_hash());
     }
 
     #[test]
@@ -1070,6 +1100,8 @@ mod tests {
                 BaseElement::new(3), // beta_0
             ],
             pub_result: BaseElement::new(100),
+            expected_checkpoint_count: 0,
+            expected_mode_counter: 0,
         };
         
         assert_eq!(params.trace_len, 8);
@@ -1105,6 +1137,8 @@ mod tests {
                 BaseElement::ZERO, // beta_0
             ],
             pub_result: curr1, // Match boundary to avoid boundary term
+            expected_checkpoint_count: 0,
+            expected_mode_counter: 0,
         };
 
         // Should pass because 0 = 0
@@ -1137,6 +1171,8 @@ mod tests {
                 BaseElement::ZERO, // beta_0 (ignore boundary for this test)
             ],
             pub_result: curr1,
+            expected_checkpoint_count: 0,
+            expected_mode_counter: 0,
         };
 
         // Should fail - constraints are non-zero but composition is zero
@@ -1269,25 +1305,6 @@ mod tests {
     }
     
     #[test]
-    fn test_encode_aggregator_vdf_formula() {
-        // Test that encode_aggregator_vdf_formula creates a valid formula
-        // AggregatorAir formula: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
-        let formula = encode_aggregator_vdf_formula();
-        
-        assert_eq!(formula.trace_width, 2, "AggregatorAir has 2 columns");
-        assert_eq!(formula.constraints.len(), 2, "AggregatorAir has 2 constraints");
-        
-        // First constraint: 3 monomials (next[0], -curr[0]^3, -curr[1])
-        assert_eq!(formula.constraints[0].monomials.len(), 3);
-        
-        // Second constraint: 2 monomials (next[1], -curr[0])
-        assert_eq!(formula.constraints[1].monomials.len(), 2);
-        
-        println!("Aggregator VDF formula monomial count: {}", formula.monomial_count());
-        assert_eq!(formula.monomial_count(), 5);
-    }
-    
-    #[test]
     fn test_formula_hash_consistency() {
         // Test that formula hash is deterministic
         let formula1 = encode_vdf_formula();
@@ -1304,11 +1321,8 @@ mod tests {
         
         assert_ne!(hash1, fib_hash, "Different formulas should have different hashes");
         
-        // VDF and Aggregator VDF should have different hashes
-        let agg_formula = encode_aggregator_vdf_formula();
-        let agg_hash = agg_formula.compute_hash();
-        
-        assert_ne!(hash1, agg_hash, "VDF and AggregatorVDF should have different hashes");
+        // VDF and AggregatorAir identifiers should be different.
+        assert_ne!(hash1, aggregator_air_formula_hash());
     }
     
     #[test]
@@ -1382,31 +1396,12 @@ mod tests {
     }
     
     #[test]
-    fn test_child_air_type_generic_aggregator() {
-        // Test the ChildAirType::Generic variant with AggregatorVDF
-        // AggregatorAir: next[0] = curr[0]^3 + curr[1], next[1] = curr[0]
-        
-        let curr0 = BaseElement::new(5);
-        let curr1 = BaseElement::new(3);
-        let next0 = curr0 * curr0 * curr0 + curr1;
-        let next1 = curr0;
-        
-        let trace_current = vec![curr0, curr1];
-        let trace_next = vec![next0, next1];
-        
-        // Create generic AggregatorVDF child type
-        let generic_agg = ChildAirType::generic_aggregator_vdf();
-        
-        // Verify properties
-        assert_eq!(generic_agg.trace_width(), 2);
-        assert_eq!(generic_agg.num_constraints(), 2);
-        
-        // Evaluate using the generic type
-        let result = evaluate_child_constraints(&trace_current, &trace_next, &generic_agg);
-        
-        // Should be zero for valid transition
-        assert_eq!(result[0], BaseElement::ZERO, "c0 should be zero");
-        assert_eq!(result[1], BaseElement::ZERO, "c1 should be zero");
+    fn test_child_air_type_aggregator_air() {
+        let agg = ChildAirType::aggregator_air();
+        assert_eq!(agg.trace_width(), crate::stark::verifier_air::VERIFIER_TRACE_WIDTH);
+        assert_eq!(agg.num_constraints(), crate::stark::verifier_air::VERIFIER_TRACE_WIDTH);
+        assert_eq!(agg.compute_formula_hash(), aggregator_air_formula_hash());
+        assert_ne!(agg.compute_formula_hash(), verifier_air_formula_hash());
     }
     
     #[test]
