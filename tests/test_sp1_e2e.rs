@@ -291,16 +291,39 @@ fn test_sp1_to_pvugc_real() {
         }
         _ => try_install_circuit_artifacts("groth16"),
     };
+    // Grab the Groth16 wrapper VK hash that SP1 embedded into each proof, and ensure both
+    // proofs refer to the same wrapper VK.
+    let groth16_vkey_hash_expected = match &sp1_proof_1.proof {
+        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
+        other => panic!("expected Groth16 proof, got {other}"),
+    };
+    let groth16_vkey_hash_2 = match &sp1_proof_2.proof {
+        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
+        other => panic!("expected Groth16 proof, got {other}"),
+    };
+    assert_eq!(
+        groth16_vkey_hash_expected, groth16_vkey_hash_2,
+        "expected both proofs to reference the same Groth16 wrapper verifying key"
+    );
+
     let groth16_vk_path = artifacts_dir.join("groth16_vk.bin");
     let vk_bytes = std::fs::read(&groth16_vk_path).unwrap_or_else(|e| {
         panic!("read groth16_vk.bin at {}: {e}", groth16_vk_path.display())
     });
     let vk_hash = Sha256::digest(&vk_bytes);
+    assert_eq!(
+        vk_hash.as_slice(),
+        groth16_vkey_hash_expected.as_slice(),
+        "sha256(groth16_vk.bin) must match proof.groth16_vkey_hash"
+    );
     println!(
         "  Groth16 VK bytes: {} (sha256[0..4]={:02x}{:02x}{:02x}{:02x}, proof.groth16_vkey_hash[0..4]={:02x}{:02x}{:02x}{:02x})",
         vk_bytes.len(),
         vk_hash[0], vk_hash[1], vk_hash[2], vk_hash[3],
-        groth16_vkey_hash[0], groth16_vkey_hash[1], groth16_vkey_hash[2], groth16_vkey_hash[3],
+        groth16_vkey_hash_expected[0],
+        groth16_vkey_hash_expected[1],
+        groth16_vkey_hash_expected[2],
+        groth16_vkey_hash_expected[3],
     );
     let inner_vk = parse_gnark_vk_bls12_377(&vk_bytes).expect("parse gnark raw vk");
     let inner_pvk = prepare_verifying_key(&inner_vk);
