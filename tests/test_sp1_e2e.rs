@@ -12,8 +12,8 @@
 //! - Outer circuit wraps the SP1 proof on BW6-761
 
 use ark_bls12_377::{Bls12_377, Fr as Fr377};
-use ark_ff::UniformRand;
-use ark_groth16::{Groth16, Proof};
+use ark_ff::{PrimeField, UniformRand};
+use ark_groth16::Proof;
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
 use sha2::Digest;
