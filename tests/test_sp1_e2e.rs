@@ -410,7 +410,7 @@ fn test_sp1_to_pvugc_real() {
 
     // Step 4: Prove outer with Lean prover and verify with baked target (no standard Groth16 verify here).
     println!("\nStep 4: Lean-prove outer circuit for runtime SP1 statement and verify with baked target...");
-    let verify_lean_outer =
+    let mut verify_lean_outer =
         |label: &str, statement: &[Fr377], inner_proof: &Proof<Bls12_377>| {
             let circuit = OuterCircuit::<Cycle>::new(inner_vk.clone(), statement.to_vec(), inner_proof.clone());
             let r = OuterScalar::<Cycle>::rand(&mut rng);
