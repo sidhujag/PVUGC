@@ -430,8 +430,8 @@ fn test_sp1_to_pvugc_real() {
         }
         println!(
             "  [inner_proof_generator] called with x0={}, x1={} (k_prefix={}.., k_len={})",
-            statement.get(0).copied().unwrap_or_else(Fr377::zero),
-            statement.get(1).copied().unwrap_or_else(Fr377::zero),
+            statement.get(0).copied().unwrap_or_else(|| Fr377::from(0u64)),
+            statement.get(1).copied().unwrap_or_else(|| Fr377::from(0u64)),
             prefix,
             k.len()
         );
