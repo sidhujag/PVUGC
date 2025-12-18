@@ -257,33 +257,28 @@ fn test_sp1_to_pvugc_real() {
     // (e.g. fd=3 for public values) which are rejected by SP1 >= v4 unless explicitly allowed.
     // This is test-only to keep CI/dev flows working while ELFs are refreshed.
     std::env::set_var("SP1_ALLOW_DEPRECATED_HOOKS", "true");
-
-    let _rng = StdRng::seed_from_u64(42);
     
-    // Step 1: Generate real SP1 Groth16 proof
-    println!("Step 1: Generating SP1 Groth16 proof...");
+    let _rng = StdRng::seed_from_u64(42);
+
+    // Step 1: Generate 2 real SP1 Groth16 proofs (same program VK, same wrapper VK; different statements).
+    println!("Step 1: Generating 2 SP1 Groth16 proofs...");
     let client = ProverClient::from_env();
     
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&10u32);
-    
     let (pk, vk) = client.setup(FIBONACCI_ELF);
-    let sp1_proof = client.prove(&pk, &stdin).groth16().run().expect("proving failed");
-    println!("  ✓ SP1 proof generated");
-    println!("  Program vkey_hash: {}", vk.bytes32());
+
+    let mut stdin_1 = SP1Stdin::new();
+    stdin_1.write(&10u32);
+    let sp1_proof_1 = client.prove(&pk, &stdin_1).groth16().run().expect("proving #1 failed");
+
+    let mut stdin_2 = SP1Stdin::new();
+    stdin_2.write(&11u32);
+    let sp1_proof_2 = client.prove(&pk, &stdin_2).groth16().run().expect("proving #2 failed");
+
+    println!("  ✓ SP1 proofs generated");
+    println!("  Program vkey_hash (same program): {}", vk.bytes32());
     
     // Step 2: Bridge to arkworks
     println!("\nStep 2: Bridging to arkworks...");
-
-    // Extract the gnark `WriteRawTo` proof bytes from SP1 (hex).
-    // This is the canonical bridge format in this repo (not Solidity encoding).
-    let (raw_proof_hex, public_inputs_hex, groth16_vkey_hash) = match &sp1_proof.proof {
-        sp1_sdk::SP1Proof::Groth16(p) => (p.raw_proof.clone(), p.public_inputs.clone(), p.groth16_vkey_hash),
-        other => panic!("expected Groth16 proof, got {other}"),
-    };
-
-    let proof_bytes = decode_sp1_proof_hex(&raw_proof_hex).expect("decode raw_proof hex");
-    let inner_proof = parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
 
     // Load the Groth16 verifying key from the *same artifacts dir SP1 used*.
     let artifacts_dir = match std::env::var("SP1_DEV") {
@@ -308,34 +303,61 @@ fn test_sp1_to_pvugc_real() {
         groth16_vkey_hash[0], groth16_vkey_hash[1], groth16_vkey_hash[2], groth16_vkey_hash[3],
     );
     let inner_vk = parse_gnark_vk_bls12_377(&vk_bytes).expect("parse gnark raw vk");
-
-    // Decode SP1's two public inputs.
-    let vkey_hash_fe = decode_sp1_public_input(&public_inputs_hex[0]).expect("decode vkey_hash");
-    let committed_values_digest_fe =
-        decode_sp1_public_input(&public_inputs_hex[1]).expect("decode committed_values_digest");
-    let inner_public_inputs = vec![vkey_hash_fe, committed_values_digest_fe];
-
-    // Sanity checks: ensure VK expects exactly these public inputs.
-    assert_eq!(
-        inner_vk.gamma_abc_g1.len(),
-        1 + inner_public_inputs.len(),
-        "VK IC length mismatch: gamma_abc_g1.len() must equal 1 + num_public_inputs"
-    );
-    println!(
-        "  Decoded public inputs (decimal): vkey_hash={}, committed_values_digest={}",
-        inner_public_inputs[0],
-        inner_public_inputs[1],
-    );
-
-    // Verify in arkworks (this is the bridge correctness check).
     let inner_pvk = prepare_verifying_key(&inner_vk);
-    assert!(
-        Groth16::<Bls12_377>::verify_proof(&inner_pvk, &inner_proof, &inner_public_inputs).unwrap(),
-        "arkworks verification failed for bridged gnark proof"
-    );
-    println!("  ✓ Bridged gnark proof verified in arkworks");
 
-    println!("\n=== SP1 → PVUGC Real E2E Test (bridge verify) PASSED ===");
+    let verify_one = |label: &str, proof: &sp1_sdk::SP1Proof| {
+        // Extract the gnark `WriteRawTo` proof bytes from SP1 (hex).
+        // This is the canonical bridge format in this repo (not Solidity encoding).
+        let (raw_proof_hex, public_inputs_hex, groth16_vkey_hash) = match proof {
+            sp1_sdk::SP1Proof::Groth16(p) => {
+                (p.raw_proof.clone(), p.public_inputs.clone(), p.groth16_vkey_hash)
+            }
+            other => panic!("expected Groth16 proof, got {other}"),
+        };
+
+        // Show that both proofs are using the same Groth16 wrapper VK bytes (hash matches).
+        println!(
+            "  [{label}] proof.groth16_vkey_hash[0..4]={:02x}{:02x}{:02x}{:02x}",
+            groth16_vkey_hash[0],
+            groth16_vkey_hash[1],
+            groth16_vkey_hash[2],
+            groth16_vkey_hash[3],
+        );
+
+        let proof_bytes = decode_sp1_proof_hex(&raw_proof_hex).expect("decode raw_proof hex");
+        let inner_proof =
+            parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
+
+        // Decode SP1's two public inputs.
+        let vkey_hash_fe =
+            decode_sp1_public_input(&public_inputs_hex[0]).expect("decode vkey_hash");
+        let committed_values_digest_fe =
+            decode_sp1_public_input(&public_inputs_hex[1]).expect("decode committed_values_digest");
+        let inner_public_inputs = vec![vkey_hash_fe, committed_values_digest_fe];
+
+        // Sanity checks: ensure VK expects exactly these public inputs.
+        assert_eq!(
+            inner_vk.gamma_abc_g1.len(),
+            1 + inner_public_inputs.len(),
+            "VK IC length mismatch: gamma_abc_g1.len() must equal 1 + num_public_inputs"
+        );
+        println!(
+            "  [{label}] Decoded public inputs (decimal): vkey_hash={}, committed_values_digest={}",
+            inner_public_inputs[0], inner_public_inputs[1],
+        );
+
+        assert!(
+            Groth16::<Bls12_377>::verify_proof(&inner_pvk, &inner_proof, &inner_public_inputs)
+                .unwrap(),
+            "[{label}] arkworks verification failed for bridged gnark proof"
+        );
+        println!("  [{label}] ✓ Bridged gnark proof verified in arkworks");
+    };
+
+    verify_one("proof#1", &sp1_proof_1.proof);
+    verify_one("proof#2", &sp1_proof_2.proof);
+
+    println!("\n=== SP1 → PVUGC Real E2E Test (2x bridge verify, same VK) PASSED ===");
 }
 
 #[test]
