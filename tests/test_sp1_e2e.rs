@@ -253,6 +253,11 @@ fn test_sp1_to_pvugc_simulated() {
 fn test_sp1_to_pvugc_real() {
     println!("\n=== SP1 → PVUGC Real E2E Test ===\n");
     
+    // Compatibility: older SP1 guest ELFs may still use deprecated file descriptors
+    // (e.g. fd=3 for public values) which are rejected by SP1 >= v4 unless explicitly allowed.
+    // This is test-only to keep CI/dev flows working while ELFs are refreshed.
+    std::env::set_var("SP1_ALLOW_DEPRECATED_HOOKS", "1");
+
     let _rng = StdRng::seed_from_u64(42);
     
     // Step 1: Generate real SP1 Groth16 proof
