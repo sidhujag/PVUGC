@@ -19,7 +19,7 @@ use ark_std::rand::rngs::StdRng;
 use sha2::{Digest, Sha256};
 
 use sp1_sdk::{ProverClient, SP1Stdin, HashableKey, Prover};
-use sp1_sdk::install::groth16_circuit_artifacts_dir;
+use sp1_sdk::install::try_install_circuit_artifacts;
 
 use arkworks_groth16::sp1_bridge::{
     Sp1PublicInputs,
@@ -286,7 +286,17 @@ fn test_sp1_to_pvugc_real() {
     let inner_proof = parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
 
     // Load the Groth16 verifying key from the *same artifacts dir SP1 used*.
-    let artifacts_dir = groth16_circuit_artifacts_dir();
+    let artifacts_dir = match std::env::var("SP1_DEV") {
+        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {
+            // In dev mode, SP1 builds wrapper artifacts into ~/.sp1/circuits/dev.
+            dirs::home_dir()
+                .expect("home dir")
+                .join(".sp1")
+                .join("circuits")
+                .join("dev")
+        }
+        _ => try_install_circuit_artifacts("groth16"),
+    };
     let groth16_vk_path = artifacts_dir.join("groth16_vk.bin");
     let vk_bytes = std::fs::read(&groth16_vk_path).unwrap_or_else(|e| {
         panic!("read groth16_vk.bin at {}: {e}", groth16_vk_path.display())
