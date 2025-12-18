@@ -251,30 +251,50 @@ fn test_sp1_to_pvugc_simulated() {
 #[test]
 #[ignore] // Run with: SP1_PROVER=network cargo test test_sp1_to_pvugc_real -- --ignored
 fn test_sp1_to_pvugc_real() {
-    println!("\n=== SP1 → PVUGC Real E2E Test ===\n");
+    use ark_ec::pairing::Pairing;
+    use ark_ff::BigInteger;
+    use arkworks_groth16::ppe::compute_baked_target;
+    use arkworks_groth16::prover_lean::prove_lean_with_randomizers;
+    use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples;
+    use std::collections::HashMap;
+
+    println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify, quotient-gap setup) ===\n");
     
     // Compatibility: older SP1 guest ELFs may still use deprecated file descriptors
     // (e.g. fd=3 for public values) which are rejected by SP1 >= v4 unless explicitly allowed.
     // This is test-only to keep CI/dev flows working while ELFs are refreshed.
     std::env::set_var("SP1_ALLOW_DEPRECATED_HOOKS", "true");
     
-    let _rng = StdRng::seed_from_u64(42);
+    let mut rng = StdRng::seed_from_u64(42);
+    type Cycle = Bls12Bw6Cycle;
 
-    // Step 1: Generate 2 real SP1 Groth16 proofs (same program VK, same wrapper VK; different statements).
-    println!("Step 1: Generating 2 SP1 Groth16 proofs...");
+    // Step 1: Generate N=3 real SP1 Groth16 proofs to provide n+1 samples for quotient-gap setup
+    // (here n=2 public inputs → need 3 samples). These proofs are ONLY used to compute the
+    // standard–lean C-gap (q_const). They are not the "runtime" proof we verify end-to-end.
+    println!("Step 1: Generating 3 SP1 Groth16 proofs (setup samples for quotient-gap)...");
     let client = ProverClient::from_env();
     
     let (pk, vk) = client.setup(FIBONACCI_ELF);
 
     let mut stdin_1 = SP1Stdin::new();
     stdin_1.write(&10u32);
-    let sp1_proof_1 = client.prove(&pk, &stdin_1).groth16().run().expect("proving #1 failed");
+    let sp1_sample_1 = client.prove(&pk, &stdin_1).groth16().run().expect("sample proving #1 failed");
 
     let mut stdin_2 = SP1Stdin::new();
     stdin_2.write(&11u32);
-    let sp1_proof_2 = client.prove(&pk, &stdin_2).groth16().run().expect("proving #2 failed");
+    let sp1_sample_2 = client.prove(&pk, &stdin_2).groth16().run().expect("sample proving #2 failed");
 
-    println!("  ✓ SP1 proofs generated");
+    let mut stdin_3 = SP1Stdin::new();
+    stdin_3.write(&12u32);
+    let sp1_sample_3 = client.prove(&pk, &stdin_3).groth16().run().expect("sample proving #3 failed");
+
+    // Separate "runtime" proof: this is the proof we actually connect to the outer circuit
+    // and verify via the lean prover + baked target.
+    let mut stdin_rt = SP1Stdin::new();
+    stdin_rt.write(&20u32);
+    let sp1_runtime = client.prove(&pk, &stdin_rt).groth16().run().expect("runtime proving failed");
+
+    println!("  ✓ SP1 proofs generated (3 setup samples + 1 runtime)");
     println!("  Program vkey_hash (same program): {}", vk.bytes32());
     
     // Step 2: Bridge to arkworks
@@ -293,11 +313,19 @@ fn test_sp1_to_pvugc_real() {
     };
     // Grab the Groth16 wrapper VK hash that SP1 embedded into each proof, and ensure both
     // proofs refer to the same wrapper VK.
-    let groth16_vkey_hash_expected = match &sp1_proof_1.proof {
+    let groth16_vkey_hash_expected = match &sp1_sample_1.proof {
         sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
         other => panic!("expected Groth16 proof, got {other}"),
     };
-    let groth16_vkey_hash_2 = match &sp1_proof_2.proof {
+    let groth16_vkey_hash_2 = match &sp1_sample_2.proof {
+        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
+        other => panic!("expected Groth16 proof, got {other}"),
+    };
+    let groth16_vkey_hash_3 = match &sp1_sample_3.proof {
+        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
+        other => panic!("expected Groth16 proof, got {other}"),
+    };
+    let groth16_vkey_hash_rt = match &sp1_runtime.proof {
         sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
         other => panic!("expected Groth16 proof, got {other}"),
     };
@@ -305,82 +333,109 @@ fn test_sp1_to_pvugc_real() {
         groth16_vkey_hash_expected, groth16_vkey_hash_2,
         "expected both proofs to reference the same Groth16 wrapper verifying key"
     );
+    assert_eq!(
+        groth16_vkey_hash_expected, groth16_vkey_hash_3,
+        "expected all proofs to reference the same Groth16 wrapper verifying key"
+    );
+    assert_eq!(
+        groth16_vkey_hash_expected, groth16_vkey_hash_rt,
+        "expected runtime proof to reference the same Groth16 wrapper verifying key"
+    );
 
     let groth16_vk_path = artifacts_dir.join("groth16_vk.bin");
     let vk_bytes = std::fs::read(&groth16_vk_path).unwrap_or_else(|e| {
         panic!("read groth16_vk.bin at {}: {e}", groth16_vk_path.display())
     });
-    let vk_hash = Sha256::digest(&vk_bytes);
-    assert_eq!(
-        vk_hash.as_slice(),
-        groth16_vkey_hash_expected.as_slice(),
-        "sha256(groth16_vk.bin) must match proof.groth16_vkey_hash"
-    );
-    println!(
-        "  Groth16 VK bytes: {} (sha256[0..4]={:02x}{:02x}{:02x}{:02x}, proof.groth16_vkey_hash[0..4]={:02x}{:02x}{:02x}{:02x})",
-        vk_bytes.len(),
-        vk_hash[0], vk_hash[1], vk_hash[2], vk_hash[3],
-        groth16_vkey_hash_expected[0],
-        groth16_vkey_hash_expected[1],
-        groth16_vkey_hash_expected[2],
-        groth16_vkey_hash_expected[3],
-    );
     let inner_vk = parse_gnark_vk_bls12_377(&vk_bytes).expect("parse gnark raw vk");
-    let inner_pvk = prepare_verifying_key(&inner_vk);
 
-    let verify_one = |label: &str, proof: &sp1_sdk::SP1Proof| {
-        // Extract the gnark `WriteRawTo` proof bytes from SP1 (hex).
-        // This is the canonical bridge format in this repo (not Solidity encoding).
-        let (raw_proof_hex, public_inputs_hex, groth16_vkey_hash) = match proof {
-            sp1_sdk::SP1Proof::Groth16(p) => {
-                (p.raw_proof.clone(), p.public_inputs.clone(), p.groth16_vkey_hash)
-            }
+    // Helper: map statement -> bridged inner proof for the sampled statements only.
+    let stmt_key = |s: &[<Cycle as RecursionCycle>::InnerE::ScalarField]| -> Vec<u8> {
+        s.iter().flat_map(|x| x.into_bigint().to_bytes_le()).collect()
+    };
+
+    let bridge_sp1 = |proof: &sp1_sdk::SP1Proof| -> (Vec<Fr377>, Proof<Bls12_377>) {
+        let (raw_proof_hex, public_inputs_hex) = match proof {
+            sp1_sdk::SP1Proof::Groth16(p) => (p.raw_proof.clone(), p.public_inputs.clone()),
             other => panic!("expected Groth16 proof, got {other}"),
         };
 
-        // Show that both proofs are using the same Groth16 wrapper VK bytes (hash matches).
-        println!(
-            "  [{label}] proof.groth16_vkey_hash[0..4]={:02x}{:02x}{:02x}{:02x}",
-            groth16_vkey_hash[0],
-            groth16_vkey_hash[1],
-            groth16_vkey_hash[2],
-            groth16_vkey_hash[3],
-        );
-
         let proof_bytes = decode_sp1_proof_hex(&raw_proof_hex).expect("decode raw_proof hex");
-        let inner_proof =
-            parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
+        let inner_proof = parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
 
-        // Decode SP1's two public inputs.
-        let vkey_hash_fe =
-            decode_sp1_public_input(&public_inputs_hex[0]).expect("decode vkey_hash");
+        // Decode SP1's two public inputs (Fr377).
+        let vkey_hash_fe = decode_sp1_public_input(&public_inputs_hex[0]).expect("decode vkey_hash");
         let committed_values_digest_fe =
             decode_sp1_public_input(&public_inputs_hex[1]).expect("decode committed_values_digest");
-        let inner_public_inputs = vec![vkey_hash_fe, committed_values_digest_fe];
-
-        // Sanity checks: ensure VK expects exactly these public inputs.
-        assert_eq!(
-            inner_vk.gamma_abc_g1.len(),
-            1 + inner_public_inputs.len(),
-            "VK IC length mismatch: gamma_abc_g1.len() must equal 1 + num_public_inputs"
-        );
-        println!(
-            "  [{label}] Decoded public inputs (decimal): vkey_hash={}, committed_values_digest={}",
-            inner_public_inputs[0], inner_public_inputs[1],
-        );
-
-        assert!(
-            Groth16::<Bls12_377>::verify_proof(&inner_pvk, &inner_proof, &inner_public_inputs)
-                .unwrap(),
-            "[{label}] arkworks verification failed for bridged gnark proof"
-        );
-        println!("  [{label}] ✓ Bridged gnark proof verified in arkworks");
+        let statement = vec![vkey_hash_fe, committed_values_digest_fe];
+        (statement, inner_proof)
     };
 
-    verify_one("proof#1", &sp1_proof_1.proof);
-    verify_one("proof#2", &sp1_proof_2.proof);
+    let (s1, p1) = bridge_sp1(&sp1_sample_1.proof);
+    let (s2, p2) = bridge_sp1(&sp1_sample_2.proof);
+    let (s3, p3) = bridge_sp1(&sp1_sample_3.proof);
+    let (s_rt, p_rt) = bridge_sp1(&sp1_runtime.proof);
 
-    println!("\n=== SP1 → PVUGC Real E2E Test (2x bridge verify, same VK) PASSED ===");
+    // Need exactly n+1 samples where n = #inner public inputs (=2 for SP1 Groth16 wrapper).
+    assert_eq!(s1.len(), 2);
+    assert_eq!(s2.len(), 2);
+    assert_eq!(s3.len(), 2);
+
+    // Step 3: Outer setup (Groth16 over BW6-761) + PVUGC lean setup (computes quotient gap)
+    println!("\nStep 3: Outer setup + PVUGC lean setup (compute q_const from gap)...");
+    let (pk_outer, vk_outer) =
+        setup_outer_params_for::<Cycle>(&inner_vk, /*num_inner_public_inputs=*/ 2, &mut rng)
+            .expect("outer setup failed");
+
+    let mut proof_by_stmt: HashMap<Vec<u8>, Proof<Bls12_377>> = HashMap::new();
+    proof_by_stmt.insert(stmt_key(&s1), p1.clone());
+    proof_by_stmt.insert(stmt_key(&s2), p2.clone());
+    proof_by_stmt.insert(stmt_key(&s3), p3.clone());
+
+    let sample_statements = vec![s1.clone(), s2.clone(), s3.clone()];
+    let inner_proof_generator = move |statement: &[Fr377]| -> Proof<Bls12_377> {
+        let k = stmt_key(statement);
+        proof_by_stmt
+            .get(&k)
+            .cloned()
+            .unwrap_or_else(|| panic!("no cached inner proof for requested statement (len={})", statement.len()))
+    };
+
+    let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for_with_samples::<Cycle, _>(
+        &pk_outer,
+        &inner_vk,
+        inner_proof_generator,
+        sample_statements,
+    );
+    println!("  ✓ PVUGC lean setup complete");
+
+    // Step 4: Prove outer with Lean prover and verify with baked target (no standard Groth16 verify here).
+    println!("\nStep 4: Lean-prove outer circuit for runtime SP1 statement and verify with baked target...");
+    let verify_lean_outer =
+        |label: &str, statement: &[Fr377], inner_proof: &Proof<Bls12_377>| {
+            let circuit = OuterCircuit::<Cycle>::new(inner_vk.clone(), statement.to_vec(), inner_proof.clone());
+            let r = OuterScalar::<Cycle>::rand(&mut rng);
+            let s = OuterScalar::<Cycle>::rand(&mut rng);
+            let (proof_outer_lean, _assignment) =
+                prove_lean_with_randomizers(&lean_pk, circuit, r, s).expect("lean proving failed");
+
+            let public_inputs_outer: Vec<OuterScalar<Cycle>> =
+                statement.iter().map(|x| fr_inner_to_outer_for::<Cycle>(x)).collect();
+            let r_baked = compute_baked_target(&vk_outer, &pvugc_vk, &public_inputs_outer)
+                .expect("compute baked target");
+
+            let lhs = <Cycle as RecursionCycle>::OuterE::pairing(proof_outer_lean.a, proof_outer_lean.b);
+            let rhs =
+                r_baked + <Cycle as RecursionCycle>::OuterE::pairing(proof_outer_lean.c, vk_outer.delta_g2);
+            assert_eq!(lhs, rhs, "[{label}] Lean outer proof failed baked-target verification");
+            println!("  ✓ [{label}] Lean outer proof verified (baked target)");
+        };
+
+    // Runtime: verify the actual proof we want to connect to the outer circuit.
+    verify_lean_outer("runtime#1", &s_rt, &p_rt);
+    // And show a second outer proof for the same runtime statement verifies too (fresh outer randomness).
+    verify_lean_outer("runtime#2", &s_rt, &p_rt);
+
+    println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify) PASSED ===");
 }
 
 #[test]
