@@ -280,21 +280,7 @@ fn test_sp1_to_pvugc_real() {
     let inner_proof = parse_gnark_proof_bls12_377(&proof_bytes).expect("parse gnark raw proof");
 
     // Load the Groth16 verifying key from the *same artifacts dir SP1 used*.
-    //
-    // - If SP1_DEV=1: SP1 builds artifacts in ~/.sp1/circuits/dev
-    // - Else: SP1 loads artifacts from $SP1_GROTH16_CIRCUIT_PATH/<SP1_CIRCUIT_VERSION>/
-    let is_dev = std::env::var("SP1_DEV")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false);
-    let artifacts_dir = if is_dev {
-        let home = std::env::var_os("HOME").expect("HOME not set");
-        std::path::PathBuf::from(home)
-            .join(".sp1")
-            .join("circuits")
-            .join("dev")
-    } else {
-        versioned.clone()
-    };
+    let artifacts_dir = sp1_sdk::groth16_circuit_artifacts_dir();
     let groth16_vk_path = artifacts_dir.join("groth16_vk.bin");
     let vk_bytes = std::fs::read(&groth16_vk_path).unwrap_or_else(|e| {
         panic!("read groth16_vk.bin at {}: {e}", groth16_vk_path.display())
