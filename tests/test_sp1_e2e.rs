@@ -257,6 +257,12 @@ fn test_sp1_to_pvugc_real() {
     use arkworks_groth16::ppe::compute_baked_target;
     use arkworks_groth16::prover_lean::prove_lean_with_randomizers;
     use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples;
+    use arkworks_groth16::pvugc_outer::{
+        arm_columns_outer_for, build_column_bases_outer_for, compute_r_to_rho_outer_for,
+        compute_target_outer_for,
+    };
+    use arkworks_groth16::decap::build_commitments;
+    use arkworks_groth16::ct::gt_eq_ct;
     use std::collections::HashMap;
 
     println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify, quotient-gap setup) ===\n");
@@ -450,13 +456,25 @@ fn test_sp1_to_pvugc_real() {
     println!("  ✓ PVUGC lean setup complete");
 
     // Step 4: Prove outer with Lean prover and verify with baked target (no standard Groth16 verify here).
-    println!("\nStep 4: Lean-prove outer circuit for runtime SP1 statement and verify with baked target...");
-    let mut verify_lean_outer =
+    println!("\nStep 4: Lean-prove outer circuit for runtime SP1 statement and verify full pipeline (baked target + PVUGC decap)...");
+
+    // Arm once for the runtime statement. In PVUGC this simulates the deposit-side arming.
+    let rho = OuterScalar::<Cycle>::rand(&mut rng);
+    let public_inputs_outer_rt: Vec<OuterScalar<Cycle>> =
+        s_rt.iter().map(|x| fr_inner_to_outer_for::<Cycle>(x)).collect();
+    let bases_rt = build_column_bases_outer_for::<Cycle>(&pvugc_vk, &vk_outer, &public_inputs_outer_rt);
+    let col_arms_rt = arm_columns_outer_for::<Cycle>(&bases_rt, &rho);
+
+    // Expected extracted key for runtime statement: K = R(vk,x)^ρ.
+    let r_target_rt = compute_target_outer_for::<Cycle>(&vk_outer, &pvugc_vk, &s_rt);
+    let k_expected_rt = compute_r_to_rho_outer_for::<Cycle>(&r_target_rt, &rho);
+
+    let mut prove_verify_and_decap =
         |label: &str, statement: &[Fr377], inner_proof: &Proof<Bls12_377>| {
             let circuit = OuterCircuit::<Cycle>::new(inner_vk.clone(), statement.to_vec(), inner_proof.clone());
             let r = OuterScalar::<Cycle>::rand(&mut rng);
             let s = OuterScalar::<Cycle>::rand(&mut rng);
-            let (proof_outer_lean, _assignment) =
+            let (proof_outer_lean, assignment) =
                 prove_lean_with_randomizers(&lean_pk, circuit, r, s).expect("lean proving failed");
 
             let public_inputs_outer: Vec<OuterScalar<Cycle>> =
@@ -468,13 +486,35 @@ fn test_sp1_to_pvugc_real() {
             let rhs =
                 r_baked + <Cycle as RecursionCycle>::OuterE::pairing(proof_outer_lean.c, vk_outer.delta_g2);
             assert_eq!(lhs, rhs, "[{label}] Lean outer proof failed baked-target verification");
-            println!("  ✓ [{label}] Lean outer proof verified (baked target)");
+
+            // PVUGC decap: extract K = R^ρ from the outer proof using armed bases.
+            let num_instance = vk_outer.gamma_abc_g1.len();
+            let commitments = build_commitments::<<Cycle as RecursionCycle>::OuterE>(
+                &proof_outer_lean.a,
+                &proof_outer_lean.c,
+                &s,
+                &assignment,
+                num_instance,
+            );
+            let k_decapped =
+                arkworks_groth16::decap::decap(&commitments, &col_arms_rt).expect("decap failed");
+            assert!(
+                gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected_rt),
+                "[{label}] decapped key mismatch: expected R^rho for runtime statement"
+            );
+
+            println!("  ✓ [{label}] Lean outer proof verified (baked target) + PVUGC decap ok");
+            k_decapped
         };
 
     // Runtime: verify the actual proof we want to connect to the outer circuit.
-    verify_lean_outer("runtime#1", &s_rt, &p_rt);
+    let k1 = prove_verify_and_decap("runtime#1", &s_rt, &p_rt);
     // And show a second outer proof for the same runtime statement verifies too (fresh outer randomness).
-    verify_lean_outer("runtime#2", &s_rt, &p_rt);
+    let k2 = prove_verify_and_decap("runtime#2", &s_rt, &p_rt);
+    assert!(
+        gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k1, &k2),
+        "proof-agnostic decap failed: two outer proofs for same statement should decap to same key"
+    );
 
     println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify) PASSED ===");
 }
