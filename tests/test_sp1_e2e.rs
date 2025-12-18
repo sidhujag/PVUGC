@@ -35,6 +35,7 @@ use arkworks_groth16::outer_compressed::{
 /// Simple fibonacci program for SP1
 /// This is the ELF binary that SP1 will execute and prove
 const FIBONACCI_ELF: &[u8] = test_artifacts::FIBONACCI_ELF;
+const SSZ_WITHDRAWALS_ELF: &[u8] = test_artifacts::SSZ_WITHDRAWALS_ELF;
 
 #[test]
 #[ignore] // Run with: cargo test test_sp1_fibonacci_mock -- --ignored
@@ -274,28 +275,51 @@ fn test_sp1_to_pvugc_real() {
     println!("Step 1: Generating 3 SP1 Groth16 proofs (setup samples for quotient-gap)...");
     let client = ProverClient::from_env();
     
-    let (pk, vk) = client.setup(FIBONACCI_ELF);
+    // Two different programs → different SP1 program vk/pk (and critically different vkey_hash),
+    // while the Groth16 wrapper VK remains shared for a fixed SP1 build/config.
+    let (pk_fib, vk_fib) = client.setup(FIBONACCI_ELF);
+    let (pk_ssz, vk_ssz) = client.setup(SSZ_WITHDRAWALS_ELF);
 
     let mut stdin_1 = SP1Stdin::new();
     stdin_1.write(&10u32);
-    let sp1_sample_1 = client.prove(&pk, &stdin_1).groth16().run().expect("sample proving #1 failed");
+    let sp1_sample_1 = client
+        .prove(&pk_fib, &stdin_1)
+        .groth16()
+        .run()
+        .expect("sample proving #1 (fib) failed");
 
     let mut stdin_2 = SP1Stdin::new();
     stdin_2.write(&11u32);
-    let sp1_sample_2 = client.prove(&pk, &stdin_2).groth16().run().expect("sample proving #2 failed");
+    let sp1_sample_2 = client
+        .prove(&pk_fib, &stdin_2)
+        .groth16()
+        .run()
+        .expect("sample proving #2 (fib) failed");
 
+    // Third sample comes from a DIFFERENT program so vkey_hash differs, ensuring the
+    // (n+1)x(n+1) sample matrix is invertible for n=2.
     let mut stdin_3 = SP1Stdin::new();
-    stdin_3.write(&12u32);
-    let sp1_sample_3 = client.prove(&pk, &stdin_3).groth16().run().expect("sample proving #3 failed");
+    // SSZ program's stdin format differs; use its committed input (empty/default stdin works for many
+    // programs, but if this fails we'll swap to a serialized input blob).
+    let sp1_sample_3 = client
+        .prove(&pk_ssz, &stdin_3)
+        .groth16()
+        .run()
+        .expect("sample proving #3 (ssz-withdrawals) failed");
 
     // Separate "runtime" proof: this is the proof we actually connect to the outer circuit
     // and verify via the lean prover + baked target.
     let mut stdin_rt = SP1Stdin::new();
     stdin_rt.write(&20u32);
-    let sp1_runtime = client.prove(&pk, &stdin_rt).groth16().run().expect("runtime proving failed");
+    let sp1_runtime = client
+        .prove(&pk_fib, &stdin_rt)
+        .groth16()
+        .run()
+        .expect("runtime proving (fib) failed");
 
     println!("  ✓ SP1 proofs generated (3 setup samples + 1 runtime)");
-    println!("  Program vkey_hash (same program): {}", vk.bytes32());
+    println!("  Program vkey_hash (fib): {}", vk_fib.bytes32());
+    println!("  Program vkey_hash (ssz-withdrawals): {}", vk_ssz.bytes32());
     
     // Step 2: Bridge to arkworks
     println!("\nStep 2: Bridging to arkworks...");
@@ -392,8 +416,25 @@ fn test_sp1_to_pvugc_real() {
     proof_by_stmt.insert(stmt_key(&s3), p3.clone());
 
     let sample_statements = vec![s1.clone(), s2.clone(), s3.clone()];
+    println!("  Sample statements passed to gap-setup (n+1 = {} samples):", sample_statements.len());
+    for (i, s) in sample_statements.iter().enumerate() {
+        println!("    sample[{i}]: x0={}, x1={}", s[0], s[1]);
+    }
     let inner_proof_generator = move |statement: &[Fr377]| -> Proof<Bls12_377> {
         let k = stmt_key(statement);
+        // Debug: show that setup enumerates distinct sample statements.
+        let prefix_len = core::cmp::min(8, k.len());
+        let mut prefix = String::new();
+        for b in &k[..prefix_len] {
+            prefix.push_str(&format!("{:02x}", b));
+        }
+        println!(
+            "  [inner_proof_generator] called with x0={}, x1={} (k_prefix={}.., k_len={})",
+            statement.get(0).copied().unwrap_or_else(Fr377::zero),
+            statement.get(1).copied().unwrap_or_else(Fr377::zero),
+            prefix,
+            k.len()
+        );
         proof_by_stmt
             .get(&k)
             .cloned()

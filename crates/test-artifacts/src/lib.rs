@@ -6,4 +6,8 @@
 /// Prebuilt SP1 guest ELF used by PVUGC tests.
 pub const FIBONACCI_ELF: &[u8] = include_bytes!("../elf/fibonacci.elf");
 
+/// Additional prebuilt SP1 guest ELFs (committed blobs) used by PVUGC tests.
+pub const SSZ_WITHDRAWALS_ELF: &[u8] = include_bytes!("../elf/ssz-withdrawals.elf");
+pub const TENDERMINT_ELF: &[u8] = include_bytes!("../elf/tendermint.elf");
+
 
