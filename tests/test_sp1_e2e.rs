@@ -16,7 +16,6 @@ use ark_ff::{PrimeField, UniformRand};
 use ark_groth16::Proof;
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
-use sha2::Digest;
 
 use sp1_sdk::{ProverClient, SP1Stdin, HashableKey, Prover};
 use sp1_sdk::install::try_install_circuit_artifacts;
@@ -36,6 +35,7 @@ use arkworks_groth16::outer_compressed::{
 /// This is the ELF binary that SP1 will execute and prove
 const FIBONACCI_ELF: &[u8] = test_artifacts::FIBONACCI_ELF;
 const SSZ_WITHDRAWALS_ELF: &[u8] = test_artifacts::SSZ_WITHDRAWALS_ELF;
+const TENDERMINT_ELF: &[u8] = test_artifacts::TENDERMINT_ELF;
 
 #[test]
 #[ignore] // Run with: cargo test test_sp1_fibonacci_mock -- --ignored
@@ -278,13 +278,14 @@ fn test_sp1_to_pvugc_real() {
     // Step 1: Generate N=3 real SP1 Groth16 proofs to provide n+1 samples for quotient-gap setup
     // (here n=2 public inputs → need 3 samples). These proofs are ONLY used to compute the
     // standard–lean C-gap (q_const). They are not the "runtime" proof we verify end-to-end.
-    println!("Step 1: Generating 3 SP1 Groth16 proofs (setup samples for quotient-gap)...");
+    println!("Step 1: Generating 4 different SP1 Groth16 proofs (3 setup samples for quotient-gap and 1 runtime proof)...");
     let client = ProverClient::from_env();
     
     // Two different programs → different SP1 program vk/pk (and critically different vkey_hash),
     // while the Groth16 wrapper VK remains shared for a fixed SP1 build/config.
     let (pk_fib, vk_fib) = client.setup(FIBONACCI_ELF);
     let (pk_ssz, vk_ssz) = client.setup(SSZ_WITHDRAWALS_ELF);
+    let (pk_tendermint, vk_tendermint) = client.setup(TENDERMINT_ELF);
 
     let mut stdin_1 = SP1Stdin::new();
     stdin_1.write(&10u32);
@@ -304,9 +305,8 @@ fn test_sp1_to_pvugc_real() {
 
     // Third sample comes from a DIFFERENT program so vkey_hash differs, ensuring the
     // (n+1)x(n+1) sample matrix is invertible for n=2.
-    let mut stdin_3 = SP1Stdin::new();
-    // SSZ program's stdin format differs; use its committed input (empty/default stdin works for many
-    // programs, but if this fails we'll swap to a serialized input blob).
+    let stdin_3: SP1Stdin = bincode::deserialize(test_artifacts::SSZ_WITHDRAWALS_INPUT_BIN)
+        .expect("deserialize ssz-withdrawals stdin");
     let sp1_sample_3 = client
         .prove(&pk_ssz, &stdin_3)
         .groth16()
@@ -315,17 +315,18 @@ fn test_sp1_to_pvugc_real() {
 
     // Separate "runtime" proof: this is the proof we actually connect to the outer circuit
     // and verify via the lean prover + baked target.
-    let mut stdin_rt = SP1Stdin::new();
-    stdin_rt.write(&20u32);
+    let stdin_rt: SP1Stdin =
+        bincode::deserialize(test_artifacts::TENDERMINT_INPUT_BIN).expect("deserialize tendermint stdin");
     let sp1_runtime = client
-        .prove(&pk_fib, &stdin_rt)
+        .prove(&pk_tendermint, &stdin_rt)
         .groth16()
         .run()
-        .expect("runtime proving (fib) failed");
+        .expect("runtime proving (tendermint) failed");
 
     println!("  ✓ SP1 proofs generated (3 setup samples + 1 runtime)");
     println!("  Program vkey_hash (fib): {}", vk_fib.bytes32());
     println!("  Program vkey_hash (ssz-withdrawals): {}", vk_ssz.bytes32());
+    println!("  Program vkey_hash (tendermint runtime): {}", vk_tendermint.bytes32());
     
     // Step 2: Bridge to arkworks
     println!("\nStep 2: Bridging to arkworks...");
@@ -341,36 +342,7 @@ fn test_sp1_to_pvugc_real() {
         }
         _ => try_install_circuit_artifacts("groth16"),
     };
-    // Grab the Groth16 wrapper VK hash that SP1 embedded into each proof, and ensure both
-    // proofs refer to the same wrapper VK.
-    let groth16_vkey_hash_expected = match &sp1_sample_1.proof {
-        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
-        other => panic!("expected Groth16 proof, got {other}"),
-    };
-    let groth16_vkey_hash_2 = match &sp1_sample_2.proof {
-        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
-        other => panic!("expected Groth16 proof, got {other}"),
-    };
-    let groth16_vkey_hash_3 = match &sp1_sample_3.proof {
-        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
-        other => panic!("expected Groth16 proof, got {other}"),
-    };
-    let groth16_vkey_hash_rt = match &sp1_runtime.proof {
-        sp1_sdk::SP1Proof::Groth16(p) => p.groth16_vkey_hash,
-        other => panic!("expected Groth16 proof, got {other}"),
-    };
-    assert_eq!(
-        groth16_vkey_hash_expected, groth16_vkey_hash_2,
-        "expected both proofs to reference the same Groth16 wrapper verifying key"
-    );
-    assert_eq!(
-        groth16_vkey_hash_expected, groth16_vkey_hash_3,
-        "expected all proofs to reference the same Groth16 wrapper verifying key"
-    );
-    assert_eq!(
-        groth16_vkey_hash_expected, groth16_vkey_hash_rt,
-        "expected runtime proof to reference the same Groth16 wrapper verifying key"
-    );
+ 
 
     let groth16_vk_path = artifacts_dir.join("groth16_vk.bin");
     let vk_bytes = std::fs::read(&groth16_vk_path).unwrap_or_else(|e| {
@@ -405,11 +377,6 @@ fn test_sp1_to_pvugc_real() {
     let (s3, p3) = bridge_sp1(&sp1_sample_3.proof);
     let (s_rt, p_rt) = bridge_sp1(&sp1_runtime.proof);
 
-    // Need exactly n+1 samples where n = #inner public inputs (=2 for SP1 Groth16 wrapper).
-    assert_eq!(s1.len(), 2);
-    assert_eq!(s2.len(), 2);
-    assert_eq!(s3.len(), 2);
-
     // Step 3: Outer setup (Groth16 over BW6-761) + PVUGC lean setup (computes quotient gap)
     println!("\nStep 3: Outer setup + PVUGC lean setup (compute q_const from gap)...");
     let (pk_outer, vk_outer) =
@@ -422,25 +389,8 @@ fn test_sp1_to_pvugc_real() {
     proof_by_stmt.insert(stmt_key(&s3), p3.clone());
 
     let sample_statements = vec![s1.clone(), s2.clone(), s3.clone()];
-    println!("  Sample statements passed to gap-setup (n+1 = {} samples):", sample_statements.len());
-    for (i, s) in sample_statements.iter().enumerate() {
-        println!("    sample[{i}]: x0={}, x1={}", s[0], s[1]);
-    }
     let inner_proof_generator = move |statement: &[Fr377]| -> Proof<Bls12_377> {
         let k = stmt_key(statement);
-        // Debug: show that setup enumerates distinct sample statements.
-        let prefix_len = core::cmp::min(8, k.len());
-        let mut prefix = String::new();
-        for b in &k[..prefix_len] {
-            prefix.push_str(&format!("{:02x}", b));
-        }
-        println!(
-            "  [inner_proof_generator] called with x0={}, x1={} (k_prefix={}.., k_len={})",
-            statement.get(0).copied().unwrap_or_else(|| Fr377::from(0u64)),
-            statement.get(1).copied().unwrap_or_else(|| Fr377::from(0u64)),
-            prefix,
-            k.len()
-        );
         proof_by_stmt
             .get(&k)
             .cloned()

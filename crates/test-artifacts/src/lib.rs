@@ -10,4 +10,8 @@ pub const FIBONACCI_ELF: &[u8] = include_bytes!("../elf/fibonacci.elf");
 pub const SSZ_WITHDRAWALS_ELF: &[u8] = include_bytes!("../elf/ssz-withdrawals.elf");
 pub const TENDERMINT_ELF: &[u8] = include_bytes!("../elf/tendermint.elf");
 
+/// Serialized `SP1Stdin` blobs (bincode) from SP1's eval harness.
+pub const SSZ_WITHDRAWALS_INPUT_BIN: &[u8] = include_bytes!("../inputs/ssz-withdrawals.input.bin");
+pub const TENDERMINT_INPUT_BIN: &[u8] = include_bytes!("../inputs/tendermint.input.bin");
+
 

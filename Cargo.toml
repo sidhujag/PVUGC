@@ -107,6 +107,7 @@ tracing = "0.1"
 tracing-subscriber = "=0.2.25"
 serial_test = "2.0"
 test-artifacts = { path = "crates/test-artifacts" }
+bincode = "1"
 
 [patch.crates-io]
 ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }
