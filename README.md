@@ -88,7 +88,59 @@ src/
 
 ark-groth16-pvugc/           # Standard Groth16 implementation
 ```
-
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          LEVEL 0: APP PROOFS                                 │
+│                                                                              │
+│   VDF₀    VDF₁    Fib₀    Fib₁    BTC₀    BTC₁                              │
+│     │       │       │       │       │       │                                │
+│     └───┬───┘       └───┬───┘       └───┬───┘                                │
+│         ▼               ▼               ▼                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                    LEVEL 1: LEAF VERIFIER AIRs                               │
+│                                                                              │
+│   VerifierAir₀         VerifierAir₁         VerifierAir₂                    │
+│   (verifies 2 VDFs)    (verifies 2 Fibs)    (verifies 2 BTCs)               │
+│                                                                              │
+│   OOD uses: evaluate_child_constraints(VdfLike)                             │
+│             evaluate_child_constraints(FibLike)  ← APP-SPECIFIC             │
+│             evaluate_child_constraints(BTCLike)                              │
+│                                                                              │
+│   Output: VerifierAir proofs (all same AIR type!)                           │
+│         │               │               │                                    │
+│         └───────┬───────┴───────┬───────┘                                    │
+│                 ▼               ▼                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                    LEVEL 2+: AGGREGATOR VERIFIER AIRs                        │
+│                                                                              │
+│            VerifierAir₃              VerifierAir₄                            │
+│            (verifies VA₀ + VA₁)      (verifies VA₂ + ...)                   │
+│                                                                              │
+│   OOD uses: evaluate_child_constraints(VerifierAir) ← SAME AS evaluate_all! │
+│                                                                              │
+│   Output: VerifierAir proofs                                                 │
+│                 │                         │                                  │
+│                 └────────────┬────────────┘                                  │
+│                              ▼                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                         FINAL AGGREGATOR                                     │
+│                                                                              │
+│                      VerifierAir_final                                       │
+│                      (verifies 2 VerifierAir proofs)                        │
+│                                                                              │
+│   OOD uses: evaluate_child_constraints(VerifierAir)                         │
+│                                                                              │
+│   Output: Single VerifierAir proof                                          │
+│                              │                                               │
+│                              ▼                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                           GROTH16 (R1CS)                                     │
+│                                                                              │
+│   Verifies: VerifierAir_final proof                                         │
+│   OOD uses: evaluate_verifier_air_constraints_gl() ← HARDCODED (~900 mono)  │
+│             (R1CS equivalent of evaluate_all)                                │
+│                                                                              │
+│   Output: Groth16 proof (constant size, instant verify)                     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ### 5.2 Build and Test
 
 ```bash

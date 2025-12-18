@@ -19,7 +19,7 @@ use crate::outer_compressed::{
     cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle},
     DefaultCycle, InnerScalar, OuterScalar, RecursionCycle,
 };
-use crate::test_circuits::AddCircuit;
+use crate::test_circuits::{AddCircuit, TwoInputCircuit};
 
 /// Generic global fixture: Inner and Outer PK/VK for a recursion cycle
 #[derive(Clone)]
@@ -160,5 +160,79 @@ pub fn get_fixture_bls() -> BlsFixture {
 /// Get the global fixture for the MNT4/MNT6 experimental cycle
 pub fn get_fixture_mnt() -> MntFixture {
     let guard = GLOBAL_FIXTURE_MNT.lock().unwrap();
+    guard.clone()
+}
+
+// --- Two-input fixture for SP1-style circuits ---
+
+fn build_fixture_two_input() -> GlobalFixture<DefaultCycle> {
+    let mut rng = StdRng::seed_from_u64(999999);
+
+    // Inner keys: TwoInputCircuit on the inner curve (2 public inputs like SP1)
+    let circuit_inner = TwoInputCircuit::new(
+        InnerScalar::<DefaultCycle>::from(67890u64),
+        InnerScalar::<DefaultCycle>::from(11111u64),
+    );
+    let (pk_inner, vk_inner) =
+        Groth16::<<DefaultCycle as RecursionCycle>::InnerE>::circuit_specific_setup(circuit_inner, &mut rng)
+            .unwrap();
+
+    // Outer keys: TwoInputCircuit directly on the outer curve
+    let circuit_outer = TwoInputCircuit::new(
+        OuterScalar::<DefaultCycle>::from(67890u64),
+        OuterScalar::<DefaultCycle>::from(11111u64),
+    );
+    let (pk_outer, vk_outer) = Groth16::<<DefaultCycle as RecursionCycle>::OuterE, PvugcReduction>::circuit_specific_setup(
+        circuit_outer,
+        &mut rng,
+    )
+    .unwrap();
+
+    // Build PvugcVk from the outer proving key
+    use crate::ppe::PvugcVk;
+    use ark_ec::pairing::PairingOutput;
+
+    type OuterE = <DefaultCycle as RecursionCycle>::OuterE;
+    let t_points_dummy = vec![
+        PairingOutput(
+            <<OuterE as Pairing>::TargetField as ark_ff::Field>::ONE,
+        );
+        pk_outer.vk.gamma_abc_g1.len()
+    ];
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        pk_outer.vk.beta_g2,
+        pk_outer.vk.delta_g2,
+        pk_outer.b_g2_query.clone(),
+        t_points_dummy,
+    );
+
+    // Outer-recursive keys: setup for 2 inputs
+    let setup_start = Instant::now();
+    let (pk_outer_recursive, vk_outer_recursive) =
+        load_or_build_outer_recursive_crs::<DefaultCycle>(&vk_inner, 2);
+    let outer_setup_time = setup_start.elapsed();
+    eprintln!(
+        "[fixture:two_input] setup_outer_params (outer recursion, 2 inputs) took {:?}",
+        outer_setup_time
+    );
+
+    GlobalFixture {
+        pk_inner: Arc::new(pk_inner),
+        vk_inner: Arc::new(vk_inner),
+        pk_outer: Arc::new(pk_outer),
+        vk_outer: Arc::new(vk_outer),
+        pvugc_vk,
+        pk_outer_recursive: Arc::new(pk_outer_recursive),
+        vk_outer_recursive: Arc::new(vk_outer_recursive),
+        outer_setup_time,
+    }
+}
+
+static GLOBAL_FIXTURE_TWO_INPUT: Lazy<Mutex<DefaultFixture>> =
+    Lazy::new(|| Mutex::new(build_fixture_two_input()));
+
+/// Get the global fixture for two-input circuits (SP1-style)
+pub fn get_fixture_two_input() -> DefaultFixture {
+    let guard = GLOBAL_FIXTURE_TWO_INPUT.lock().unwrap();
     guard.clone()
 }

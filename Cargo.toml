@@ -22,6 +22,9 @@ pvugc-hooks = []
 asm = [
     "ark-ff/asm",
 ]
+# Use production SP1 Groth16 VK (from sp1-keys/production/)
+# Without this, uses empty placeholder (for dev before keys are generated)
+sp1-production-vk = []
 
 [dependencies]
 # Arkworks ecosystem (0.5 for PVUGC compatibility)
@@ -64,6 +67,9 @@ bitcoin = { version = "0.31", default-features = false, features = ["std"] }
 ark-poly = "0.5.0"
 ndarray = "0.17.1"
 
+# SP1 SDK for zkVM proving (use syscoin/sp1 fork)
+sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
+
 
 # Dev profile: optimize for faster incremental builds
 [profile.dev]
@@ -100,3 +106,7 @@ opt-level = 3
 tracing = "0.1"
 tracing-subscriber = "=0.2.25"
 serial_test = "2.0"
+test-artifacts = { git = "https://github.com/syscoin/sp1", package = "test-artifacts" }
+
+[patch.crates-io]
+ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }

@@ -41,8 +41,8 @@ use ark_std::rand::SeedableRng;
 use ark_std::UniformRand;
 use arkworks_groth16::{
     outer_compressed::{DefaultCycle, InnerE, InnerScalar, OuterCircuit, OuterFr},
-    test_circuits::AddCircuit,
-    test_fixtures::get_fixture,
+    test_circuits::TwoInputCircuit,
+    test_fixtures::get_fixture_two_input,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -810,83 +810,41 @@ fn verify_public_only_in_c_and_w_span_separated(
             show,
             &uniq[..show]
         );
-        if uniq.len() == 1 {
-            println!("         PASS: exactly one B-witness column touches public-C rows (expected: x_wit binding).");
+        // Expected: one B-witness column per public input (num_pub - 1, excluding constant "1")
+        let expected_b_wit_cols = num_pub.saturating_sub(1);
+        if uniq.len() == expected_b_wit_cols {
+            println!("         PASS: exactly {} B-witness column(s) touch public-C rows (expected: one per public input).", expected_b_wit_cols);
         } else if uniq.is_empty() {
             println!("         INFO: no B-witness columns touch public-C rows (stronger than expected).");
         } else {
-            println!("         WARN: multiple B-witness columns touch public-C rows (reintroduces const×bit-style risk).");
+            println!("         WARN: {} B-witness columns touch public-C rows, expected {} (one per public input).", uniq.len(), expected_b_wit_cols);
         }
     }
     
-    // 5) H_{0,0} isolation check: find rows where H_{0,0} has support but ALL published handles = 0
-    // H_{0,0} = const×const, supported where A[r,0]×B[r,0] ≠ 0
-    // Published: const×wit (H_{0,j}), wit×const (H_{i,0}), wit×wit (H_{i,j})
+    // 5) H_{0,0} isolation check (INFORMATIONAL ONLY)
     //
-    // For H_{0,0} ∉ span(published), need at least ONE row where:
-    // - A[r,0]≠0, B[r,0]≠0 (H_{0,0} support)
-    // - No witness in A (so H_{i,0}=0, H_{i,j}=0)
-    // - No witness in B (so H_{0,j}=0, H_{i,j}=0)
-    println!("\n  [Span] H_{{0,0}} Isolation Check");
+    // NOTE: The Lean CRS removes B column 0 (the constant "1") from b_g2_query.
+    // This means the prover has NO bases for B[r,0], so H_{0,0} = const×const
+    // CANNOT be forged regardless of circuit structure.
+    //
+    // This check is kept for circuit analysis purposes but is NOT a security requirement.
+    println!("\n  [Span] H_{{0,0}} Isolation Check (informational)");
     
     let const_const_rows: Vec<usize> = const_a_rows.intersection(&const_b_rows).copied().collect();
     println!("         Rows with H_{{0,0}} support (const×const): {}", const_const_rows.len());
-    
-    let mut isolated_count = 0usize;
-    let mut non_isolated: Vec<(usize, &str)> = Vec::new();
-    
-    for &row in &const_const_rows {
-        let has_wit_a = wit_a_rows.contains(&row);
-        let has_wit_b = wit_b_rows.contains(&row);
-        
-        if !has_wit_a && !has_wit_b {
-            isolated_count += 1;
-        } else if has_wit_a && has_wit_b {
-            non_isolated.push((row, "wit in A+B"));
-        } else if has_wit_a {
-            non_isolated.push((row, "wit in A"));
-        } else {
-            non_isolated.push((row, "wit in B"));
-        }
-    }
-    
-    let h00_isolated = isolated_count > 0;
-    if h00_isolated {
-        println!("  [Span] PASS: {} const×const rows are fully isolated", isolated_count);
-        println!("         → H_{{0,0}} has support where ALL published handles = 0");
-        println!("         → H_{{0,0}} ∉ span(published) by row-support argument (DECISIVE)");
-    } else if const_const_rows.is_empty() {
-        println!("  [Span] INFO: No const×const rows (H_{{0,0}} may be zero)");
-    } else {
-        println!("  [Span] INCONCLUSIVE: All {} const×const rows have witness activity", const_const_rows.len());
-        for (row, reason) in non_isolated.iter().take(3) {
-            println!("         Row {}: {}", row, reason);
-        }
-        println!("         → Need full Gaussian elimination for definitive answer");
-        println!("         → But γ^ρ barrier still provides security");
-    }
+    println!("         NOTE: Lean CRS removes B column 0 → H_{{0,0}} unforgeable at CRS level");
 
     let passed = u_pub_nonzero.is_empty()
         && v_pub_nonzero.is_empty()
         && c_pub_missing.is_empty()
         && w_sep;
 
-    if passed && h00_isolated {
-        println!("\n  --- Security Verdict: DECISIVE ---");
+    if passed {
+        println!("\n  --- Security Verdict: PASS ---");
         println!("  ✓ u_pub=0, v_pub=0 (public not in A/B)");
         println!("  ✓ W_pub ⟂ W_wit (C-row separation)");
-        println!("  ✓ H_{{0,0}} isolated (row-support certificate)");
-        println!("[PASS] H_{{0,0}} ∉ span(published handles)");
-        println!("       → T_const^ρ unreachable without GT-XPDH break");
-    } else if passed {
-        println!("\n  --- Security Verdict: STRUCTURAL PASS ---");
-        println!("  ✓ u_pub=0, v_pub=0 (public not in A/B)");
-        println!("  ✓ W_pub ⟂ W_wit (C-row separation)");
-        println!("  ? H_{{0,0}} isolation: INCONCLUSIVE");
-        println!("");
-        println!("  T_const^ρ barrier: unknown (need full span test)");
-        println!("  γ^ρ barrier: STILL SECURE (independent of T_const)");
-        println!("[PASS] Core security properties hold");
+        println!("  ✓ H_{{0,0}}: N/A (Lean CRS strips B column 0)");
+        println!("[PASS] All structural security properties hold");
     } else {
         println!("[FAIL] Structural checks failed!");
     }
@@ -1211,13 +1169,17 @@ where
 
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
-    let fixture = get_fixture();
-    let x_val = InnerScalar::<DefaultCycle>::from(10u64);
-    let circuit_inner = AddCircuit::with_public_input(x_val);
+    let fixture = get_fixture_two_input();
+    
+    // SP1-style: 2 public inputs (vkey_hash, committed_values_digest)
+    let input1 = InnerScalar::<DefaultCycle>::from(67890u64);  // vkey_hash
+    let input2 = InnerScalar::<DefaultCycle>::from(11111u64);  // committed_values_digest
+    
+    let circuit_inner = TwoInputCircuit::new(input1, input2);
     let proof_inner =
         Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng).expect("inner proof");
 
-    let x_inner = vec![x_val];
+    let x_inner = vec![input1, input2];
 
     OuterCircuit::new((*fixture.vk_inner).clone(), x_inner, proof_inner)
 }

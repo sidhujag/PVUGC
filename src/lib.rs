@@ -42,6 +42,9 @@ pub mod test_fixtures; // Shared fixtures with disk caching
 // Inner STARK verifier modules
 pub mod stark;
 
+// SP1 Bridge: Simplified integration for gnark proofs → PVUGC
+pub mod sp1_bridge;
+
 // Re-export STARK types for backward compatibility
 pub use stark::{AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness};
 
@@ -64,7 +67,7 @@ pub use outer_compressed::{
     cycles::{Bls12Bw6Cycle, Mnt4Mnt6Cycle},
     fr_inner_to_outer, fr_inner_to_outer_for, prove_outer, prove_outer_for, setup_outer_params,
     setup_outer_params_for, verify_outer, verify_outer_for, DefaultCycle, InnerE, InnerFr, OuterE,
-    OuterFr, RecursionCycle,
+    OuterFr, RecursionCycle, OuterCircuit,
 };
 
 // Test utilities re-exports
