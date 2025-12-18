@@ -254,6 +254,7 @@ fn test_sp1_to_pvugc_simulated() {
 fn test_sp1_to_pvugc_real() {
     use ark_ec::pairing::Pairing;
     use ark_ff::BigInteger;
+    use ark_groth16::{prepare_verifying_key, Groth16};
     use arkworks_groth16::ppe::compute_baked_target;
     use arkworks_groth16::prover_lean::prove_lean_with_randomizers;
     use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples;
@@ -313,17 +314,7 @@ fn test_sp1_to_pvugc_real() {
         .run()
         .expect("sample proving #3 (ssz-withdrawals) failed");
 
-    // Separate "runtime" proof: this is the proof we actually connect to the outer circuit
-    // and verify via the lean prover + baked target.
-    let stdin_rt: SP1Stdin =
-        bincode::deserialize(test_artifacts::TENDERMINT_INPUT_BIN).expect("deserialize tendermint stdin");
-    let sp1_runtime = client
-        .prove(&pk_tendermint, &stdin_rt)
-        .groth16()
-        .run()
-        .expect("runtime proving (tendermint) failed");
-
-    println!("  ✓ SP1 proofs generated (3 setup samples + 1 runtime)");
+    println!("  ✓ SP1 setup-sample proofs generated (3 samples)");
     println!("  Program vkey_hash (fib): {}", vk_fib.bytes32());
     println!("  Program vkey_hash (ssz-withdrawals): {}", vk_ssz.bytes32());
     println!("  Program vkey_hash (tendermint runtime): {}", vk_tendermint.bytes32());
@@ -349,13 +340,14 @@ fn test_sp1_to_pvugc_real() {
         panic!("read groth16_vk.bin at {}: {e}", groth16_vk_path.display())
     });
     let inner_vk = parse_gnark_vk_bls12_377(&vk_bytes).expect("parse gnark raw vk");
+    let inner_pvk = prepare_verifying_key(&inner_vk);
 
     // Helper: map statement -> bridged inner proof for the sampled statements only.
     let stmt_key = |s: &[Fr377]| -> Vec<u8> {
         s.iter().flat_map(|x| x.into_bigint().to_bytes_le()).collect()
     };
 
-    let bridge_sp1 = |proof: &sp1_sdk::SP1Proof| -> (Vec<Fr377>, Proof<Bls12_377>) {
+    let bridge_sp1 = |label: &str, proof: &sp1_sdk::SP1Proof| -> (Vec<Fr377>, Proof<Bls12_377>) {
         let (raw_proof_hex, public_inputs_hex) = match proof {
             sp1_sdk::SP1Proof::Groth16(p) => (p.raw_proof.clone(), p.public_inputs.clone()),
             other => panic!("expected Groth16 proof, got {other}"),
@@ -369,13 +361,18 @@ fn test_sp1_to_pvugc_real() {
         let committed_values_digest_fe =
             decode_sp1_public_input(&public_inputs_hex[1]).expect("decode committed_values_digest");
         let statement = vec![vkey_hash_fe, committed_values_digest_fe];
+
+        // Sanity: ensure the bridged proof is actually valid under arkworks for this VK + statement.
+        assert!(
+            Groth16::<Bls12_377>::verify_proof(&inner_pvk, &inner_proof, &statement).unwrap(),
+            "[{label}] bridged gnark proof failed arkworks verification"
+        );
         (statement, inner_proof)
     };
 
-    let (s1, p1) = bridge_sp1(&sp1_sample_1.proof);
-    let (s2, p2) = bridge_sp1(&sp1_sample_2.proof);
-    let (s3, p3) = bridge_sp1(&sp1_sample_3.proof);
-    let (s_rt, p_rt) = bridge_sp1(&sp1_runtime.proof);
+    let (s1, p1) = bridge_sp1("sample#1", &sp1_sample_1.proof);
+    let (s2, p2) = bridge_sp1("sample#2", &sp1_sample_2.proof);
+    let (s3, p3) = bridge_sp1("sample#3", &sp1_sample_3.proof);
 
     // Step 3: Outer setup (Groth16 over BW6-761) + PVUGC lean setup (computes quotient gap)
     println!("\nStep 3: Outer setup + PVUGC lean setup (compute q_const from gap)...");
@@ -408,6 +405,21 @@ fn test_sp1_to_pvugc_real() {
     // Step 4: Prove outer with Lean prover and verify with baked target (no standard Groth16 verify here).
     println!("\nStep 4: Lean-prove outer circuit for runtime SP1 statement and verify full pipeline (baked target + PVUGC decap)...");
 
+    // Runtime statement (arming-time): compute from non-proof data (program VK + public values),
+    // then arm BEFORE producing any runtime proof.
+    let stdin_rt: SP1Stdin =
+        bincode::deserialize(test_artifacts::TENDERMINT_INPUT_BIN).expect("deserialize tendermint stdin");
+    let (public_values_rt, _report_rt) = client
+        .execute(TENDERMINT_ELF, &stdin_rt)
+        .run()
+        .expect("tendermint execute failed");
+    let vkey_hash_rt = pk_tendermint.vk.hash_bn254().as_canonical_biguint().to_string();
+    let committed_values_digest_rt = public_values_rt.hash_bn254().to_string();
+    let s_rt = vec![
+        decode_sp1_public_input(&vkey_hash_rt).expect("decode runtime vkey_hash"),
+        decode_sp1_public_input(&committed_values_digest_rt).expect("decode runtime committed_values_digest"),
+    ];
+
     // Arm once for the runtime statement. In PVUGC this simulates the deposit-side arming.
     let rho = OuterScalar::<Cycle>::rand(&mut rng);
     let public_inputs_outer_rt: Vec<OuterScalar<Cycle>> =
@@ -418,6 +430,19 @@ fn test_sp1_to_pvugc_real() {
     // Expected extracted key for runtime statement: K = R(vk,x)^ρ.
     let r_target_rt = compute_target_outer_for::<Cycle>(&vk_outer, &pvugc_vk, &s_rt);
     let k_expected_rt = compute_r_to_rho_outer_for::<Cycle>(&r_target_rt, &rho);
+
+    // Now produce the runtime proof (after arming).
+    let sp1_runtime = client
+        .prove(&pk_tendermint, &stdin_rt)
+        .groth16()
+        .run()
+        .expect("runtime proving (tendermint) failed");
+    println!("  ✓ SP1 runtime proof generated (tendermint)");
+    let (s_rt_from_proof, p_rt) = bridge_sp1("runtime", &sp1_runtime.proof);
+    assert_eq!(
+        s_rt_from_proof, s_rt,
+        "runtime proof public inputs must match the pre-armed statement"
+    );
 
     let mut prove_verify_and_decap =
         |label: &str, statement: &[Fr377], inner_proof: &Proof<Bls12_377>| {
