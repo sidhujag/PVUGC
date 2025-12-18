@@ -13,10 +13,10 @@
 
 use ark_bls12_377::{Bls12_377, Fr as Fr377};
 use ark_ff::UniformRand;
-use ark_groth16::{prepare_verifying_key, Groth16, Proof};
+use ark_groth16::{Groth16, Proof};
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use sp1_sdk::{ProverClient, SP1Stdin, HashableKey, Prover};
 use sp1_sdk::install::try_install_circuit_artifacts;
@@ -349,7 +349,7 @@ fn test_sp1_to_pvugc_real() {
     let inner_vk = parse_gnark_vk_bls12_377(&vk_bytes).expect("parse gnark raw vk");
 
     // Helper: map statement -> bridged inner proof for the sampled statements only.
-    let stmt_key = |s: &[<Cycle as RecursionCycle>::InnerE::ScalarField]| -> Vec<u8> {
+    let stmt_key = |s: &[Fr377]| -> Vec<u8> {
         s.iter().flat_map(|x| x.into_bigint().to_bytes_le()).collect()
     };
 
