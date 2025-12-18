@@ -264,6 +264,8 @@ fn test_sp1_to_pvugc_real() {
     };
     use arkworks_groth16::decap::build_commitments;
     use arkworks_groth16::ct::gt_eq_ct;
+    // For `as_canonical_biguint()` on SP1's `p3_*` field elements.
+    use p3_field::PrimeField as P3PrimeField;
     use std::collections::HashMap;
 
     println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify, quotient-gap setup) ===\n");
