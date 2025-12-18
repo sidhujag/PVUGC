@@ -250,7 +250,7 @@ fn test_sp1_to_pvugc_simulated() {
 }
 
 #[test]
-#[ignore] // Run with: SP1_PROVER=network cargo test test_sp1_to_pvugc_real -- --ignored
+#[ignore] // Run with: RUSTFLAGS="-C target-cpu=native" SP1_DEV=1 SP1_PROVER=cpu cargo test --release test_sp1_to_pvugc_real -- --ignored --nocapture
 fn test_sp1_to_pvugc_real() {
     use ark_ec::pairing::Pairing;
     use ark_ff::BigInteger;
