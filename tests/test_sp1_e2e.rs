@@ -420,10 +420,8 @@ fn test_sp1_to_pvugc_real() {
         .hash_bn254()
         .as_canonical_biguint()
         .to_string();
-    let committed_values_digest_rt = public_values_rt
-        .hash_bn254()
-        .as_canonical_biguint()
-        .to_string();
+    // `hash_bn254()` for public values already returns a BigUint in the SDK.
+    let committed_values_digest_rt = public_values_rt.hash_bn254().to_string();
     let s_rt = vec![
         decode_sp1_public_input(&vkey_hash_rt).expect("decode runtime vkey_hash"),
         decode_sp1_public_input(&committed_values_digest_rt).expect("decode runtime committed_values_digest"),
