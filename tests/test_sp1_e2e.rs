@@ -254,37 +254,6 @@ fn test_sp1_to_pvugc_real() {
     
     let _rng = StdRng::seed_from_u64(42);
     
-    // Ensure SP1 can find Groth16 wrapper artifacts locally (pk/vk/r1cs).
-    //
-    // SP1 expects artifacts under:
-    //   $SP1_GROTH16_CIRCUIT_PATH/<SP1_CIRCUIT_VERSION>/
-    // but this repo keeps test artifacts at:
-    //   sp1-keys/test/
-    // so we create a versioned subdir and copy/link the artifacts there, then point SP1 at it.
-    use std::path::PathBuf;
-    let version = sp1_sdk::SP1_CIRCUIT_VERSION.trim();
-    let base = PathBuf::from("sp1-keys").join("test");
-    let versioned = base.join(version);
-    std::fs::create_dir_all(&versioned).expect("create groth16 artifacts dir");
-
-    // Copy the artifacts into the versioned subdir expected by `SP1_GROTH16_CIRCUIT_PATH`.
-    // Note: `groth16_witness.json` is part of the artifact bundle SP1 generates/consumes.
-    for name in [
-        "groth16_circuit.bin",
-        "groth16_pk.bin",
-        "groth16_vk.bin",
-        "constraints.json",
-        "groth16_witness.json",
-    ] {
-        let src = base.join(name);
-        let dst = versioned.join(name);
-        if !dst.exists() {
-            std::fs::copy(&src, &dst).expect("copy groth16 artifact");
-        }
-    }
-
-    std::env::set_var("SP1_GROTH16_CIRCUIT_PATH", &base);
-
     // Step 1: Generate real SP1 Groth16 proof
     println!("Step 1: Generating SP1 Groth16 proof...");
     let client = ProverClient::from_env();
