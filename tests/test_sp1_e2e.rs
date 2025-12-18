@@ -289,11 +289,10 @@ fn test_sp1_to_pvugc_real() {
     let artifacts_dir = match std::env::var("SP1_DEV") {
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {
             // In dev mode, SP1 builds wrapper artifacts into ~/.sp1/circuits/dev.
-            dirs::home_dir()
-                .expect("home dir")
-                .join(".sp1")
-                .join("circuits")
-                .join("dev")
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .expect("HOME/USERPROFILE must be set to locate ~/.sp1");
+            std::path::PathBuf::from(home).join(".sp1").join("circuits").join("dev")
         }
         _ => try_install_circuit_artifacts("groth16"),
     };
