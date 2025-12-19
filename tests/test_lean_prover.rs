@@ -123,7 +123,6 @@ fn test_lean_prover_end_to_end() {
 /// - Two proofs of SAME statement → SAME key
 /// - Two proofs of DIFFERENT statements → DIFFERENT keys
 #[test]
-#[ignore]
 fn test_outer_circuit_proof_agnostic() {
     use arkworks_groth16::pvugc_outer::{
         arm_columns_outer_for, build_column_bases_outer_for, compute_r_to_rho_outer_for,
