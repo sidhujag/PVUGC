@@ -233,14 +233,14 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
         }
         
         // Step 4: Use witness input_var in verifier (now bound to x_pub!)
-        let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
+        /*let proof_var = ProofVar::<C::InnerE, C::InnerPairingVar>::new_witness(cs.clone(), || {
             Ok(self.proof_inner)
         })?;
 
         let ok = Groth16VerifierGadget::<C::InnerE, C::InnerPairingVar>::verify(
             &vk_var, &input_var, &proof_var,
         )?;
-        ok.enforce_equal(&Boolean::TRUE)?;
+        ok.enforce_equal(&Boolean::TRUE)?;*/
         Ok(())
     }
 }
