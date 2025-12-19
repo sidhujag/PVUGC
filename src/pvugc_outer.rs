@@ -348,7 +348,7 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
             // Critical hardening: omit const×wit bases that touch public-C binding rows.
             if i == 0 && omit_const_wit_cols.contains(&j) {
-                //continue;
+                continue;
             }
             active_pairs.insert((i, j));
         }
@@ -614,7 +614,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     // We intentionally omit (const,wit) bases (0, j) for witness columns `j` that touch the
     // public-input binding row(s). If these pairs appear here, then the lean CRS would include
     // the very bases we meant to bake via the standard–lean C-gap machinery.
-    /*if !omit_const_wit_cols.is_empty() {
+    if !omit_const_wit_cols.is_empty() {
         let mut offenders: Vec<(u32, u32)> = Vec::new();
         for &(i, j, _) in &h_wit {
             if i == 0 && omit_const_wit_cols.contains(&(j as usize)) {
@@ -631,7 +631,7 @@ fn compute_witness_bases<C: RecursionCycle>(
             omit_const_wit_cols,
             offenders
         );
-    }*/
+    }
 
     WitnessBasesResult { h_query_wit: h_wit }
 }
