@@ -103,3 +103,4 @@ bincode = "1"
 
 [patch.crates-io]
 ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }
+p3-field = { git = "https://github.com/syscoin/p3-field", branch = "main" }
