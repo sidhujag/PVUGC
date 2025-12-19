@@ -32,7 +32,6 @@ pub use gnark_deserialize::{
 
 pub use armed_digest::{
     Sp1PublicInputs,
-    compute_inner_vk_hash,
 };
 
 use ark_bls12_377::{Bls12_377, Fr as Fr377};

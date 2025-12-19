@@ -1,70 +1,91 @@
-# SNARK-over-STARK Verifier Architecture (Winterfell-compatible)
+# SP1 → Groth16 Wrapper → Outer Groth16 → PVUGC Architecture
 
 ## Overview
 
-We implement a full, in-circuit verifier for Winterfell-style STARK proofs and wrap it with a Groth16 proof (SNARK-over-STARK). PVUGC then operates on the outer Groth16 proof to enable statement-dependent, proof-agnostic key extraction.
+PVUGC is used as a **KEM/decapsulation layer** on top of an outer Groth16 proof. The outer proof verifies an SP1-generated Groth16 proof that wraps SP1’s STARK-based zkVM proof system. The key design goal is:
 
-## Architecture
+- **statement-dependent**: different SP1 statements extract different keys
+- **proof-agnostic**: different outer proofs for the *same* statement extract the same key
+
+In this repo, “the statement” that PVUGC binds to is exactly SP1’s **two public inputs**:
+
+- `vkey_hash`: identifies the SP1 program/verifier key
+- `committed_values_digest`: commits to the program’s public values (outputs)
+
+## High-level architecture
 
 ```
-Layer 1: Inner Circuit (BLS12-377 Groth16, in-circuit STARK verifier)
-├─ Verifies: Winterfell STARK proof (RPO-256 Merkle, DEEP, FRI)
-├─ Public inputs: commitments (trace, comp, FRI roots) and AIR parameters
-└─ Witness: batch Merkle nodes, query values, OOD frames, FRI layer data
+Layer 0: SP1 zkVM (STARK-based)
+├─ Input: (ELF program, stdin)
+├─ Output: SP1 core proof + SP1 public values bytes
+└─ Security: zkVM/STARK soundness
 
-Layer 2: Outer Circuit (BW6-761 Groth16)
-├─ Verifies: inner Groth16 proof
-├─ Public inputs: compressed via BooleanInputVar
-└─ Witness: inner proof (A, B, C)
+Layer 1: SP1 recursion + wrap
+├─ Reduces: many STARK shard proofs → single reduced proof
+├─ Wraps: reduced proof into a SNARK-friendly statement
+└─ Produces: (vkey_hash, committed_values_digest) as the public statement
 
-Layer 3: PVUGC (Groth–Sahai on BW6-761)
-├─ Extracts: K = R(vk, x)^ρ (statement-dependent, proof-agnostic)
-└─ Input: outer Groth16 proof and statement
+Layer 2: SP1 Groth16 wrapper proof (BLS12-377)
+├─ Verifies: the wrapped SP1 recursion proof inside a Groth16 circuit
+├─ Public inputs (Fr377):
+│   - vkey_hash (field element)
+│   - committed_values_digest (field element)
+└─ Output: gnark Groth16 proof bytes + the 2 public inputs
+
+Layer 3: Outer Groth16 circuit (BW6-761)
+├─ Verifies: the Layer-2 (BLS12-377) Groth16 proof
+├─ Public inputs: same statement (vkey_hash, committed_values_digest) mapped into outer field
+└─ Output: outer Groth16 proof + witness/assignment (for PVUGC commitments)
+
+Layer 4: PVUGC (pairing-based, on BW6-761)
+├─ Input:
+│   - outer Groth16 proof (A,B,C) and commitment/witness columns
+│   - statement (vkey_hash, committed_values_digest)
+├─ Extracts/decaps: K = R(vk_outer, statement)^ρ
+└─ Property: proof-agnostic extraction for fixed statement
 ```
 
-## In-Circuit STARK Verification (Summary)
+## “Statement” and why it’s enough
 
-- Batch Merkle multiproof (RPO-256): mirrors Winterfell `BatchMerkleProof::get_root` across trace, composition, and each FRI layer.
-- Fiat–Shamir transcript (RPO-256): derives coefficients, per-layer β, and query positions exactly as Winterfell.
-- DEEP composition (linear batching): per-query shared denominators (x−z), (x−z·g) with a single batched inverse.
-- Binary FRI folding: next evaluation via line-through ±xe with parameter β; consistency enforced against current layer values.
-- Goldilocks ↔ bytes bridging: binds GL values to commitment bytes.
+SP1’s wrapper statement is intentionally small:
 
-Compatibility: parsing, ordering, and pointer arithmetic match Winterfell; adversarial tests tampering with nodes, positions, OOD, or FRI data are rejected.
+- `vkey_hash` binds the proof to a *specific* SP1 program (i.e., program VK)
+- `committed_values_digest` binds the proof to the *program’s public values* (what the program outputs / commits)
 
-### Witness Linking Guarantees
+PVUGC never needs the inner STARK transcript directly; it only needs the statement that the outer circuit verifies.
 
-- **Single allocation for OOD traces** – the circuit allocates Out-Of-Domain (OOD) trace and composition evaluations once and
-  reuses the same `GlVar` handles when hashing the proof commitments and when constructing the DEEP composition. Any attempt to
-  alter the values between these phases would break constraint satisfaction.
-- **Shared query witnesses** – Merkle verification gadgets now pass the committed row values by reference into the DEEP
-  evaluation gadgets. This guarantees that each queried row that passes the Merkle check is the same row whose numerators and
-  denominators enter the DEEP combination.
-- **Shape enforcement** – explicit checks ensure the prover supplies the expected number of trace columns, composition
-  columns, and OOD elements before challenge derivation. Mismatched widths or missing values are caught deterministically by
-  the circuit.
+## Example: proving an SP1 program end-to-end
 
-## Constraint Growth (empirical)
+Take an SP1 program like `TENDERMINT_ELF` (or `FIBONACCI_ELF` for a toy example).
 
-With batch verification:
-- 1 FRI layer (steps=64): ~4M constraints
-- 2 FRI layers (steps=128): ~5.5M constraints
-- 3 FRI layers (steps=256): ~7.2M constraints
+1. **Execute** the program to get public values bytes:
+   - SP1 returns `public_values` as raw bytes.
+2. **Derive the statement**:
+   - `vkey_hash = program_vk.hash_bn254()` (SP1 SDK naming; yields a field element-compatible integer)
+   - `committed_values_digest = public_values.hash_bn254()` (hash of the public values bytes, masked per SP1 convention)
+3. **Prove (Groth16)**:
+   - SP1 produces a gnark Groth16 proof on **BLS12-377** whose public inputs are exactly:
+     - `vkey_hash`, `committed_values_digest`
+4. **Bridge + outer proof**:
+   - Parse gnark proof/VK bytes into arkworks types.
+   - Produce an **outer BW6-761 Groth16 proof** that verifies the inner Groth16 proof for that statement.
+5. **PVUGC decapsulation**:
+   - Arm the statement once (deposit-side).
+   - For any number of fresh outer proofs of the same statement, PVUGC decaps the same key.
 
-Growth is near-logarithmic in domain size for fixed query counts (batch Merkle/FRI). The outer Groth16 remains constant-size; PVUGC cost is constant (dozens of columns).
+See `PVUGC/tests/test_sp1_e2e.rs` (`test_sp1_to_pvugc_real`) for the concrete flow.
 
-## PVUGC Integration
+## PVUGC integration notes (what must remain consistent)
 
-PVUGC operates on the outer Groth16 proof:
-- Proof-agnostic extraction: different inner proofs of the same statement yield the same K.
-- Statement binding: different statements yield different K with overwhelming probability.
+- **Statement canonicalization**: the statement must be derived deterministically from non-proof data (program VK + public values).
+- **Proof-agnostic extraction**: outer-proof randomness (Groth16 randomizers) must cancel in the PVUGC decap formula; only the statement survives.
+- **Field-mapping consistency**: the same logical statement must be interpreted consistently across:
+  - SP1’s inner wrapper field (Fr377),
+  - the outer circuit field (BW6-761 scalar),
+  - PVUGC’s statement encoding.
 
-See `specs/PVUGC.md` for the algebraic details and `DESIGN.md` for one-sided GS rationale.
+## Security notes (high level)
 
-## Security Notes
-
-- Collision resistance of RPO-256 and transcript binding ensure any tampering in commitments or metadata changes challenges.
-- DEEP/FRI soundness follow standard Winterfell analyses; division is enforced multiplicatively.
-- Outer Groth16 provides knowledge soundness; PVUGC relies on standard pairing assumptions.
-
-
+- SP1 soundness ensures the statement is only satisfiable for valid program executions.
+- Outer Groth16 provides knowledge soundness on the wrapped statement.
+- PVUGC security relies on standard pairing assumptions and the fact that the statement encoding is binding and proof randomness cancels.

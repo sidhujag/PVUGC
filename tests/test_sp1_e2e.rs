@@ -17,7 +17,7 @@ use ark_groth16::Proof;
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
 
-use sp1_sdk::{ProverClient, SP1Stdin, HashableKey, Prover};
+use sp1_sdk::{ProverClient, SP1Stdin, HashableKey};
 use sp1_sdk::install::try_install_circuit_artifacts;
 
 use arkworks_groth16::sp1_bridge::{
@@ -31,6 +31,29 @@ use arkworks_groth16::outer_compressed::{
     setup_outer_params_for, fr_inner_to_outer_for,
 };
 
+/// Simple test-only env var guard to avoid leaking process-wide env changes across tests.
+struct EnvVarGuard {
+    key: &'static str,
+    old: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let old = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, old }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 /// Simple fibonacci program for SP1
 /// This is the ELF binary that SP1 will execute and prove
 const FIBONACCI_ELF: &[u8] = test_artifacts::FIBONACCI_ELF;
@@ -38,40 +61,17 @@ const SSZ_WITHDRAWALS_ELF: &[u8] = test_artifacts::SSZ_WITHDRAWALS_ELF;
 const TENDERMINT_ELF: &[u8] = test_artifacts::TENDERMINT_ELF;
 
 #[test]
-#[ignore] // Run with: cargo test test_sp1_fibonacci_mock -- --ignored
-fn test_sp1_fibonacci_mock() {
-    println!("\n=== SP1 Fibonacci Mock Test ===\n");
-    
-    // Create SP1 mock prover (no actual proof generation)
-    let client = ProverClient::builder().mock().build();
-    
-    // Setup input
-    let mut stdin = SP1Stdin::new();
-    stdin.write(&10u32); // Compute fib(10)
-    
-    // Execute program in mock mode
-    println!("Executing SP1 program (mock mode)...");
-    let (_pk, vk) = client.setup(FIBONACCI_ELF);
-    
-    // Execute to get public values
-    let (public_values, _) = client.execute(FIBONACCI_ELF, &stdin).run().expect("execution failed");
-    println!("  ✓ Program executed");
-    println!("  Public values: {:?}", public_values.as_slice());
-    let vk_hash: String = vk.bytes32();
-    println!("  VKey hash: {}", vk_hash);
-    
-    // In mock mode, we can verify the execution completed correctly
-    // Real Groth16 proving would require: client.prove(&pk, &stdin).groth16().run()
-    println!("\n  Note: For actual Groth16 proof, use prover network or run with:");
-    println!("    SP1_PROVER=network cargo test test_sp1_fibonacci_groth16 -- --ignored");
-}
-
-#[test]
-#[ignore] // Run with: SP1_PROVER=network cargo test test_sp1_fibonacci_groth16 -- --ignored
+#[ignore]
 fn test_sp1_fibonacci_groth16() {
     println!("\n=== SP1 Fibonacci Groth16 Proof Test ===\n");
     
-    // Create SP1 prover from environment (network or local)
+    // Force local CPU prover + dev artifacts for this test run.
+    // This must be set before `ProverClient::from_env()`.
+    let _sp1_dev = EnvVarGuard::set("SP1_DEV", "1");
+    let _sp1_prover = EnvVarGuard::set("SP1_PROVER", "cpu");
+    let _sp1_allow_deprecated_hooks = EnvVarGuard::set("SP1_ALLOW_DEPRECATED_HOOKS", "true");
+
+    // Create SP1 prover from environment (now deterministic for this test)
     let client = ProverClient::from_env();
     
     // Setup input
@@ -95,162 +95,8 @@ fn test_sp1_fibonacci_groth16() {
     println!("  ✓ SP1 verification passed");
 }
 
-/// Full E2E test with simulated inner proof
-/// This test verifies the full PVUGC pipeline works with SP1's proof structure
 #[test]
-fn test_sp1_to_pvugc_simulated() {
-    use arkworks_groth16::pvugc_outer::{
-        build_pvugc_setup_from_pk_for,
-        build_column_bases_outer_for,
-        arm_columns_outer_for,
-        compute_target_outer_for,
-        compute_r_to_rho_outer_for,
-    };
-    use arkworks_groth16::prover_lean::prove_lean_with_randomizers;
-    use arkworks_groth16::decap::build_commitments;
-    use arkworks_groth16::ct::gt_eq_ct;
-    use ark_groth16::Groth16;
-    use ark_snark::SNARK;
-    use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
-    
-    println!("\n=== SP1 → PVUGC Simulated E2E Test (2 public inputs) ===\n");
-    
-    let mut rng = StdRng::seed_from_u64(42);
-    type Cycle = Bls12Bw6Cycle;
-    
-    // Step 1: Create a mock "inner" circuit that mimics SP1's structure
-    // SP1's Groth16 wrapper has 2 public inputs: vkey_hash, committed_values_digest
-    #[derive(Clone)]
-    struct MockSp1InnerCircuit {
-        vkey_hash: Option<Fr377>,
-        committed_values_digest: Option<Fr377>,
-    }
-    
-    impl ConstraintSynthesizer<Fr377> for MockSp1InnerCircuit {
-        fn generate_constraints(self, cs: ConstraintSystemRef<Fr377>) -> Result<(), SynthesisError> {
-            use ark_r1cs_std::prelude::*;
-            use ark_r1cs_std::fields::fp::FpVar;
-            
-            // SP1's 2 public inputs
-            let vkey_hash = FpVar::new_input(cs.clone(), || {
-                self.vkey_hash.ok_or(SynthesisError::AssignmentMissing)
-            })?;
-            let committed_values_digest = FpVar::new_input(cs.clone(), || {
-                self.committed_values_digest.ok_or(SynthesisError::AssignmentMissing)
-            })?;
-            
-            // Add some constraints to simulate SP1's wrapper (simplified)
-            let sum = &vkey_hash + &committed_values_digest;
-            let _ = &sum * &sum; // Just to have some constraints
-            
-            Ok(())
-        }
-    }
-    
-    println!("Step 1: Setting up mock SP1 inner circuit (2 public inputs)...");
-    
-    // SP1's actual public inputs (no hashing needed!)
-    let vkey_hash = Fr377::from(67890u64);     // SP1 program's vkey hash
-    let committed_values_digest = Fr377::from(11111u64); // Program outputs
-    
-    let inner_circuit = MockSp1InnerCircuit {
-        vkey_hash: Some(vkey_hash),
-        committed_values_digest: Some(committed_values_digest),
-    };
-    
-    // Generate inner keys and proof
-    let (inner_pk, inner_vk) = Groth16::<Bls12_377>::circuit_specific_setup(
-        inner_circuit.clone(),
-        &mut rng,
-    ).expect("inner setup failed");
-    
-    let inner_proof = Groth16::<Bls12_377>::prove(&inner_pk, inner_circuit.clone(), &mut rng)
-        .expect("inner prove failed");
-    
-    // Verify inner proof with 2 public inputs
-    let inner_public_inputs = vec![vkey_hash, committed_values_digest];
-    assert!(
-        Groth16::<Bls12_377>::verify(&inner_vk, &inner_public_inputs, &inner_proof).unwrap(),
-        "Inner proof verification failed"
-    );
-    println!("  ✓ Mock inner proof generated and verified");
-    println!("  vkey_hash: {:?}", vkey_hash);
-    println!("  committed_values_digest: {:?}", committed_values_digest);
-    
-    // Step 2: Setup outer circuit
-    println!("\nStep 2: Setting up outer circuit...");
-    let (pk_outer, vk_outer) = setup_outer_params_for::<Cycle>(
-        &inner_vk,
-        inner_public_inputs.len(),
-        &mut rng,
-    ).expect("outer setup failed");
-    
-    // Create inner proof generator for PVUGC setup
-    let inner_proof_for_gen = inner_proof.clone();
-    let inner_proof_generator = move |_x: &[Fr377]| -> Proof<Bls12_377> {
-        inner_proof_for_gen.clone()
-    };
-    
-    let (pvugc_vk, lean_pk) = build_pvugc_setup_from_pk_for::<Cycle, _>(
-        &pk_outer,
-        &inner_vk,
-        inner_proof_generator,
-    );
-    println!("  ✓ Outer circuit setup complete");
-    
-    // Step 3: Generate outer proof
-    println!("\nStep 3: Generating outer proof...");
-    let circuit = OuterCircuit::<Cycle>::new(
-        inner_vk.clone(),
-        inner_public_inputs.clone(),
-        inner_proof.clone(),
-    );
-    
-    let r = OuterScalar::<Cycle>::rand(&mut rng);
-    let s = OuterScalar::<Cycle>::rand(&mut rng);
-    
-    let (proof_outer, assignment) = prove_lean_with_randomizers(&lean_pk, circuit, r, s)
-        .expect("lean prove failed");
-    println!("  ✓ Outer proof generated");
-    
-    // Step 4: PVUGC decap
-    println!("\nStep 4: PVUGC decapsulation...");
-    
-    let x_outer: Vec<OuterScalar<Cycle>> = inner_public_inputs
-        .iter()
-        .map(|x| fr_inner_to_outer_for::<Cycle>(x))
-        .collect();
-    
-    let bases = build_column_bases_outer_for::<Cycle>(&pvugc_vk, &vk_outer, &x_outer);
-    let rho = OuterScalar::<Cycle>::rand(&mut rng);
-    let col_arms = arm_columns_outer_for::<Cycle>(&bases, &rho);
-    
-    let num_instance = vk_outer.gamma_abc_g1.len();
-    let commitments = build_commitments::<<Cycle as RecursionCycle>::OuterE>(
-        &proof_outer.a,
-        &proof_outer.c,
-        &s,
-        &assignment,
-        num_instance,
-    );
-    
-    let k_decapped = arkworks_groth16::decap::decap(&commitments, &col_arms)
-        .expect("decap failed");
-    
-    let r_target = compute_target_outer_for::<Cycle>(&vk_outer, &pvugc_vk, &inner_public_inputs);
-    let k_expected = compute_r_to_rho_outer_for::<Cycle>(&r_target, &rho);
-    
-    assert!(
-        gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
-        "Decapped key doesn't match expected R^ρ!"
-    );
-    println!("  ✓ K_decapped == R^ρ verified!");
-    
-    println!("\n=== SP1 → PVUGC Simulated E2E Test PASSED ===");
-}
-
-#[test]
-#[ignore] // Run with: RUSTFLAGS="-C target-cpu=native" SP1_DEV=1 SP1_PROVER=cpu cargo test --release test_sp1_to_pvugc_real -- --ignored --nocapture
+#[ignore] // Run with: RUSTFLAGS="-C target-cpu=native" cargo test --release test_sp1_to_pvugc_real -- --ignored --nocapture
 fn test_sp1_to_pvugc_real() {
     use ark_ec::pairing::Pairing;
     use ark_ff::BigInteger;
@@ -264,16 +110,18 @@ fn test_sp1_to_pvugc_real() {
     };
     use arkworks_groth16::decap::build_commitments;
     use arkworks_groth16::ct::gt_eq_ct;
-    // For `as_canonical_biguint()` on SP1's `p3_*` field elements.
-    use p3_field::PrimeField as P3PrimeField;
+    use ark_relations::r1cs::{ConstraintSystem, ConstraintSynthesizer};
     use std::collections::HashMap;
 
     println!("\n=== SP1 → PVUGC Real E2E Test (Lean verify, quotient-gap setup) ===\n");
-    
+     // Force local CPU prover + dev artifacts for this test run.
+    // This must be set before `ProverClient::from_env()`.
+    let _sp1_dev = EnvVarGuard::set("SP1_DEV", "1");
+    let _sp1_prover = EnvVarGuard::set("SP1_PROVER", "cpu");
     // Compatibility: older SP1 guest ELFs may still use deprecated file descriptors
     // (e.g. fd=3 for public values) which are rejected by SP1 >= v4 unless explicitly allowed.
     // This is test-only to keep CI/dev flows working while ELFs are refreshed.
-    std::env::set_var("SP1_ALLOW_DEPRECATED_HOOKS", "true");
+    let _sp1_allow_deprecated_hooks = EnvVarGuard::set("SP1_ALLOW_DEPRECATED_HOOKS", "true");
     
     let mut rng = StdRng::seed_from_u64(42);
     type Cycle = Bls12Bw6Cycle;
@@ -376,6 +224,35 @@ fn test_sp1_to_pvugc_real() {
     let (s2, p2) = bridge_sp1("sample#2", &sp1_sample_2.proof);
     let (s3, p3) = bridge_sp1("sample#3", &sp1_sample_3.proof);
 
+    // Sanity: outer-circuit R1CS shape must be identical across all setup samples.
+    // This is essential because the quotient-gap setup assumes one fixed R1CS shape
+    // (the outer Groth16/Lean proving key is circuit-specific).
+    let mut baseline_outer_shape: Option<(usize, usize, usize)> = None; // (constraints, public_inputs, witnesses)
+    for (i, (stmt, prf)) in [(&s1, &p1), (&s2, &p2), (&s3, &p3)].into_iter().enumerate() {
+        let circuit = OuterCircuit::<Cycle>::new(inner_vk.clone(), stmt.clone(), prf.clone());
+        let cs = ConstraintSystem::<OuterScalar<Cycle>>::new_ref();
+        circuit
+            .generate_constraints(cs.clone())
+            .expect("outer constraint synthesis failed (sample)");
+        assert!(
+            cs.is_satisfied().expect("outer satisfiability check failed (sample)"),
+            "outer circuit unsatisfied for setup sample #{i}"
+        );
+        let shape = (
+            cs.num_constraints(),
+            cs.num_instance_variables(),
+            cs.num_witness_variables(),
+        );
+        if let Some(base) = baseline_outer_shape {
+            assert_eq!(
+                shape, base,
+                "outer R1CS shape mismatch across setup samples: sample#{i}={shape:?} vs baseline={base:?}"
+            );
+        } else {
+            baseline_outer_shape = Some(shape);
+        }
+    }
+
     // Step 3: Outer setup (Groth16 over BW6-761) + PVUGC lean setup (computes quotient gap)
     println!("\nStep 3: Outer setup + PVUGC lean setup (compute q_const from gap)...");
     let (pk_outer, vk_outer) =
@@ -415,11 +292,7 @@ fn test_sp1_to_pvugc_real() {
         .execute(TENDERMINT_ELF, &stdin_rt)
         .run()
         .expect("tendermint execute failed");
-    let vkey_hash_rt = pk_tendermint
-        .vk
-        .hash_bn254()
-        .as_canonical_biguint()
-        .to_string();
+    let vkey_hash_rt = vk_tendermint.bytes32();
     // `hash_bn254()` for public values already returns a BigUint in the SDK.
     let committed_values_digest_rt = public_values_rt.hash_bn254().to_string();
     let s_rt = vec![

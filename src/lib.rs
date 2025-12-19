@@ -39,14 +39,8 @@ pub mod pvugc_outer;
 pub mod test_circuits; // Shared test circuits
 pub mod test_fixtures; // Shared fixtures with disk caching
 
-// Inner STARK verifier modules
-pub mod stark;
-
 // SP1 Bridge: Simplified integration for gnark proofs → PVUGC
 pub mod sp1_bridge;
-
-// Re-export STARK types for backward compatibility
-pub use stark::{AirParams, CompQuery, FullStarkVerifierCircuit, TraceQuery, TraceSegmentWitness};
 
 // Re-exports - Public API
 pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};

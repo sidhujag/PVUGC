@@ -1016,7 +1016,6 @@ dependencies = [
  "bincode",
  "bitcoin",
  "k256",
- "ndarray",
  "once_cell",
  "rand_core 0.6.4",
  "rayon",
@@ -1029,12 +1028,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber 0.2.25",
- "winter-air",
- "winter-crypto",
- "winter-fri",
- "winter-math",
- "winter-verifier",
- "winterfell",
 ]
 
 [[package]]
@@ -1944,9 +1937,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.49"
+version = "1.2.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90583009037521a116abf44494efecd645ba48b6622457080f080b85544e2215"
+checksum = "9f50d563227a1c37cc0a263f64eca3334388c01c5e4c4861a9def205c614383c"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -3811,16 +3804,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
-name = "matrixmultiply"
-version = "0.3.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
-dependencies = [
- "autocfg",
- "rawpointer",
-]
-
-[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3874,21 +3857,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "ndarray"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c7c9125e8f6f10c9da3aad044cc918cf8784fa34de857b1aa68038eb05a50a9"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
 ]
 
 [[package]]
@@ -4188,7 +4156,7 @@ dependencies = [
 [[package]]
 name = "p3-bls12-377-fr"
 version = "0.2.3-succinct-pvugc.0"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "ff 0.13.1",
  "num-bigint 0.4.6",
@@ -4578,18 +4546,9 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
-
-[[package]]
-name = "portable-atomic-util"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
-dependencies = [
- "portable-atomic",
-]
+checksum = "f59e70c4aef1e55797c2e8fd94a4f2a973fc972cfde0e0b05f683667b0cd39dd"
 
 [[package]]
 name = "potential_utf"
@@ -4910,12 +4869,6 @@ checksum = "d8e65c75143ce5d47c55b510297eeb1182f3c739b6043c537670e9fc18612dae"
 dependencies = [
  "rustversion",
 ]
-
-[[package]]
-name = "rawpointer"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rayon"
@@ -5811,7 +5764,7 @@ dependencies = [
 [[package]]
 name = "sp1-build"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -5824,7 +5777,7 @@ dependencies = [
 [[package]]
 name = "sp1-core-executor"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -5862,7 +5815,7 @@ dependencies = [
 [[package]]
 name = "sp1-core-machine"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "bincode",
  "cbindgen",
@@ -5917,7 +5870,7 @@ dependencies = [
 [[package]]
 name = "sp1-cuda"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "bincode",
  "ctrlc",
@@ -5933,7 +5886,7 @@ dependencies = [
 [[package]]
 name = "sp1-curves"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "cfg-if",
  "dashu",
@@ -5954,7 +5907,7 @@ dependencies = [
 [[package]]
 name = "sp1-derive"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -5995,7 +5948,7 @@ dependencies = [
 [[package]]
 name = "sp1-primitives"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "bincode",
  "blake3",
@@ -6014,7 +5967,7 @@ dependencies = [
 [[package]]
 name = "sp1-prover"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6059,7 +6012,7 @@ dependencies = [
 [[package]]
 name = "sp1-recursion-circuit"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "hashbrown 0.14.5",
  "itertools 0.13.0",
@@ -6093,7 +6046,7 @@ dependencies = [
 [[package]]
 name = "sp1-recursion-compiler"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "backtrace",
  "itertools 0.13.0",
@@ -6114,7 +6067,7 @@ dependencies = [
 [[package]]
 name = "sp1-recursion-core"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "backtrace",
  "cbindgen",
@@ -6156,7 +6109,7 @@ dependencies = [
 [[package]]
 name = "sp1-recursion-derive"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -6165,7 +6118,7 @@ dependencies = [
 [[package]]
 name = "sp1-recursion-gnark-ffi"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6190,7 +6143,7 @@ dependencies = [
 [[package]]
 name = "sp1-sdk"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "alloy-primitives",
  "alloy-signer",
@@ -6242,7 +6195,7 @@ dependencies = [
 [[package]]
 name = "sp1-stark"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "arrayref",
  "hashbrown 0.14.5",
@@ -6275,7 +6228,7 @@ dependencies = [
 [[package]]
 name = "sp1-verifier"
 version = "5.2.4"
-source = "git+https://github.com/syscoin/sp1#8a3fc815364d82a2df169651b582cc31be038dc7"
+source = "git+https://github.com/syscoin/sp1#d29c9ec15666c63ec63aa001f4938660373bc870"
 dependencies = [
  "blake3",
  "cfg-if",
@@ -7610,106 +7563,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winter-air"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef01227f23c7c331710f43b877a8333f5f8d539631eea763600f1a74bf018c7c"
-dependencies = [
- "libm",
- "winter-crypto",
- "winter-fri",
- "winter-math",
- "winter-utils",
-]
-
-[[package]]
-name = "winter-crypto"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cdb247bc142438798edb04067ab72a22cf815f57abbd7b78a6fa986fc101db8"
-dependencies = [
- "blake3",
- "sha3",
- "winter-math",
- "winter-utils",
-]
-
-[[package]]
-name = "winter-fri"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd592b943f9d65545683868aaf1b601eb66e52bfd67175347362efff09101d3a"
-dependencies = [
- "winter-crypto",
- "winter-math",
- "winter-utils",
-]
-
-[[package]]
-name = "winter-math"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aecfb48ee6a8b4746392c8ff31e33e62df8528a3b5628c5af27b92b14aef1ea"
-dependencies = [
- "winter-utils",
-]
-
-[[package]]
-name = "winter-maybe-async"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d31a19dae58475d019850e25b0170e94b16d382fbf6afee9c0e80fdc935e73e"
-dependencies = [
- "quote",
- "syn 2.0.111",
-]
-
-[[package]]
-name = "winter-prover"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84cc631ed56cd39b78ef932c1ec4060cc6a44d114474291216c32f56655b3048"
-dependencies = [
- "tracing",
- "winter-air",
- "winter-crypto",
- "winter-fri",
- "winter-math",
- "winter-maybe-async",
- "winter-utils",
-]
-
-[[package]]
-name = "winter-utils"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9951263ef5317740cd0f49e618db00c72fabb70b75756ea26c4d5efe462c04dd"
-
-[[package]]
-name = "winter-verifier"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0425ea81f8f703a1021810216da12003175c7974a584660856224df04b2e2fdb"
-dependencies = [
- "winter-air",
- "winter-crypto",
- "winter-fri",
- "winter-math",
- "winter-utils",
-]
-
-[[package]]
-name = "winterfell"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43f824ddd5aec8ca6a54307f20c115485a8a919ea94dd26d496d856ca6185f4f"
-dependencies = [
- "winter-air",
- "winter-prover",
- "winter-verifier",
 ]
 
 [[package]]

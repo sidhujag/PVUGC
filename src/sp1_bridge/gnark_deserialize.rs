@@ -17,10 +17,9 @@
 //! **uncompressed** points we must clear those flag bits before interpreting X.
 
 use ark_bls12_377::{Bls12_377, Fq, Fq2, G1Affine, G2Affine, Fr as Fr377};
-use ark_ec::AffineRepr;
-use ark_ff::{BigInteger, PrimeField, Field};
+use ark_ff::PrimeField;
 use ark_groth16::{Proof, VerifyingKey};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::CanonicalDeserialize;
 use core::str::FromStr;
 
 use super::Sp1BridgeError;
@@ -295,7 +294,6 @@ pub fn parse_gnark_vk_bls12_377(raw_vk: &[u8]) -> Result<Sp1VerifyingKey, Sp1Bri
         return Err(Sp1BridgeError::InvalidVkFormat("VK missing nbCommitments".to_string()));
     }
     let nb_commitments = u32::from_be_bytes(raw_vk[offset..offset + 4].try_into().unwrap());
-    offset += 4;
     if nb_commitments != 0 {
         return Err(Sp1BridgeError::InvalidVkFormat(
             "Commitment keys not supported in PVUGC bridge (expected nbCommitments=0)".to_string(),
@@ -312,24 +310,10 @@ pub fn parse_arkworks_vk_bls12_377(raw_vk: &[u8]) -> Result<Sp1VerifyingKey, Sp1
         .map_err(|e| Sp1BridgeError::InvalidVkFormat(format!("Failed to deserialize VK: {}", e)))
 }
 
-/// Helper to convert Fr377 from gnark's big-endian format
-pub fn parse_fr_gnark(bytes: &[u8]) -> Result<Fr377, Sp1BridgeError> {
-    if bytes.len() != 32 {
-        return Err(Sp1BridgeError::DeserializationError(
-            format!("Fr should be 32 bytes, got {}", bytes.len())
-        ));
-    }
-    
-    let mut le_bytes = bytes.to_vec();
-    le_bytes.reverse();
-    le_bytes.resize(64, 0);
-    
-    Ok(Fr377::from_le_bytes_mod_order(&le_bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ff::BigInteger;
     use ark_std::{test_rng, UniformRand};
     
     #[test]
@@ -339,8 +323,8 @@ mod tests {
 
         // Recreate gnark-crypto RawBytes format: X (48 BE, top 3 bits masked), then Y.
         let mut out = [0u8; G1_RAW_SIZE];
-        let mut x = p.x.into_bigint().to_bytes_be();
-        let mut y = p.y.into_bigint().to_bytes_be();
+        let x = p.x.into_bigint().to_bytes_be();
+        let y = p.y.into_bigint().to_bytes_be();
         if x.len() > 48 || y.len() > 48 {
             panic!("unexpected field byte length");
         }
