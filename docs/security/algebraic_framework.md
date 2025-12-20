@@ -38,14 +38,14 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
 *   **Public CRS / VK (unarmed):**
     *   $G_1$ — circuit queries
         *   $A_k$ ($k > \ell$): $u_k(\tau)$ (clean witness-column bases, no $\rho$)
-        *   $B^{(1)}_k$ ($k > \ell$): $v_k(\tau)$ in $G_1$
+        *   $B_k^{(1)}$ ($k > \ell$): $v_k(\tau)$ in $G_1$
         *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha$, $\beta$, $\delta^{-1}$)
         *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
         *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
         *   $\alpha_1$: $\alpha$ (Groth16 trapdoor; public VK element)
     *   $G_2$ — verification key elements
         *   $\beta_2$, $\gamma_2$, $\delta_2$
-        *   $B^{(2)}_k = v_k(\tau)$ in $G_2$ (clean, unmasked)
+        *   $B_k^{(2)} = v_k(\tau)$ in $G_2$ (clean, unmasked)
 <a id="gt-bases"></a>
     *   $G_T$ — GT-baked public quotient correction
         *   $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$, where $Q_{const}(x,\tau) = \sum_{i=0}^{\ell} x_i Q_i(\tau)$
@@ -202,7 +202,7 @@ Crucially:
 - **No $G_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $G_T$ handle by $\rho$** (see [What Adversary CANNOT Do](#adv-cannot-do)). Pairing two armed $G_2$ handles is impossible (domain mismatch), so every $G_T$ handle has degree $\le 1$ in $\rho$.
 
 Thus the *coefficient* of $\rho$ in any $G_T$ label lies in the linear span generated from:
-- the unarmed $G_1$ bases $A_k$, $B^{(1)}_k$, $L_k$, $IC_i$, $H_{wit}$, and
+- the unarmed $G_1$ bases $A_k$, $B_k^{(1)}$, $L_k$, $IC_i$, $H_{wit}$, and
 - the unarmed $G_2$ base $\beta_2$, $\gamma_2$, $\delta_2$.
 Any $\rho$-bearing $G_T$ handle must arise from a single pairing that uses exactly one armed $G_2$ input, so its $\rho$-coefficient is confined to that unarmed $G_1$ span.
 
@@ -214,14 +214,14 @@ $$L_{Target} = \rho \cdot (\alpha\beta + W_{pub} + Q_{const}(x)\delta)$$
 where:
 - $W_{pub}$ is the public-input contribution to the $C$-polynomial,
 - $Q_{const}(x)$ is the affine quotient correction that accounts for the gap between the standard and Lean presentations,
-- $T_{const}(x) = e(Q_{const}(x,\tau),\delta)$ is baked into $G_T$ (see [$G_T$ Bases](#gt-bases)),
+- $T_{const}(x) = e(Q_{const}(x,\tau),\delta)$ is baked into $G_T$ (see [Gᴛ Bases](#gt-bases)),
 - and the quotient decomposition is $H(x,w)=Q_{const}(x)+H_{wit}(w)$ (see [Quotient Decomposition](#quotient-decomposition)).
 
 Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_{Target}$ up to public, $\rho$–independent multiplicative factors, because the only way to introduce $\rho$ into $G_T$ is through pairings with the armed $G_2$ handles, and the only public-input dependence available in the Lean CRS is via $W_{pub}$ and $Q_{const}(x)$.
 
 **Indices $i > \ell$ (witness-only terms).**  
 For all $i>\ell$ we explicitly provide individual witness-column elements:
-- $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [G₁ Bases](#g1-bases)),
+- $A_k = u_k(\tau)$, $B_k^{(1)} = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [G₁ Bases](#g1-bases)),
 - $H_{wit}$ bases that involve at least one witness column (see [G₁ Bases](#g1-bases)),
 - and their armed $G_2$ companions $v_j(\tau)_2^\rho$ for $j>\ell$ (see [Arming Instance](#arming-instance)).
 
