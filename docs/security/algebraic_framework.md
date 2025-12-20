@@ -100,7 +100,7 @@ With public inputs in C-matrix only ($v_{pub} = 0$, $u_{pub} = 0$), the attack s
 - The adversary has $H_{ij}$ bases for $(const, wit)$ and $(wit, wit)$ pairs
 - The baked quotient $T_{const}$ encodes $W_{pub}/Z$ in $G_T$
 - Since $u_{pub} = v_{pub} = 0$, $H_{ij}$ only encodes $(U_{wit} \cdot V_{wit})/Z$
-- **Blocked by:** Span membership check ($Q_{const} \notin span(H_{ij})$, verified by audit)
+- **Blocked by:** Span membership check ($Q_{const}$ not in span($H_{ij}$), verified by audit)
 
 **Note:** With $v_{pub} = 0$, pairing $[\alpha]_1$ with any armed B-handle yields no statement-dependent "pollution" term. This eliminates the classic V-span attack vector entirely by architectural design.
 
@@ -150,7 +150,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 - Result: W-span separation is the sole active defense; U/V-span are trivially satisfied
 
 ### 2.4 The Baked Quotient Invariant (Blocks Quotient Forging)
-**Claim:** Under the audit-enforced span-membership condition $Q_{const} \notin span(H_{ij})$, the adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
+**Claim:** Under the audit-enforced span-membership condition ($Q_{const}$ not in span($H_{ij}$)), the adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
 
 *   **What the Adversary CAN Do:**
     *   The adversary **can** compute $T_{const}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $G_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
@@ -159,7 +159,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
     *   They have **no $G_1$ handle** for $Q_{const}(x,\tau)$: the quotient correction bases are missing from the $G_1$ span (Lean CRS explicitly excludes them).
     *   They have **no way to apply $\rho$ inside $G_T$**: the only source of $\rho$ is in the armed $G_2$ handles, and pairing is $G_1 \times G_2 \to G_T$. There is no operation that takes a $G_T$ element and multiplies it by $\rho$.
 
-*   **Conclusion:** Given the missing $G_1$ bases for $Q_{const}$ and the fact that $Q_{const} \notin span(H_{ij})$ is enforced by audit, the adversary cannot synthesize $[Q_{const}(x,\tau)]_1$ in $G_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
+*   **Conclusion:** Given the missing $G_1$ bases for $Q_{const}$ and the fact that $Q_{const}$ is not in span($H_{ij}$) (enforced by audit), the adversary cannot synthesize $Q_{const}(x,\tau)$ in $G_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
 
 ### 2.5 WE Decryptor Model and RHS Identity Coverage
 
@@ -229,7 +229,7 @@ might be realized in many different ways, not just via the canonical Groth16 $(A
   - $Q_{const}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (L148–L158),
   the label $\alpha\beta + W_{pub} + Q_{const}(x)\delta$ is algebraically unreachable as a $\rho$–coefficient within the adversary's span.
 
-Equivalently, the only paths to $W_{pub}$ or $Q_{const}(x)$ inside $G_T$ would require either a missing $[Q_{const}]_1$ basis in $G_1$ or an oracle that multiplies $G_T$ by $\rho$; neither exists in the Lean CRS model.
+Equivalently, the only paths to $W_{pub}$ or $Q_{const}(x)$ inside $G_T$ would require either a missing $Q_{const}$ basis in $G_1$ or an oracle that multiplies $G_T$ by $\rho$; neither exists in the Lean CRS model.
 
 Formally, if a decryptor produced some handle $K \in G_T$ with $L(K) = L_{Target}$, then we could use that to solve GT-XPDH (as detailed in §4.4) by extracting a $\rho$–multiple of $T_{const}(x)$, contradicting SXDH/GT-XPDH. Therefore:
 - **No pairing circuit over the published handles can synthesize the QAP RHS label with the correct $\rho$–dependence**, unless the QAP identity holds with the actual witness and the honest construction is followed.
@@ -264,7 +264,7 @@ The security of the Lean CRS / Baked Quotient construction reduces to standard a
 ### 4.1 The Core Assumption: GT-XPDH
 
 **GT-XPDH (Target Group Extended Power Diffie-Hellman):**
-Given statement-only bases $\{Y_j\}, \Delta \in G_2$, their $\rho$-powers $\{Y_j^\rho\}, \Delta^\rho$, and independent target $R \in G_T$, compute $R^\rho$.
+Given statement-only bases $(Y_j)$, $\Delta$ in $G_2$, their $\rho$-powers $(Y_j^\rho)$, $\Delta^\rho$, and independent target $R$ in $G_T$, compute $R^\rho$.
 
 **Theorem (Tight Reduction):** GT-XPDH reduces tightly to DDH in $G_2$:
 - If adversary breaks GT-XPDH with advantage $\epsilon$, there exists solver for DDH in $G_2$ with advantage $\geq \epsilon - 1/r$
@@ -283,7 +283,7 @@ In the GBGM, the adversary interacts with group elements through an **oracle** t
 
 | World | τ (toxic waste) | CRS Elements | Target |
 |-------|-----------------|--------------|--------|
-| Real | Concrete field element | $[\tau^i]_1, [\tau^i]_2$ at real τ | $e([q_0 + q_1 \cdot \tau]_1, [\delta]_2)$ |
+| Real | Concrete field element | $\tau^i$ in $G_1$, $G_2$ at real τ | $e((q_0 + q_1 \cdot \tau), \delta)$ in $G_T$ |
 | Simulated | Symbolic (never revealed) | Random handles with algebraic relations | Consistent random handle |
 
 The simulator tracks all algebraic relations between handles. For any adversary query:
@@ -294,7 +294,7 @@ The simulator tracks all algebraic relations between handles. For any adversary 
 
 The adversary **cannot distinguish** real from simulated worlds because:
 
-1. **Missing $G_1$ Bases**: The Lean CRS excludes $Q_{const}$ bases $\{[Q_i(\tau)]_1\}$ for public-input-dependent quotient correction
+1. **Missing $G_1$ Bases**: The Lean CRS excludes $Q_{const}$ bases (the $Q_i(\tau)$ in $G_1$) for public-input-dependent quotient correction
 2. **GT-Baked Projections Only**: The adversary receives only $G_T$ projections $T_i = e(Q_i(\tau), \delta)$, not the underlying $G_1$ elements
 3. **Algebraic Consistency**: All queries return answers consistent with the algebraic structure
 4. **No $\rho$-Scaling in $G_T$**: There is no operation to multiply a $G_T$ element by the arming secret $\rho$
@@ -315,14 +315,14 @@ The *polynomial* $f(\tau) = Q_{const}(x,\tau)$ underlying $T_{const} = e(f(\tau)
 Our setting maps directly to **GT-XPDH**:
 
 **The Challenge:**
-- Adversary has Lean CRS: $\{[\tau^i]_1\}_{i \in Lean}$ (no $Q_{const}$ bases), $[\delta]_2$
+- Adversary has Lean CRS: $[\tau^i]_1$ for $i$ in Lean (no $Q_{const}$ bases), $[\delta]_2$
 - Adversary has GT-baked handles: $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$
-- Target: $T_{const}^\rho$ where $T_{const} = e([Q_{const}(x,\tau)]_1, [\delta]_2)$
+- Target: $T_{const}^\rho$ where $T_{const} = e(Q_{const}(x,\tau), [\delta]_2)$ in $G_T$
 - $Q_{const}(x,\tau)$ is **outside** the $G_1$ span of Lean CRS elements
 
 **Why GT-XPDH Applies:**
-The polynomial $f(\tau) = Q_{const}(x,\tau)$ represents the public-input-dependent quotient correction. The Lean CRS deliberately excludes the $G_1$ bases needed to compute $[f(\tau)]_1$. The adversary can compute $T_{const} = e(f(\tau), \delta)$ from the GT-baked handles, but cannot:
-1. Extract $[f(\tau)]_1$ from $T_{const}$ (discrete log in $G_T$)
+The polynomial $f(\tau) = Q_{const}(x,\tau)$ represents the public-input-dependent quotient correction. The Lean CRS deliberately excludes the $G_1$ bases needed to compute $f(\tau)$ in $G_1$. The adversary can compute $T_{const} = e(f(\tau), \delta)$ from the GT-baked handles, but cannot:
+1. Extract $f(\tau)$ from $T_{const}$ (discrete log in $G_T$)
 2. Compute $T_{const}^\rho$ without a $G_T$-exponentiation oracle for $\rho$
 
 To forge a proof, the adversary must produce $C \in G_1$ such that:
@@ -332,7 +332,7 @@ $$e(A, B) = T_{const}^\rho \cdot e(C, \delta)$$
 This requires computing $T_{const}^\rho$ or an equivalent, which is exactly the GT-XPDH problem: given $G_T$ projections of polynomials outside the $G_1$ span, compute their $\rho$-exponent.
 
 **Connection to TEP:**
-The Target Exponent Problem is the "search" version: given the target $T_{const}$, find exponents $(a, b)$ such that $e([a]_1, [b]_2) = T_{const}$. Our construction ensures:
+The Target Exponent Problem is the "search" version: given the target $T_{const}$, find exponents $a$, $b$ such that $e(a \cdot G_1, b \cdot G_2) = T_{const}$. Our construction ensures:
 - The adversary cannot find such $(a, b)$ without knowing $Q_{const}(\tau)$
 - $Q_{const}(\tau)$ is not computable from the Lean CRS
 
@@ -409,11 +409,11 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 | **W-Span Separation** | $W_{pub} \perp W_{wit}$ | Residue synthesis attack |
 | **Lean CRS (Baked Quotient)** | Quotient in $G_T$ only; no PoT | Quotient forgery in $G_1$ |
 | **Linear Circuit Design** | Public inputs appear linearly | Non-linear quotient terms |
-| **Span Membership** | Audit-enforced condition $Q_{const} \notin span(H_{ij})$ | Baked quotient synthesis |
+| **Span Membership** | Audit-enforced condition: $Q_{const}$ not in span($H_{ij}$) | Baked quotient synthesis |
 
 **Note:** U-span and V-span separation are trivially satisfied ($u_{pub} = v_{pub} = 0$) and need not be explicitly verified.
 
-**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $rows(C_{pub}) \cap rows(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const} \notin span(H_{ij})$, and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
+**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $rows(C_{pub}) \cap rows(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const}$ is not in span($H_{ij}$), and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
 
 ### 6.2 Security Properties Achieved
 

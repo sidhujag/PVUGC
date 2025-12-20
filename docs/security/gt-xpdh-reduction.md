@@ -21,9 +21,9 @@ SXDH asserts that DDH is hard in both $G_1$ and $G_2$; throughout this document 
 
 Fix $m \geq 0$. Sample independently (statement-only) bases $Y_0, \ldots, Y_m, \Delta \leftarrow G_2$, a non-zero exponent $\rho \leftarrow Z_r^*$, and $R \leftarrow G_T$. Give the adversary the tuple
 
-$$( \{Y_j\}_{j=0}^m, \Delta, \{Y_j^\rho\}_{j=0}^m, \Delta^\rho, R )$$
+$$(Y_0, \ldots, Y_m, \Delta, Y_0^\rho, \ldots, Y_m^\rho, \Delta^\rho, R)$$
 
-The adversary succeeds in the computational GT-XPDH game if it outputs $R^\rho \in G_T$. In the decisional GT-XPDH-DEC variant the challenger additionally samples $b \leftarrow \{0,1\}$ and sets:
+The adversary succeeds in the computational GT-XPDH game if it outputs $R^\rho \in G_T$. In the decisional GT-XPDH-DEC variant the challenger additionally samples $b \leftarrow (0,1)$ and sets:
 
 - $W := R^\rho$ if $b = 1$
 - $W := U$ for $U \leftarrow G_T$ if $b = 0$
@@ -46,11 +46,11 @@ $$R_0 := e(g_1^u, g_2^v) = g_T^{uv}$$
 
 is uniform in $G_T$ and independent of all other sampled values. Indeed, for any $t \in Z_r$,
 
-$$Pr[uv = t] = \sum_{u \in Z_r^*} Pr[u] \cdot Pr[v = t \cdot u^{-1}] = \frac{r-1}{(r-1) \cdot r} = \frac{1}{r}$$
+$$Pr[uv = t] = \sum_u Pr[u] \cdot Pr[v = t \cdot u^{-1}] = \frac{r-1}{(r-1) \cdot r} = \frac{1}{r}$$
 
-so $uv$ is uniform in $Z_r$, implying that $R_0$ is uniform in $G_T$. Because the samplings of $u$ and $v$ are independent of $\rho$ and of $\{Y_j, \Delta\}$, the value $R_0$ is jointly independent of those elements as required.
+so $uv$ is uniform in $Z_r$, implying that $R_0$ is uniform in $G_T$. Because the samplings of $u$ and $v$ are independent of $\rho$ and of $(Y_j, \Delta)$, the value $R_0$ is jointly independent of those elements as required.
 
-Consequently, the GT-XPDH game is equivalent to the variant in which the challenger sets $R = e(g_1^u, g_2^v)$ for fresh uniformly random $u \in Z_r^*$, $v \in Z_r$. Moreover, $R_0$ is independent not only of $\rho$ and $\{Y_j, \Delta\}$, but also of their powered forms $\{Y_j^\rho\}$ and $\Delta^\rho$, which are functions of $X = g_2^\rho$ and the independently sampled $\{Y_j, \Delta\}$.
+Consequently, the GT-XPDH game is equivalent to the variant in which the challenger sets $R = e(g_1^u, g_2^v)$ for fresh uniformly random $u \in Z_r^*$, $v \in Z_r$. Moreover, $R_0$ is independent not only of $\rho$ and $(Y_j, \Delta)$, but also of their powered forms $(Y_j^\rho)$ and $\Delta^\rho$, which are functions of $X = g_2^\rho$ and the independently sampled $(Y_j, \Delta)$.
 
 ### Lemma 2 (Independence of PVUGC anchor from armed bases)
 
@@ -60,9 +60,9 @@ $$R(vk, x) = e([\alpha]_1, [\beta]_2) \cdot e(L(x), [\gamma]_2)$$
 
 where $L(x) = \sum_i x_i \cdot IC_i$ is the public-input linear combination.
 
-**Key observation:** The armed bases $\{[\beta]_2^\rho, [v_j]_2^\rho, [\delta]_2^\rho\}$ are derived from $\{[\beta]_2$, witness columns, $[\delta]_2\}$. Critically, **$[\gamma]_2$ is never armed**.
+**Key observation:** The armed bases $[\beta]_2^\rho$, $[v_j]_2^\rho$, $[\delta]_2^\rho$ are derived from $[\beta]_2$, witness columns, and $[\delta]_2$. Critically, **$[\gamma]_2$ is never armed**.
 
-**Independence claim:** Since $[\gamma]_2 \notin span\{armed \; bases\}$, the **ρ-armed** component $e(L(x), [\gamma]_2)^\rho$ (and hence $R(vk,x)^\rho$) cannot be computed from the armed transcript alone. The adversary can pair $[\alpha]_1$ with armed bases, but these never produce terms involving $[\gamma]_2^\rho$.
+**Independence claim:** Since $[\gamma]_2$ is not in span(armed bases), the **ρ-armed** component $e(L(x), [\gamma]_2)^\rho$ (and hence $R(vk,x)^\rho$) cannot be computed from the armed transcript alone. The adversary can pair $[\alpha]_1$ with armed bases, but these never produce terms involving $[\gamma]_2^\rho$.
 
 **For the reduction:** We treat $R(vk, x)$ as a fixed statement-derived $G_T$ element. The reduction embeds the DDH challenge element $Y = g_2^v$ into $[\gamma]_2$, allowing the simulator to detect whether the adversary computed $R(vk, x)^\rho$. This works because $R(vk, x)$ contains a factor $e(L(x), [\gamma]_2)$ that depends on $[\gamma]_2$, which the adversary cannot access in armed form.
 
@@ -94,7 +94,7 @@ This matches the distribution in the GT-XPDH game because $X = g_2^\rho$.
 
 $$R := e(g_1^u, Y) = e(g_1^u, g_2^v)$$
 
-3. **Run A.** Provide $(\{Y_j\}, \Delta, \{Y_j^\rho\}, \Delta^\rho, R)$ to $A$ and record its output $S$.
+3. **Run A.** Provide $((Y_j), \Delta, (Y_j^\rho), \Delta^\rho, R)$ to $A$ and record its output $S$.
 
 4. **Decide.** Compute
 
@@ -120,13 +120,13 @@ from the verifying key and public input. The protocol enforces five guardrails:
 
 1. $[\gamma]_2$ never appears among the armed bases (only the aggregated public B-column, witness-only B columns, and $[\delta]_2$ are armed).
 2. Every public input wire participates in a non-zero C-column so that $IC(x) \neq 0$.
-3. CRS hygiene holds: $[\gamma]_2 \notin span\{[\beta]_2, b_{g2query}, [\delta]_2\}$.
+3. CRS hygiene holds: $[\gamma]_2$ is not in span($[\beta]_2$, $b_{g2query}$, $[\delta]_2$).
 4. Each arming uses a fresh exponent $\rho$.
 5. Never arm any $G_1$ element (arming $U^\rho$ would reveal $e(U, [\gamma]_2)^\rho$ via public pairings).
 
 These guardrails are the reduction-level restatement of the Lean-CRS / baked-quotient architecture in [algebraic_framework.md](algebraic_framework.md): public inputs bound in the C-matrix only ($u_{pub} = v_{pub} = 0$, $w_{pub} \neq 0$), W-span separation between public and witness C-rows, and the explicit exclusion of any armed $[\gamma]_2$ handle.
 
-Under these conditions, **$R(vk, x)$ contains a factor $e(L(x), [\gamma]_2)$ that cannot be computed from the armed transcript** since $[\gamma]_2^\rho$ is never published (Lemma 2). We define the **correlated GT-XPDH game** as: armed bases $\{[\beta]_2^\rho, [v_j]_2^\rho, [\delta]_2^\rho\}$ are derived from $(vk, x)$ under the guardrails, the challenger samples $\rho$, and sets $R = R(vk, x)$. An adversary wins if it outputs $R^\rho$.
+Under these conditions, **$R(vk, x)$ contains a factor $e(L(x), [\gamma]_2)$ that cannot be computed from the armed transcript** since $[\gamma]_2^\rho$ is never published (Lemma 2). We define the **correlated GT-XPDH game** as: armed bases $[\beta]_2^\rho$, $[v_j]_2^\rho$, $[\delta]_2^\rho$ are derived from $(vk, x)$ under the guardrails, the challenger samples $\rho$, and sets $R = R(vk, x)$. An adversary wins if it outputs $R^\rho$.
 
 ### Theorem 1′ (Tight DDH reduction for the correlated game)
 
@@ -150,9 +150,9 @@ In the algebraic generic bilinear group model, let $A$ issue at most $q$ oracle 
 
 $$Adv_{GT-XPDH}(A) \leq O(q^2 / r)$$
 
-**Sketch.** Assign formal indeterminates $a$, $i_x$ to the $G_1$ sources and $y_\beta$, $y_\gamma$, $y_\delta$, $\{y_j\}$ to the $G_2$ sources. Every $G_T$ handle maintained by $A$ is labeled with an explicit polynomial $E_H$ in these variables. Pairing with a masked right leg $Y^\rho \in \{[\beta]_2^\rho, [v_j]_2^\rho, [\delta]_2^\rho\}$ contributes a monomial of the form $\rho \cdot L(U) \cdot y_*$ (degree $\leq 3$), where $L(U)$ is the linear form describing the left leg $U \in G_1$ and $y_* \in \{y_\beta, y_j \; (j > \ell), y_\delta\}$. Operations inside $G_T$ add such polynomials and scale them by known integers, so the $\rho$-bearing part of any reachable $E_H$ lies in
+**Sketch.** Assign formal indeterminates $a$, $i_x$ to the $G_1$ sources and $y_\beta$, $y_\gamma$, $y_\delta$, $y_j$ to the $G_2$ sources. Every $G_T$ handle maintained by $A$ is labeled with an explicit polynomial $E_H$ in these variables. Pairing with a masked right leg $Y^\rho$ (one of $[\beta]_2^\rho$, $[v_j]_2^\rho$, $[\delta]_2^\rho$) contributes a monomial of the form $\rho \cdot L(U) \cdot y_*$ (degree $\leq 3$), where $L(U)$ is the linear form describing the left leg $U$ in $G_1$ and $y_*$ is one of $y_\beta$, $y_j$ (for $j > \ell$), or $y_\delta$. Operations inside $G_T$ add such polynomials and scale them by known integers, so the $\rho$-bearing part of any reachable $E_H$ lies in
 
-$$\rho \cdot span\{ y_\beta, y_j \; (j > \ell), y_\delta \}$$
+$$\rho \cdot span(y_\beta, y_j \; (j > \ell), y_\delta)$$
 
 and never includes a $\rho \cdot y_\gamma$ term. The target exponent is $E_* = \rho \cdot r_* = \rho \cdot (a \cdot y_\beta + i_x \cdot y_\gamma)$, whose $\rho \cdot y_\gamma$ coefficient equals $i_x \neq 0$ for valid statements. Therefore $E_H = E_*$ can hold only via an accidental algebraic equality among the $\leq q$ produced handles. The standard algebraic/generic-group collision analysis (Schwartz–Zippel style) bounds this probability by $O(q^2 / r)$. ∎
 
@@ -160,7 +160,7 @@ and never includes a $\rho \cdot y_\gamma$ term. The target exponent is $E_* = \
 
 ## Corollary (PVUGC No-Proof-Spend)
 
-Fix a statement $(vk, x)$. Let the statement-only bases $\{Y_j\}$, $\Delta$ be derived from $vk$ (excluding $\gamma_2$), and require an accepting GS attestation before any $G_1$ witnesses may appear inside pairings. For a fresh exponent $\rho_i$ sampled per armer, and given only the public data $(\{Y_j^{\rho_i}\}, \Delta^{\rho_i}, R(vk, x))$, computing
+Fix a statement $(vk, x)$. Let the statement-only bases $(Y_j)$, $\Delta$ be derived from $vk$ (excluding $\gamma_2$), and require an accepting GS attestation before any $G_1$ witnesses may appear inside pairings. For a fresh exponent $\rho_i$ sampled per armer, and given only the public data $((Y_j^{\rho_i}), \Delta^{\rho_i}, R(vk, x))$, computing
 
 $$M_i := R(vk, x)^{\rho_i}$$
 
