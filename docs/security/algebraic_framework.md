@@ -194,7 +194,7 @@ $$L(H_T) \in F_r[\alpha,\beta,\gamma,\delta,\tau,\rho]$$
 
 obtained by starting from the basis labels in [§1.1](#11-handles-and-labels) and closing under:
 - linearity (addition and scalar multiplication of labels), and
-- bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1) \cdot L(H_2)$).
+- bilinearity: for $E = e(H_1,H_2)$, we have $L(E) = L(H_1) · L(H_2)$.
 
 <a id="crucially"></a>
 Crucially:
