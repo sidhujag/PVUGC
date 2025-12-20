@@ -26,7 +26,7 @@ We work in the Algebraic Generic Bilinear Group Model (AGBGM). The adversary int
 Every group element $g$ held by the adversary is represented by a handle. Internally, the oracle maintains a mapping from handles to **Algebraic Labels**, which are multivariate polynomials over the finite field $F_r$ in the formal indeterminates representing the secret trapdoors.
 
 **Trapdoor Indeterminates:**
-*   $\alpha, \beta, \gamma, \delta$: The Groth16 secrets.
+*   $\alpha$, $\beta$, $\gamma$, $\delta$: The Groth16 secrets.
 *   $\tau$: The structured reference string (SRS) parameter.
 *   $\rho$: The fresh arming randomness (per instance).
 
@@ -39,12 +39,12 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $G_1$ — circuit queries
         *   $A_k$ ($k > \ell$): $u_k(\tau)$ (clean witness-column bases, no $\rho$)
         *   $B^{(1)}_k$ ($k > \ell$): $v_k(\tau)$ in $G_1$
-        *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha,\beta,\delta^{-1}$)
+        *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha$, $\beta$, $\delta^{-1}$)
         *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
         *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
         *   $\alpha_1$: $\alpha$ (Groth16 trapdoor; public VK element)
     *   $G_2$ — verification key elements
-        *   $\beta_2, \gamma_2, \delta_2$
+        *   $\beta_2$, $\gamma_2$, $\delta_2$
         *   $B^{(2)}_k = v_k(\tau)$ in $G_2$ (clean, unmasked)
 <a id="gt-bases"></a>
     *   $G_T$ — GT-baked public quotient correction
@@ -123,8 +123,8 @@ We track the degrees of the independent indeterminates $\rho$ (arming secret) an
 |-------------|:-----:|:----------:|:------------:|-------|
 | $A_k$, $L_k$, $H_{wit}$ | $G_1$ | 0 | 0 | witness-column bases (no $\gamma$ factor) |
 | $IC_i$ | $G_1$ | 0 | -1 | only source with $\gamma^{-1}$ |
-| VK constants $\beta_2, \gamma_2, \delta_2$ | $G_2$ | 0 | ≤ 1 | unarmed |
-| Armed handles $\beta_2^\rho, \delta_2^\rho, v_{j,2}^\rho$ | $G_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
+| VK constants $\beta_2$, $\gamma_2$, $\delta_2$ | $G_2$ | 0 | ≤ 1 | unarmed |
+| Armed handles $\beta_2^\rho$, $\delta_2^\rho$, $v_{j,2}^\rho$ | $G_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
 
 Recall from the **[Explicit Exclusions (Lean CRS)](#explicit-exclusions)** above that there are no armed $G_2$ handles involving $\gamma$ (no $\gamma_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
 
@@ -194,16 +194,16 @@ $$L(H_T) \in F_r[\alpha,\beta,\gamma,\delta,\tau,\rho]$$
 
 obtained by starting from the basis labels in [§1.1](#11-handles-and-labels) and closing under:
 - linearity (addition and scalar multiplication of labels), and
-- bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1)\cdot L(H_2)$).
+- bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1) · L(H_2)$).
 
 <a id="crucially"></a>
 Crucially:
-- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $\beta_2^\rho, \delta_2^\rho, v_j(\tau)_2^\rho$ (see [Arming Instance](#arming-instance)).
+- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $\beta_2^\rho$, $\delta_2^\rho$, $v_j(\tau)_2^\rho$ (see [Arming Instance](#arming-instance)).
 - **No $G_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $G_T$ handle by $\rho$** (see [What Adversary CANNOT Do](#adv-cannot-do)). Pairing two armed $G_2$ handles is impossible (domain mismatch), so every $G_T$ handle has degree $\le 1$ in $\rho$.
 
 Thus the *coefficient* of $\rho$ in any $G_T$ label lies in the linear span generated from:
-- the unarmed $G_1$ bases $A_k,B^{(1)}_k,L_k,IC_i,H_{wit}$, and
-- the unarmed $G_2$ base $\beta_2,\gamma_2,\delta_2$.
+- the unarmed $G_1$ bases $A_k$, $B^{(1)}_k$, $L_k$, $IC_i$, $H_{wit}$, and
+- the unarmed $G_2$ base $\beta_2$, $\gamma_2$, $\delta_2$.
 Any $\rho$-bearing $G_T$ handle must arise from a single pairing that uses exactly one armed $G_2$ input, so its $\rho$-coefficient is confined to that unarmed $G_1$ span.
 
 **Target label and the QAP RHS.**  
@@ -221,15 +221,15 @@ Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_
 
 **Indices $i > \ell$ (witness-only terms).**  
 For all $i>\ell$ we explicitly provide individual witness-column elements:
-- $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [$G_1$ Bases](#g1-bases)),
-- $H_{wit}$ bases that involve at least one witness column (see [$G_1$ Bases](#g1-bases)),
+- $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [G₁ Bases](#g1-bases)),
+- $H_{wit}$ bases that involve at least one witness column (see [G₁ Bases](#g1-bases)),
 - and their armed $G_2$ companions $v_j(\tau)_2^\rho$ for $j>\ell$ (see [Arming Instance](#arming-instance)).
 
 These suffice for an honest prover to realize the witness-dependent part of the QAP identity
 
 $$\left(\sum_i a_i u_i(x)\right)\left(\sum_i a_i v_i(x)\right) = W_{pub}(x) + W_{wit}(x) \pmod{t(x)}$$
 
-in Groth16 form: the public part $W_{pub}$ is encoded solely via the $IC_i$ (see [$G_1$ Bases](#g1-bases), [Span Proof](#span-proof)), while the witness part $W_{wit}$ is encoded in $L_k$ and $H_{wit}$ (see [$G_1$ Bases](#g1-bases)). By W-span separation ($W_{pub} \perp W_{wit}$, see [Span Table](#span-table)), any GT element obtained by pairing witness-only handles with armed $G_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{pub}$ contribution.
+in Groth16 form: the public part $W_{pub}$ is encoded solely via the $IC_i$ (see [G₁ Bases](#g1-bases), [Span Proof](#span-proof)), while the witness part $W_{wit}$ is encoded in $L_k$ and $H_{wit}$ (see [G₁ Bases](#g1-bases)). By W-span separation ($W_{pub} \perp W_{wit}$, see [Span Table](#span-table)), any GT element obtained by pairing witness-only handles with armed $G_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{pub}$ contribution.
 
 **All alternative RHS syntheses are covered.**  
 
@@ -237,7 +237,7 @@ $$\sum_i a_i w_i(x) \pmod{t(x)}$$
 
 might be realized in many different ways, not just via the canonical Groth16 $(A,B,C)$ construction. In our AGBGM formulation:
 - Every $G_T$ handle the decryptor can compute has a label in the linear span generated by the basis labels in [§1.1](#11-handles-and-labels) under linearity and bilinearity.
-- The **coefficient of $\rho$ in that label** must lie in the span of the witness-only $w$-contributions (via $L_k, H_{wit}$) plus any *unarmed* public terms (via $IC_i$, $T_i$).
+- The **coefficient of $\rho$ in that label** must lie in the span of the witness-only $w$-contributions (via $L_k$, $H_{wit}$) plus any *unarmed* public terms (via $IC_i$, $T_i$).
 - Because:
   - $W_{pub}$ lives in a subspace orthogonal to the witness span (W-span separation, see [Span Table](#span-table)), and
   - $Q_{const}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (see [Baked Quotient Invariant](#baked-quotient)),
@@ -427,7 +427,7 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 
 **Note:** U-span and V-span separation are trivially satisfied ($u_{pub} = v_{pub} = 0$) and need not be explicitly verified.
 
-**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $rows(C_{pub}) \cap rows(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const}$ is not in span($H_{ij}$), and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
+**Span Membership Sufficient Condition:** The audit check — $u_{pub}=0$, $v_{pub}=0$, and $rows(C_{pub}) \cap rows(C_{wit}) = \emptyset$ — is a **sufficient condition** implying $Q_{const}$ is not in span($H_{ij}$), and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
 
 ### 6.2 Security Properties Achieved
 

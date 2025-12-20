@@ -31,11 +31,11 @@ The adversary succeeds in the computational GT-XPDH game if it outputs $R^\rho \
 
 giving $W$ to the adversary, whose goal is to recover $b$. The advantages are defined in the usual way: for a computational adversary
 
-$Adv_{GT-XPDH}(A)$ := Pr[A outputs $R^\rho$]
+$$Adv_{GT-XPDH}(A) := Pr[A \to R^\rho]$$
 
 and for a decisional adversary
 
-$Adv_{GT-XPDH-DEC}(A)$ := |Pr[A outputs 1 | b=1] − Pr[A outputs 1 | b=0]|
+$$Adv_{GT-XPDH-DEC}(A) := |Pr[A \to 1 \mid b=1] - Pr[A \to 1 \mid b=0]|$$
 
 ---
 
