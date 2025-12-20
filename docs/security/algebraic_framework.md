@@ -2,16 +2,16 @@
 
 This document defines the algebraic framework used to prove the security of PVUGC's One-Sided Decapsulation logic. Security rests on four pillars:
 
-1. **W-Span Separation** — $W_{pub} \perp W_{wit}$ (verified by circuit audit; U/V-span trivially satisfied)
-2. **Lean CRS** — No Powers of Tau; baked quotient $Q_{const}$ in $\mathbb{G}_T$ only
+1. **W-Span Separation** — $W_{\text{pub}} \perp W_{\text{wit}}$ (verified by circuit audit; U/V-span trivially satisfied)
+2. **Lean CRS** — No Powers of Tau; baked quotient $Q_{\text{const}}$ in $\mathbb{G}_T$ only
 3. **Linear Circuit Design** — No constraint places a public input in A or B
 4. **Public Inputs in C-Matrix** — Statement binding via W-polynomial ($IC_i = w_i/\gamma$)
 
 **Notation:** We write the group law in $\mathbb{G}_T$ multiplicatively. The target is:
-$$R_{baked}(vk, x) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot T_{const}(x)$$
-where $T_{const}(x) = \prod_i T_i^{x_i} = e(Q_{const}(x), [\delta]_2)$ is the baked quotient correction.
+$$R_{\text{baked}}(\mathsf{vk}, x) = e(\lbrack\alpha\rbrack_1, \lbrack\beta\rbrack_2) \cdot e(IC(x), \lbrack\gamma\rbrack_2) \cdot T_{\text{const}}(x)$$
+where $T_{\text{const}}(x) = \prod_i T_i^{x_i} = e(Q_{\text{const}}(x), \lbrack\delta\rbrack_2)$ is the baked quotient correction.
 
-**Architecture:** Public inputs are bound in the C-matrix only ($v_{pub} = 0$, $u_{pub} = 0$). This:
+**Architecture:** Public inputs are bound in the C-matrix only ($v_{\text{pub}} = 0$, $u_{\text{pub}} = 0$). This:
 - Eliminates $(wit,pub)$ cross-terms in the quotient
 - Makes U-span and V-span separation trivially satisfied
 - Shifts statement binding to the W-polynomial via $IC_i = w_i/\gamma$
@@ -37,23 +37,23 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
         *   $B^{(1)}_k$ ($k > \ell$): $v_k(\tau)$ in $\mathbb{G}_1$
         *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha,\beta,\delta^{-1}$)
         *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
-        *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
-        *   $[\alpha]_1$: $\alpha$ (Groth16 trapdoor; public VK element)
+        *   $H_{\text{wit}}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
+        *   $\lbrack\alpha\rbrack_1$: $\alpha$ (Groth16 trapdoor; public VK element)
     *   $\mathbb{G}_2$ — verification key elements
-        *   $[\beta]_2, [\gamma]_2, [\delta]_2$
-        *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
+        *   $\lbrack\beta\rbrack_2, \lbrack\gamma\rbrack_2, \lbrack\delta\rbrack_2$
+        *   $B^{(2)}_k = \lbrack v_k(\tau)\rbrack_2$ (clean, unmasked)
     *   $\mathbb{G}_T$ — GT-baked public quotient correction
-        *   $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$, where $Q_{const}(x,\tau) = \sum_{i=0}^{\ell} x_i Q_i(\tau)$
-        *   $T_{const}(x) = e(Q_{const}(x,\tau), \delta) = \prod_{i=0}^{\ell} T_i^{x_i}$ is publicly computable in $\mathbb{G}_T$
-        *   Note: $Q_{const}$ is the gap between standard and lean proofs, not the full quotient polynomial
+        *   $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$, where $Q_{\text{const}}(x,\tau) = \sum_{i=0}^{\ell} x_i Q_i(\tau)$
+        *   $T_{\text{const}}(x) = e(Q_{\text{const}}(x,\tau), \delta) = \prod_{i=0}^{\ell} T_i^{x_i}$ is publicly computable in $\mathbb{G}_T$
+        *   Note: $Q_{\text{const}}$ is the gap between standard and lean proofs, not the full quotient polynomial
 *   **Explicit Exclusions (Lean CRS):**
     *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
     *   No public-only $H$ bases in $\mathbb{G}_1$ (the constant quotient polynomials $H_i(\tau)$ never appear as $\mathbb{G}_1$ handles)
-    *   No armed $[\gamma]_2^\rho$, $[1]_2^\rho$, or $[H(\tau)]_2^\rho$
+    *   No armed $\lbrack\gamma\rbrack_2^\rho$, $\lbrack 1\rbrack_2^\rho$, or $\lbrack H(\tau)\rbrack_2^\rho$
 *   **Arming Instance (masked by $\rho$):**
-    *   $[\beta]_2^\rho = \rho \cdot \beta$ (constant; $v_{pub} = 0$ means no public B-columns to aggregate)
-    *   $[\delta]_2^\rho = \rho \cdot \delta$
-    *   $[v_j(\tau)]_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
+    *   $\lbrack\beta\rbrack_2^\rho = \rho \cdot \beta$ (constant; $v_{\text{pub}} = 0$ means no public B-columns to aggregate)
+    *   $\lbrack\delta\rbrack_2^\rho = \rho \cdot \delta$
+    *   $\lbrack v_j(\tau)\rbrack_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
 
 Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in §2.1 and §2.3.
 
@@ -62,21 +62,21 @@ The adversary can construct new handles via:
 1.  **Linear Combination:** Given handles $h_1, h_2$, compute $c_1 h_1 + c_2 h_2$. Label: $c_1 L(h_1) + c_2 L(h_2)$.
 2.  **Pairing:** Given $h_1 \in \mathbb{G}_1, h_2 \in \mathbb{G}_2$, compute $e(h_1, h_2)$. Label: $L(h_1) \cdot L(h_2)$.
 
-**Goal:** Construct a handle with label equal to the Target Label. With $u_{pub} = v_{pub} = 0$:
-$$ L(K_{core}) = \rho \cdot (\alpha\beta + W_{pub}) $$
+**Goal:** Construct a handle with label equal to the Target Label. With $u_{\text{pub}} = v_{\text{pub}} = 0$:
+$$ L(K_{\text{core}}) = \rho \cdot (\alpha\beta + W_{\text{pub}}) $$
 
-where $W_{pub}$ is the public-input contribution to the C-polynomial (since $U_{pub} = V_{pub} = 0$). The Lean CRS bakes the public quotient correction into $\mathbb{G}_T$, so the effective baked target becomes:
-$$ L_{Target} = \rho \cdot \left(\alpha\beta + W_{pub} + Q_{const}\delta\right) $$
+where $W_{\text{pub}}$ is the public-input contribution to the C-polynomial (since $U_{\text{pub}} = V_{\text{pub}} = 0$). The Lean CRS bakes the public quotient correction into $\mathbb{G}_T$, so the effective baked target becomes:
+$$ L_{\text{Target}} = \rho \cdot \left(\alpha\beta + W_{\text{pub}} + Q_{\text{const}}\delta\right) $$
 
-where $Q_{const}(x)$ is the affine correction computed from the gap between standard and lean proofs. Concretely, under the Groth16 equation
-\[
-e(A, B) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot e(H(x,w), [\delta]_2)
-\]
-and the decomposition $H(x,w) = Q_{const}(x) + H_{wit}(w)$, arming the $B$- and $[\delta]_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{Target}$ as written above.
+where $Q_{\text{const}}(x)$ is the affine correction computed from the gap between standard and lean proofs. Concretely, under the Groth16 equation
+$$
+e(A, B) = e(\lbrack\alpha\rbrack_1, \lbrack\beta\rbrack_2) \cdot e(IC(x), \lbrack\gamma\rbrack_2) \cdot e(H(x,w), \lbrack\delta\rbrack_2)
+$$
+and the decomposition $H(x,w) = Q_{\text{const}}(x) + H_{\text{wit}}(w)$, arming the $B$- and $\lbrack\delta\rbrack_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{\text{Target}}$ as written above.
 
-**Why [α]₁ can be public:** Even though the adversary has $[\alpha]_1$, they cannot extract $K_{core}$ because:
-- With $v_{pub} = 0$, pairing $[\alpha]_1$ with armed B-handles yields no statement-dependent pollution
-- The adversary cannot synthesize $\rho W_{pub}$ from witness handles (blocked by W-span separation)
+**Why $\lbrack\alpha\rbrack_1$ can be public:** Even though the adversary has $\lbrack\alpha\rbrack_1$, they cannot extract $K_{\text{core}}$ because:
+- With $v_{\text{pub}} = 0$, pairing $\lbrack\alpha\rbrack_1$ with armed B-handles yields no statement-dependent pollution
+- The adversary cannot synthesize $\rho W_{\text{pub}}$ from witness handles (blocked by W-span separation)
 - Statement binding is through $R(\mathsf{vk}, x)$ via $IC_i = w_i/\gamma$, not through armed B-handles
 
 ## 2. Security Invariants (The "Impossibility" Proofs)
@@ -85,20 +85,20 @@ We argue security entirely inside the Algebraic Generic Bilinear Group Model. A 
 
 ### 2.1 Attack Vector Analysis
 
-With public inputs in C-matrix only ($v_{pub} = 0$, $u_{pub} = 0$), the attack surface is simplified:
+With public inputs in C-matrix only ($v_{\text{pub}} = 0$, $u_{\text{pub}} = 0$), the attack surface is simplified:
 
 **Attack A: Residue Synthesis (W-Span Attack)**
-- The adversary tries to synthesize: $Residue = \rho \cdot W_{pub}$
-- Available witness handles generate only $\rho W_{wit}$
-- **Blocked by:** W-span separation ($W_{pub} \perp W_{wit}$)
+- The adversary tries to synthesize: $Residue = \rho \cdot W_{\text{pub}}$
+- Available witness handles generate only $\rho W_{\text{wit}}$
+- **Blocked by:** W-span separation ($W_{\text{pub}} \perp W_{\text{wit}}$)
 
 **Attack B: Baked Quotient Synthesis**
 - The adversary has $H_{ij}$ bases for $(const, wit)$ and $(wit, wit)$ pairs
-- The baked quotient $T_{const}$ encodes $W_{pub}/Z$ in $\mathbb{G}_T$
-- Since $u_{pub} = v_{pub} = 0$, $H_{ij}$ only encodes $(U_{wit} \cdot V_{wit})/Z$
-- **Blocked by:** Span membership check ($Q_{const} \notin \text{span}(H_{ij})$, verified by audit)
+- The baked quotient $T_{\text{const}}$ encodes $W_{\text{pub}}/Z$ in $\mathbb{G}_T$
+- Since $u_{\text{pub}} = v_{\text{pub}} = 0$, $H_{ij}$ only encodes $(U_{\text{wit}} \cdot V_{\text{wit}})/Z$
+- **Blocked by:** Span membership check ($Q_{\text{const}} \notin \text{span}(H_{ij})$, verified by audit)
 
-**Note:** With $v_{pub} = 0$, pairing $[\alpha]_1$ with any armed B-handle yields no statement-dependent "pollution" term. This eliminates the classic V-span attack vector entirely by architectural design.
+**Note:** With $v_{\text{pub}} = 0$, pairing $\lbrack\alpha\rbrack_1$ with any armed B-handle yields no statement-dependent "pollution" term. This eliminates the classic V-span attack vector entirely by architectural design.
 
 ### 2.2 The Gamma Invariant (Supplementary Barrier)
 **Claim:** (Supplementary) The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS. This barrier is not relied upon for the main span-separation argument but provides additional algebraic separation.
@@ -109,12 +109,12 @@ We track the degrees of the independent indeterminates $\rho$ (arming secret) an
 
 | Handle Type | Group | $Deg_\rho$ | $Deg_\gamma$ | Notes |
 |-------------|:-----:|:----------:|:------------:|-------|
-| $A_k$, $L_k$, $H_{wit}$ | $\mathbb{G}_1$ | 0 | 0 | witness-column bases (no $\gamma$ factor) |
+| $A_k$, $L_k$, $H_{\text{wit}}$ | $\mathbb{G}_1$ | 0 | 0 | witness-column bases (no $\gamma$ factor) |
 | $IC_i$ | $\mathbb{G}_1$ | 0 | -1 | only source with $\gamma^{-1}$ |
-| VK constants $[\beta]_2, [\gamma]_2, [\delta]_2$ | $\mathbb{G}_2$ | 0 | $\le 1$ | unarmed |
-| Armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j]_2^\rho$ | $\mathbb{G}_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
+| VK constants $\lbrack\beta\rbrack_2, \lbrack\gamma\rbrack_2, \lbrack\delta\rbrack_2$ | $\mathbb{G}_2$ | 0 | $\le 1$ | unarmed |
+| Armed handles $\lbrack\beta\rbrack_2^\rho, \lbrack\delta\rbrack_2^\rho, \lbrack v_j\rbrack_2^\rho$ | $\mathbb{G}_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
 
-Recall from the **Explicit Exclusions (Lean CRS)** above that there are no armed $\mathbb{G}_2$ handles involving $\gamma$ (no $[\gamma]_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
+Recall from the **Explicit Exclusions (Lean CRS)** above that there are no armed $\mathbb{G}_2$ handles involving $\gamma$ (no $\lbrack\gamma\rbrack_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $\text{Deg}_\gamma = -1$.
 
 When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
 
@@ -130,41 +130,41 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 
 | Matrix | Separation | Status | Notes |
 |--------|------------|--------|-------|
-| U (A-matrix) | $U_{pub} \perp U_{wit}$ | **TRIVIAL** | $u_{pub} = 0$ (public not in A) |
-| V (B-matrix) | $V_{pub} \perp V_{wit}$ | **TRIVIAL** | $v_{pub} = 0$ (public not in B) |
-| W (C-matrix) | $W_{pub} \perp W_{wit}$ | **VERIFIED** | Primary defense; $w_{pub} \neq 0$ for statement binding |
+| U (A-matrix) | $U_{\text{pub}} \perp U_{\text{wit}}$ | **TRIVIAL** | $u_{\text{pub}} = 0$ (public not in A) |
+| V (B-matrix) | $V_{\text{pub}} \perp V_{\text{wit}}$ | **TRIVIAL** | $v_{\text{pub}} = 0$ (public not in B) |
+| W (C-matrix) | $W_{\text{pub}} \perp W_{\text{wit}}$ | **VERIFIED** | Primary defense; $w_{\text{pub}} \neq 0$ for statement binding |
 
 **Proof:**
 - Public inputs bound via `1 * reconstructed = x_pub` (C-matrix only)
-- This sets $u_{pub} = 0$ and $v_{pub} = 0$ for all public columns
+- This sets $u_{\text{pub}} = 0$ and $v_{\text{pub}} = 0$ for all public columns
 - Statement binding via $IC_i = w_i/\gamma$ where $w_i \neq 0$
-- The adversary has witness handles $A_k$, $B_k$, $L_k$, $H_{wit}$, and armed $D_j$—all tied solely to witness columns
+- The adversary has witness handles $A_k$, $B_k$, $L_k$, $H_{\text{wit}}$, and armed $D_j$—all tied solely to witness columns
 - The **Circuit Audit** verifies:
-  1. $u_{pub} = 0$ (no public in A-matrix)
-  2. $v_{pub} = 0$ (no public in B-matrix)
-  3. $W_{pub} \perp W_{wit}$ (disjoint row support in C-matrix)
+  1. $u_{\text{pub}} = 0$ (no public in A-matrix)
+  2. $v_{\text{pub}} = 0$ (no public in B-matrix)
+  3. $W_{\text{pub}} \perp W_{\text{wit}}$ (disjoint row support in C-matrix)
 - Result: W-span separation is the sole active defense; U/V-span are trivially satisfied
 
 ### 2.4 The Baked Quotient Invariant (Blocks Quotient Forging)
-**Claim:** Under the audit-enforced span-membership condition $Q_{const} \notin \text{span}(H_{ij})$, the adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
+**Claim:** Under the audit-enforced span-membership condition $Q_{\text{const}} \notin \text{span}(H_{ij})$, the adversary cannot use the CRS to forge the quotient correction $Q_{\text{const}}(x)$ or its armed equivalent.
 
 *   **What the Adversary CAN Do:**
-    *   The adversary **can** compute $T_{const}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $\mathbb{G}_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
+    *   The adversary **can** compute $T_{\text{const}}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $\mathbb{G}_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
 
 *   **What the Adversary CANNOT Do:**
-    *   They have **no $\mathbb{G}_1$ handle** for $Q_{const}(x,\tau)$: the quotient correction bases are missing from the $\mathbb{G}_1$ span (Lean CRS explicitly excludes them).
+    *   They have **no $\mathbb{G}_1$ handle** for $Q_{\text{const}}(x,\tau)$: the quotient correction bases are missing from the $\mathbb{G}_1$ span (Lean CRS explicitly excludes them).
     *   They have **no way to apply $\rho$ inside $\mathbb{G}_T$**: the only source of $\rho$ is in the armed $\mathbb{G}_2$ handles, and pairing is $\mathbb{G}_1 \times \mathbb{G}_2 \to \mathbb{G}_T$. There is no operation that takes a $\mathbb{G}_T$ element and multiplies it by $\rho$.
 
-*   **Conclusion:** Given the missing $\mathbb{G}_1$ bases for $Q_{const}$ and the fact that $Q_{const} \notin \text{span}(H_{ij})$ is enforced by audit, the adversary cannot synthesize $[Q_{const}(x,\tau)]_1$ in $\mathbb{G}_1$, nor can they compute $T_{const}(x)^\rho$ from their handle set. The armed target remains unreachable.
+*   **Conclusion:** Given the missing $\mathbb{G}_1$ bases for $Q_{\text{const}}$ and the fact that $Q_{\text{const}} \notin \text{span}(H_{ij})$ is enforced by audit, the adversary cannot synthesize $\lbrack Q_{\text{const}}(x,\tau)\rbrack_1$ in $\mathbb{G}_1$, nor can they compute $T_{\text{const}}(x)^\rho$ from their handle set. The armed target remains unreachable.
 
 ### 2.5 WE Decryptor Model and RHS Identity Coverage
 
 We now make explicit how our algebraic model captures a *general* decryptor with full pairing access, and how this covers all ways of realizing the QAP identity
 
-\[
+$$
 \Bigl(\sum_i a_i u_i(x)\Bigr)\Bigl(\sum_i a_i v_i(x)\Bigr)
 = \sum_i a_i w_i(x) \pmod{t(x)}.
-\]
+$$
 
 **General decryptor model.**  
 A WE decryptor is modeled as an arbitrary algebraic adversary in the AGBGM with oracles for:
@@ -175,63 +175,63 @@ We impose **no restriction** that the decryptor must ever construct Groth16-styl
 
 **Algebraic labels in $\mathbb{G}_T$.**  
 Every handle $H_T \in \mathbb{G}_T$ that the decryptor can ever obtain has an internal algebraic label of the form
-\[
-L(H_T) \in \mathbb{F}_r[\alpha,\beta,\gamma,\delta,\tau,\rho],
-\]
+$$
+L(H_T) \in \mathbb{F}_r\lbrack\alpha,\beta,\gamma,\delta,\tau,\rho\rbrack,
+$$
 obtained by starting from the basis labels in §1.1 and closing under:
 - linearity (addition and scalar multiplication of labels), and
 - bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1)\cdot L(H_2)$).
 
 Crucially:
-- **$\rho$ appears only in $\mathbb{G}_2$ input labels**, linearly, via the armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j(\tau)]_2^\rho$ (L54–L56).
+- **$\rho$ appears only in $\mathbb{G}_2$ input labels**, linearly, via the armed handles $\lbrack\beta\rbrack_2^\rho, \lbrack\delta\rbrack_2^\rho, \lbrack v_j(\tau)\rbrack_2^\rho$ (L54–L56).
 - **No $\mathbb{G}_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $\mathbb{G}_T$ handle by $\rho$** (L154–L157). Pairing two armed $\mathbb{G}_2$ handles is impossible (domain mismatch), so every $\mathbb{G}_T$ handle has degree $\le 1$ in $\rho$.
 
 Thus the *coefficient* of $\rho$ in any $\mathbb{G}_T$ label lies in the linear span generated from:
-- the unarmed $\mathbb{G}_1$ bases $A_k,B^{(1)}_k,L_k,IC_i,H_{wit}$, and
-- the unarmed $\mathbb{G}_2$ base $[\beta]_2,[\gamma]_2,[\delta]_2$.
+- the unarmed $\mathbb{G}_1$ bases $A_k,B^{(1)}_k,L_k,IC_i,H_{\text{wit}}$, and
+- the unarmed $\mathbb{G}_2$ base $\lbrack\beta\rbrack_2,\lbrack\gamma\rbrack_2,\lbrack\delta\rbrack_2$.
 Any $\rho$-bearing $\mathbb{G}_T$ handle must arise from a single pairing that uses exactly one armed $\mathbb{G}_2$ input, so its $\rho$-coefficient is confined to that unarmed $\mathbb{G}_1$ span.
 
 **Target label and the QAP RHS.**  
-In our setting with $u_{pub}=v_{pub}=0$, the honest target label for the armed GT value is (L65–L69, L71–L75):
-\[
-L_{\mathsf{Target}} = \rho\cdot(\alpha\beta + W_{pub} + Q_{const}(x)\delta),
-\]
+In our setting with $u_{\text{pub}}=v_{\text{pub}}=0$, the honest target label for the armed GT value is (L65–L69, L71–L75):
+$$
+L_{\mathsf{Target}} = \rho\cdot(\alpha\beta + W_{\text{pub}} + Q_{\text{const}}(x)\delta),
+$$
 where:
-- $W_{pub}$ is the public-input contribution to the $C$-polynomial,
-- $Q_{const}(x)$ is the affine quotient correction that accounts for the gap between the standard and Lean presentations,
-- $T_{const}(x) = e(Q_{const}(x,\tau),\delta)$ is baked into $\mathbb{G}_T$ (L46–L48, L71–L75),
-- and the quotient decomposition is $H(x,w)=Q_{const}(x)+H_{wit}(w)$ (L75).
+- $W_{\text{pub}}$ is the public-input contribution to the $C$-polynomial,
+- $Q_{\text{const}}(x)$ is the affine quotient correction that accounts for the gap between the standard and Lean presentations,
+- $T_{\text{const}}(x) = e(Q_{\text{const}}(x,\tau),\delta)$ is baked into $\mathbb{G}_T$ (L46–L48, L71–L75),
+- and the quotient decomposition is $H(x,w)=Q_{\text{const}}(x)+H_{\text{wit}}(w)$ (L75).
 
-Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_{\mathsf{Target}}$ up to public, $\rho$–independent multiplicative factors, because the only way to introduce $\rho$ into $\mathbb{G}_T$ is through pairings with the armed $\mathbb{G}_2$ handles, and the only public-input dependence available in the Lean CRS is via $W_{pub}$ and $Q_{const}(x)$.
+Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_{\mathsf{Target}}$ up to public, $\rho$–independent multiplicative factors, because the only way to introduce $\rho$ into $\mathbb{G}_T$ is through pairings with the armed $\mathbb{G}_2$ handles, and the only public-input dependence available in the Lean CRS is via $W_{\text{pub}}$ and $Q_{\text{const}}(x)$.
 
 **Indices $i > \ell$ (witness-only terms).**  
 For all $i>\ell$ we explicitly provide individual witness-column elements:
 - $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (L36–L38),
-- $H_{wit}$ bases that involve at least one witness column (L40),
-- and their armed $\mathbb{G}_2$ companions $[v_j(\tau)]_2^\rho$ for $j>\ell$ (L56).
+- $H_{\text{wit}}$ bases that involve at least one witness column (L40),
+- and their armed $\mathbb{G}_2$ companions $\lbrack v_j(\tau)\rbrack_2^\rho$ for $j>\ell$ (L56).
 
 These suffice for an honest prover to realize the witness-dependent part of the QAP identity
-\[
+$$
 \Bigl(\sum_i a_i u_i(x)\Bigr)\Bigl(\sum_i a_i v_i(x)\Bigr)
-= W_{pub}(x) + W_{wit}(x) \pmod{t(x)}
-\]
-in Groth16 form: the public part $W_{pub}$ is encoded solely via the $IC_i$ (L39, L138–L145), while the witness part $W_{wit}$ is encoded in $L_k$ and $H_{wit}$ (L38, L40). By W-span separation ($W_{pub} \perp W_{wit}$, L135–L146), any GT element obtained by pairing witness-only handles with armed $\mathbb{G}_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{pub}$ contribution.
+= W_{\text{pub}}(x) + W_{\text{wit}}(x) \pmod{t(x)}
+$$
+in Groth16 form: the public part $W_{\text{pub}}$ is encoded solely via the $IC_i$ (L39, L138–L145), while the witness part $W_{\text{wit}}$ is encoded in $L_k$ and $H_{\text{wit}}$ (L38, L40). By W-span separation ($W_{\text{pub}} \perp W_{\text{wit}}$, L135–L146), any GT element obtained by pairing witness-only handles with armed $\mathbb{G}_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{\text{pub}}$ contribution.
 
 **All alternative RHS syntheses are covered.**  
-\[
+$$
 \sum_i a_i w_i(x) \pmod{t(x)}
-\]
+$$
 might be realized in many different ways, not just via the canonical Groth16 $(A,B,C)$ construction. In our AGBGM formulation:
 - Every $\mathbb{G}_T$ handle the decryptor can compute has a label in the linear span generated by the basis labels in §1.1 under linearity and bilinearity.
-- The **coefficient of $\rho$ in that label** must lie in the span of the witness-only $w$-contributions (via $L_k, H_{wit}$) plus any *unarmed* public terms (via $IC_i$, $T_i$).
+- The **coefficient of $\rho$ in that label** must lie in the span of the witness-only $w$-contributions (via $L_k, H_{\text{wit}}$) plus any *unarmed* public terms (via $IC_i$, $T_i$).
 - Because:
-  - $W_{pub}$ lives in a subspace orthogonal to the witness span (W-span separation, L135–L146), and
-  - $Q_{const}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (L148–L158),
-  the label $\alpha\beta + W_{pub} + Q_{const}(x)\delta$ is algebraically unreachable as a $\rho$–coefficient within the adversary’s span.
+  - $W_{\text{pub}}$ lives in a subspace orthogonal to the witness span (W-span separation, L135–L146), and
+  - $Q_{\text{const}}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (L148–L158),
+  the label $\alpha\beta + W_{\text{pub}} + Q_{\text{const}}(x)\delta$ is algebraically unreachable as a $\rho$–coefficient within the adversary’s span.
 
-Equivalently, the only paths to $W_{pub}$ or $Q_{const}(x)$ inside $\mathbb{G}_T$ would require either a missing $[Q_{const}]_1$ basis in $\mathbb{G}_1$ or an oracle that multiplies $\mathbb{G}_T$ by $\rho$; neither exists in the Lean CRS model.
+Equivalently, the only paths to $W_{\text{pub}}$ or $Q_{\text{const}}(x)$ inside $\mathbb{G}_T$ would require either a missing $\lbrack Q_{\text{const}}\rbrack_1$ basis in $\mathbb{G}_1$ or an oracle that multiplies $\mathbb{G}_T$ by $\rho$; neither exists in the Lean CRS model.
 
-Formally, if a decryptor produced some handle $K \in \mathbb{G}_T$ with $L(K) = L_{\mathsf{Target}}$, then we could use that to solve GT-XPDH (as detailed in §4.4) by extracting a $\rho$–multiple of $T_{const}(x)$, contradicting SXDH/GT-XPDH. Therefore:
+Formally, if a decryptor produced some handle $K \in \mathbb{G}_T$ with $L(K) = L_{\mathsf{Target}}$, then we could use that to solve GT-XPDH (as detailed in §4.4) by extracting a $\rho$–multiple of $T_{\text{const}}(x)$, contradicting SXDH/GT-XPDH. Therefore:
 - **No pairing circuit over the published handles can synthesize the QAP RHS label with the correct $\rho$–dependence**, unless the QAP identity holds with the actual witness and the honest construction is followed.
 - This holds regardless of *how* the decryptor arranges its pairings (Groth16-style, or any algebraic re-encoding of the RHS), because we argue at the level of labels and spans, not at the level of a particular syntactic expression.
 
@@ -251,11 +251,11 @@ Hence the WE construction remains secure even against a **general pairing-aware 
 
 The "Honest Prover Dilemma" (Prover needs handles that Adversary abuses) is resolved by the **Linearity Assumption**.
 
-*   Since no constraint places public inputs in A or B, the quotient separates: $H(x,w) = Q_{const}(x) + H_{wit}(w)$.
-*   We **bake** $Q_{const}$ into the target as $T_{const}(x) = e(Q_{const}(x,\tau), \delta)$.
-*   We **publish** handles only for $H_{wit}(w)$ (the $(const, wit)$ and $(wit, wit)$ pairs).
-*   The adversary gets no handles involving public inputs (since $u_{pub} = v_{pub} = 0$).
-*   The Honest Prover builds $H_{wit}(w)$ using the safe witness-only handles.
+*   Since no constraint places public inputs in A or B, the quotient separates: $H(x,w) = Q_{\text{const}}(x) + H_{\text{wit}}(w)$.
+*   We **bake** $Q_{\text{const}}$ into the target as $T_{\text{const}}(x) = e(Q_{\text{const}}(x,\tau), \delta)$.
+*   We **publish** handles only for $H_{\text{wit}}(w)$ (the $(const, wit)$ and $(wit, wit)$ pairs).
+*   The adversary gets no handles involving public inputs (since $u_{\text{pub}} = v_{\text{pub}} = 0$).
+*   The Honest Prover builds $H_{\text{wit}}(w)$ using the safe witness-only handles.
 
 ## 4. Reduction to Computational Assumptions
 
@@ -283,7 +283,7 @@ In the GBGM, the adversary interacts with group elements through an **oracle** t
 
 | World | τ (toxic waste) | CRS Elements | Target |
 |-------|-----------------|--------------|--------|
-| Real | Concrete field element | $[\tau^i]_1, [\tau^i]_2$ at real τ | $e([q_0 + q_1 \cdot \tau]_1, [\delta]_2)$ |
+| Real | Concrete field element | $\lbrack\tau^i\rbrack_1, \lbrack\tau^i\rbrack_2$ at real τ | $e(\lbrack q_0 + q_1 \cdot \tau\rbrack_1, \lbrack\delta\rbrack_2)$ |
 | Simulated | Symbolic (never revealed) | Random handles with algebraic relations | Consistent random handle |
 
 The simulator tracks all algebraic relations between handles. For any adversary query:
@@ -294,51 +294,51 @@ The simulator tracks all algebraic relations between handles. For any adversary 
 
 The adversary **cannot distinguish** real from simulated worlds because:
 
-1. **Missing $\mathbb{G}_1$ Bases**: The Lean CRS excludes $Q_{const}$ bases $\{[Q_i(\tau)]_1\}$ for public-input-dependent quotient correction
+1. **Missing $\mathbb{G}_1$ Bases**: The Lean CRS excludes $Q_{\text{const}}$ bases $\{\lbrack Q_i(\tau)\rbrack_1\}$ for public-input-dependent quotient correction
 2. **GT-Baked Projections Only**: The adversary receives only $\mathbb{G}_T$ projections $T_i = e(Q_i(\tau), \delta)$, not the underlying $\mathbb{G}_1$ elements
 3. **Algebraic Consistency**: All queries return answers consistent with the algebraic structure
 4. **No $\rho$-Scaling in $\mathbb{G}_T$**: There is no operation to multiply a $\mathbb{G}_T$ element by the arming secret $\rho$
 
 **Adversary's View:**
-- Lean CRS in $\mathbb{G}_1$: witness-only bases (no $Q_{const}$ bases)
-- $\mathbb{G}_2$ VK: includes $[\delta]_2$
+- Lean CRS in $\mathbb{G}_1$: witness-only bases (no $Q_{\text{const}}$ bases)
+- $\mathbb{G}_2$ VK: includes $\lbrack\delta\rbrack_2$
 - $\mathbb{G}_T$ handles: $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$
 
 **Key Insight**: The adversary's reachable span is:
 $$\text{Span}_{adv} = \text{LinComb}(\text{Lean CRS}) + \text{Pairings}(\text{Lean CRS})$$
 
-The *polynomial* $f(\tau) = Q_{const}(x,\tau)$ underlying $T_{const} = e(f(\tau), \delta)$ is still outside the $\mathbb{G}_1$ span. Even though $T_{const}$ itself is computable in $\mathbb{G}_T$, the adversary cannot compute $T_{const}^\rho$ because $\rho$ only appears in armed $\mathbb{G}_2$ handles.
+The *polynomial* $f(\tau) = Q_{\text{const}}(x,\tau)$ underlying $T_{\text{const}} = e(f(\tau), \delta)$ is still outside the $\mathbb{G}_1$ span. Even though $T_{\text{const}}$ itself is computable in $\mathbb{G}_T$, the adversary cannot compute $T_{\text{const}}^\rho$ because $\rho$ only appears in armed $\mathbb{G}_2$ handles.
 
 ### 4.4 The GT-XPDH / TEP Reduction
 
 Our setting maps directly to **GT-XPDH**:
 
 **The Challenge:**
-- Adversary has Lean CRS: $\{[\tau^i]_1\}_{i \in \text{Lean}}$ (no $Q_{const}$ bases), $[\delta]_2$
+- Adversary has Lean CRS: $\{\lbrack\tau^i\rbrack_1\}_{i \in \text{Lean}}$ (no $Q_{\text{const}}$ bases), $\lbrack\delta\rbrack_2$
 - Adversary has GT-baked handles: $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$
-- Target: $T_{const}^\rho$ where $T_{const} = e([Q_{const}(x,\tau)]_1, [\delta]_2)$
-- $Q_{const}(x,\tau)$ is **outside** the $\mathbb{G}_1$ span of Lean CRS elements
+- Target: $T_{\text{const}}^\rho$ where $T_{\text{const}} = e(\lbrack Q_{\text{const}}(x,\tau)\rbrack_1, \lbrack\delta\rbrack_2)$
+- $Q_{\text{const}}(x,\tau)$ is **outside** the $\mathbb{G}_1$ span of Lean CRS elements
 
 **Why GT-XPDH Applies:**
-The polynomial $f(\tau) = Q_{const}(x,\tau)$ represents the public-input-dependent quotient correction. The Lean CRS deliberately excludes the $\mathbb{G}_1$ bases needed to compute $[f(\tau)]_1$. The adversary can compute $T_{const} = e(f(\tau), \delta)$ from the GT-baked handles, but cannot:
-1. Extract $[f(\tau)]_1$ from $T_{const}$ (discrete log in $\mathbb{G}_T$)
-2. Compute $T_{const}^\rho$ without a $\mathbb{G}_T$-exponentiation oracle for $\rho$
+The polynomial $f(\tau) = Q_{\text{const}}(x,\tau)$ represents the public-input-dependent quotient correction. The Lean CRS deliberately excludes the $\mathbb{G}_1$ bases needed to compute $\lbrack f(\tau)\rbrack_1$. The adversary can compute $T_{\text{const}} = e(f(\tau), \delta)$ from the GT-baked handles, but cannot:
+1. Extract $\lbrack f(\tau)\rbrack_1$ from $T_{\text{const}}$ (discrete log in $\mathbb{G}_T$)
+2. Compute $T_{\text{const}}^\rho$ without a $\mathbb{G}_T$-exponentiation oracle for $\rho$
 
 To forge a proof, the adversary must produce $C \in \mathbb{G}_1$ such that:
-$$e(A, B) = T_{const}^\rho \cdot e(C, \delta)$$
+$$e(A, B) = T_{\text{const}}^\rho \cdot e(C, \delta)$$
 
-This requires computing $T_{const}^\rho$ or an equivalent, which is exactly the GT-XPDH problem: given $\mathbb{G}_T$ projections of polynomials outside the $\mathbb{G}_1$ span, compute their $\rho$-exponent.
+This requires computing $T_{\text{const}}^\rho$ or an equivalent, which is exactly the GT-XPDH problem: given $\mathbb{G}_T$ projections of polynomials outside the $\mathbb{G}_1$ span, compute their $\rho$-exponent.
 
 **Connection to TEP:**
-The Target Exponent Problem is the "search" version: given the target $T_{const}$, find exponents $(a, b)$ such that $e([a]_1, [b]_2) = T_{const}$. Our construction ensures:
-- The adversary cannot find such $(a, b)$ without knowing $Q_{const}(\tau)$
-- $Q_{const}(\tau)$ is not computable from the Lean CRS
+The Target Exponent Problem is the "search" version: given the target $T_{\text{const}}$, find exponents $(a, b)$ such that $e(\lbrack a\rbrack_1, \lbrack b\rbrack_2) = T_{\text{const}}$. Our construction ensures:
+- The adversary cannot find such $(a, b)$ without knowing $Q_{\text{const}}(\tau)$
+- $Q_{\text{const}}(\tau)$ is not computable from the Lean CRS
 
 **Theorem**: If $\mathcal{A}$ can forge a Lean proof with advantage $\epsilon$, we can solve GT-XPDH with advantage $\epsilon / \text{poly}(\lambda)$.
 
 ### 4.5 Why Affine Quotient Correction is Critical
 
-The affine structure $Q_{const}(x) = q_0 + q_1 \cdot x$ is essential:
+The affine structure $Q_{\text{const}}(x) = q_0 + q_1 \cdot x$ is essential:
 
 | Property | Security Implication |
 |----------|---------------------|
@@ -365,7 +365,7 @@ Pairing(h₁, h₂)           →   Consistent handle (tracked)
 "Compute Q_const(τ)"      →   IMPOSSIBLE (no basis)
 ```
 
-The adversary never queries the "missing" $Q_{const}$ bases because they're not in the Lean CRS. The simulation is **perfect** for all polynomial-time adversaries.
+The adversary never queries the "missing" $Q_{\text{const}}$ bases because they're not in the Lean CRS. The simulation is **perfect** for all polynomial-time adversaries.
 
 ## 5. Outer Circuit Linearity Requirement
 
@@ -386,12 +386,12 @@ For the DDH reduction to hold, the outer circuit must satisfy:
 For the derived key $K = R^\rho$ to be **statement-dependent** (binding the arming randomness $\rho$ to the specific public input $x$), statement binding is through the **Groth16 target** $R(vk, x)$.
 
 *   **Constraint**: `1 * reconstructed = x_pub` places $x$ in the **C-matrix** only.
-*   **Effect**: $v_{pub} = 0$, $u_{pub} = 0$, $w_{pub} \neq 0$.
+*   **Effect**: $v_{\text{pub}} = 0$, $u_{\text{pub}} = 0$, $w_{\text{pub}} \neq 0$.
 *   **Statement Binding**: Via $IC_i = w_i/\gamma$ in the Groth16 target:
-    $$R(vk, x) = e([\alpha]_1, [\beta]_2) \cdot e(L(x), [\gamma]_2) \cdot T_{const}(x)$$
+    $$R(\mathsf{vk}, x) = e(\lbrack\alpha\rbrack_1, \lbrack\beta\rbrack_2) \cdot e(L(x), \lbrack\gamma\rbrack_2) \cdot T_{\text{const}}(x)$$
     where $L(x) = \sum x_i \cdot IC_i$ and $IC_i = (\beta u_i + \alpha v_i + w_i)/\gamma = w_i/\gamma$ (since $u_i = v_i = 0$).
 *   **Key**: $K(x) = R(vk, x)^\rho$. Different statements yield different $L(x)$, hence different $R$, hence different $K$.
-*   **Security Benefit**: Eliminates the $\alpha \cdot V_{pub}$ pollution term; V-span becomes trivially satisfied.
+*   **Security Benefit**: Eliminates the $\alpha \cdot V_{\text{pub}}$ pollution term; V-span becomes trivially satisfied.
 
 ## 6. Conclusion
 
@@ -401,22 +401,22 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 
 | Defense | Purpose | Blocks |
 |---------|---------|--------|
-| **W-Span Separation** | $W_{pub} \perp W_{wit}$ | Residue synthesis attack |
+| **W-Span Separation** | $W_{\text{pub}} \perp W_{\text{wit}}$ | Residue synthesis attack |
 | **Lean CRS (Baked Quotient)** | Quotient in $\mathbb{G}_T$ only; no PoT | Quotient forgery in $\mathbb{G}_1$ |
 | **Linear Circuit Design** | Public inputs appear linearly | Non-linear quotient terms |
-| **Span Membership** | Audit-enforced condition $Q_{const} \notin \text{span}(H_{ij})$ | Baked quotient synthesis |
+| **Span Membership** | Audit-enforced condition $Q_{\text{const}} \notin \text{span}(H_{ij})$ | Baked quotient synthesis |
 
-**Note:** U-span and V-span separation are trivially satisfied ($u_{pub} = v_{pub} = 0$) and need not be explicitly verified.
+**Note:** U-span and V-span separation are trivially satisfied ($u_{\text{pub}} = v_{\text{pub}} = 0$) and need not be explicitly verified.
 
-**Span Membership Sufficient Condition:** The audit check "$u_{pub}=0$, $v_{pub}=0$, and $\text{rows}(C_{pub}) \cap \text{rows}(C_{wit}) = \emptyset$" is a **sufficient condition** implying $Q_{const} \notin \text{span}(H_{ij})$, and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
+**Span Membership Sufficient Condition:** The audit check "$u_{\text{pub}}=0$, $v_{\text{pub}}=0$, and $\text{rows}(C_{\text{pub}}) \cap \text{rows}(C_{\text{wit}}) = \emptyset$" is a **sufficient condition** implying $Q_{\text{const}} \notin \text{span}(H_{ij})$, and is exactly what PVUGC's circuit audit enforces in practice. This becomes if-and-only-if under the assumption that $H_{ij}$ bases are constructed solely from $(const, wit)$ and $(wit, wit)$ pairs with no shared Lagrange indices.
 
 ### 6.2 Security Properties Achieved
 
-1. **Standard Groth16 Algebra** — No complex modifications needed; $[\alpha]_1$ can remain public
+1. **Standard Groth16 Algebra** — No complex modifications needed; $\lbrack\alpha\rbrack_1$ can remain public
 2. **Proof-Agnostic Decapsulation** — Any valid proof yields the same $K = R^\rho$
 3. **Statement-Dependent Keys** — Different $(vk, x)$ pairs yield different keys via $IC_i = w_i/\gamma$
 4. **GT-XPDH Hardness** — Reduces to DDH in $\mathbb{G}_2$ (standard assumption)
-5. **Simplified Attack Surface** — No $\alpha \cdot V_{pub}$ pollution term (V-span trivial)
+5. **Simplified Attack Surface** — No $\alpha \cdot V_{\text{pub}}$ pollution term (V-span trivial)
 
 The combination of these defenses eliminates all known algebraic attack vectors and reduces security to the hardness of **GT-XPDH** in the Generic Bilinear Group Model.
 
