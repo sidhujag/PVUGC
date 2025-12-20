@@ -53,7 +53,7 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
         *   Note: $Q_{const}$ is the gap between standard and lean proofs, not the full quotient polynomial
 <a id="explicit-exclusions"></a>
 *   **Explicit Exclusions (Lean CRS):**
-    *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
+    *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers of Tau ladder
     *   No public-only $H$ bases in $G_1$ (the constant quotient polynomials $H_i(\tau)$ never appear as $G_1$ handles)
     *   No armed $\gamma_2^\rho$, $1_2^\rho$, or $H(\tau)_2^\rho$
 <a id="arming-instance"></a>
@@ -62,7 +62,7 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $\delta_2^\rho = \rho \cdot \delta$
     *   $v_j(\tau)_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
 
-Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in [§2.1](#21-attack-vector-analysis) and [§2.3](#23-full-span-separation-primary-defense).
+Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers of Tau elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in [§2.1](#21-attack-vector-analysis) and [§2.3](#23-full-span-separation-primary-defense).
 
 ### 1.2 Adversary Capabilities
 The adversary can construct new handles via:
@@ -194,7 +194,7 @@ $$L(H_T) \in F_r[\alpha,\beta,\gamma,\delta,\tau,\rho]$$
 
 obtained by starting from the basis labels in [§1.1](#11-handles-and-labels) and closing under:
 - linearity (addition and scalar multiplication of labels), and
-- bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1) · L(H_2)$).
+- bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1) \cdot L(H_2)$).
 
 <a id="crucially"></a>
 Crucially:
@@ -267,7 +267,7 @@ The "Honest Prover Dilemma" (Prover needs handles that Adversary abuses) is reso
 
 *   Since no constraint places public inputs in A or B, the quotient separates: $H(x,w) = Q_{const}(x) + H_{wit}(w)$.
 *   We **bake** $Q_{const}$ into the target as $T_{const}(x) = e(Q_{const}(x,\tau), \delta)$.
-*   We **publish** handles only for $H_{wit}(w)$ (the $(const, wit)$ and $(wit, wit)$ pairs).
+*   We **publish** handles only for $H_{wit}(w)$: $(wit, wit)$ pairs and $(const, wit)$ pairs excluding those where wit participates in a public-input binding row.
 *   The adversary gets no handles involving public inputs (since $u_{pub} = v_{pub} = 0$).
 *   The Honest Prover builds $H_{wit}(w)$ using the safe witness-only handles.
 
@@ -389,11 +389,17 @@ For the DDH reduction to hold, the outer circuit must satisfy:
 
 ### 5.1 Constraint Structure
 
-| Constraint Type | A-column | B-column | Captured By |
-|-----------------|----------|----------|-------------|
-| **Public binding** | $1$ | reconstructed (witness LC) | $x_{pub}$ |
-| Witness × Witness | $w_i$ | $w_j$ | $h_{query\_wit}$ |
-| Constant × Witness | $1$ | $w_j$ | $h_{query\_wit}$ |
+| Constraint Type | A-column | B-column | C-column | Captured By |
+|-----------------|----------|----------|----------|-------------|
+| Bit reconstruction | $1$ | LC(bits) | $x_{wit}$ | $h_{query\_wit}$ |
+| **Public binding** | $1$ | $x_{wit}$ | $x_{pub}$ | $t_{const}$ |
+| Constant × Constant | $1$ | $1$ | — | $t_{const}$ |
+| Constant × Witness | $1$ | $w_j$ | — | $h_{query\_wit}$ |
+| Witness × Witness | $w_i$ | $w_j$ | — | $h_{query\_wit}$ |
+
+**Standard→Lean Gap**: Rows captured by $t_{const}$ have **no G₁ handle** in the Lean CRS — the prover cannot compute their quotient contribution in G₁. This gap is a design choice that enables the security invariant (no handle abuse). GT-baking compensates so verification still succeeds:
+- *Constant × Constant*: Circuit-determined, no witness/statement dependency
+- *Public binding*: Statement-dependent ($x_{wit} = x_{pub}$), computable from public inputs
 
 **Critical Invariant**: No constraint places a public input in A or B. Public inputs appear **only** in C.
 
@@ -401,7 +407,7 @@ For the DDH reduction to hold, the outer circuit must satisfy:
 
 For the derived key $K = R^\rho$ to be **statement-dependent** (binding the arming randomness $\rho$ to the specific public input $x$), statement binding is through the **Groth16 target** $R(vk, x)$.
 
-*   **Constraint**: `1 * reconstructed = x_pub` places $x$ in the **C-matrix** only.
+*   **Constraint**: `1 * x_wit = x_pub` places $x$ in the **C-matrix** only (with single witness $x_{wit}$ in B).
 *   **Effect**: $v_{pub} = 0$, $u_{pub} = 0$, $w_{pub} \neq 0$.
 *   **Statement Binding**: Via $IC_i = w_i/\gamma$ in the Groth16 target:
 
@@ -421,7 +427,7 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 | Defense | Purpose | Blocks |
 |---------|---------|--------|
 | **W-Span Separation** | $W_{pub} \perp W_{wit}$ | Residue synthesis attack |
-| **Lean CRS (Baked Quotient)** | Quotient in $G_T$ only; no PoT | Quotient forgery in $G_1$ |
+| **Lean CRS (Baked Quotient)** | Quotient in $G_T$ only; no Powers of Tau | Quotient forgery in $G_1$ |
 | **Linear Circuit Design** | Public inputs appear linearly | Non-linear quotient terms |
 | **Span Membership** | Audit-enforced condition: $Q_{const}$ not in span($H_{ij}$) | Baked quotient synthesis |
 

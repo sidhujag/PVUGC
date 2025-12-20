@@ -1,6 +1,6 @@
 # GT-XPDH Reduction to DDH in G₂ (and Generic-Model Bound)
 
-This note formalizes the GT-XPDH ("external power in G_T") assumption and records:
+This note formalizes the GT-XPDH ("external power in $G_T$") assumption and records:
 
 - a tight black-box reduction from GT-XPDH to DDH in G₂, hence that SXDH implies GT-XPDH, and
 - the algebraic generic bilinear group (GBGM) bound of $O(q^2 / r)$ (polylog factors in $q$ suppressed) for any adversary making $q$ oracle calls.
@@ -18,7 +18,7 @@ SXDH asserts that DDH is hard in both $G_1$ and $G_2$; throughout this document 
 ---
 
 <a id="gt-xpdh-definition"></a>
-## GT-XPDH (external power in G_T)
+## GT-XPDH (external power in $G_T$)
 
 Fix $m \geq 0$. Sample independently (statement-only) bases $Y_0, \ldots, Y_m, \Delta \leftarrow G_2$, a non-zero exponent $\rho \leftarrow Z_r^*$, and $R \leftarrow G_T$. Give the adversary the tuple
 
