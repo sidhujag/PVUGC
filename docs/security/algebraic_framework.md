@@ -354,13 +354,13 @@ The Target Exponent Problem is the "search" version: given the target $T_{const}
 
 ### 4.5 Why Affine Quotient Correction is Critical
 
-The affine structure $Q_{const}(x) = q_0 + q_1 \cdot x$ is essential:
+The affine structure $Q_{const}(x) = \sum_{i=0}^{\ell} x_i \cdot Q_i(\tau)$ (where $x_0 = 1$) is essential:
 
 | Property | Security Implication |
 |----------|---------------------|
-| 2-dimensional secret space | Minimal polynomial to hide outside CRS span |
+| $(\ell+1)$-dimensional secret space | One coefficient per public input + constant |
 | Linear in $x$ | Statement-dependent, witness-independent |
-| Determined by 2 samples | Setup computes $q_0, q_1$ from probes at $x=0, x=1$ |
+| Determined by $\ell+1$ samples | Setup computes $Q_0, \ldots, Q_\ell$ via probing |
 | Outside adversary span | GT-XPDH-hard to compute target without bases |
 
 If the quotient correction were **non-affine** (e.g., $q_0 + q_1 x + q_2 x^2$):
