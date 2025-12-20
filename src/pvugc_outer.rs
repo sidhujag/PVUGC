@@ -109,13 +109,16 @@ where
             beta_g1: pk_outer.beta_g1,
             delta_g1: pk_outer.delta_g1,
             a_query_wit: {
-                let mut q = pk_outer.a_query.clone();
+                let q = pk_outer.a_query.clone();
                 let num_public = pk_outer.vk.gamma_abc_g1.len();
-                // Zero out public input slots (1..num_public) to ensure no public input handles are leaked in A.
-                // Index 0 is constant '1', which must be preserved.
                 for i in 1..num_public {
                     if i < q.len() {
-                        q[i] = <C::OuterE as Pairing>::G1Affine::zero();
+                        assert!(
+                            q[i].is_zero(),
+                            "[SECURITY AUDIT FAIL] a_query has non-zero public handle at index {}. \
+                             Expected a_query[1..num_public) to be zero (public-in-C-only).",
+                            i
+                        );
                     }
                 }
                 q
@@ -125,6 +128,39 @@ where
             h_query_wit: wb_result.h_query_wit,
             l_query: pk_outer.l_query.clone(),
         };
+
+        // Pre-serialization audit: ensure the exact lean CRS view we will serialize/publish
+        // contains no forbidden public handles or forbidden basis categories.
+        let num_public = lean_pk.vk.gamma_abc_g1.len(); // includes constant "1" at index 0
+        for (i, g) in lean_pk.a_query_wit.iter().enumerate().take(num_public).skip(1) {
+            assert!(
+                g.is_zero(),
+                "[SECURITY AUDIT FAIL] LeanProvingKey leaks A-query public handle at index {}.",
+                i
+            );
+        }
+        for &(i, j, base) in &lean_pk.h_query_wit {
+            let i_idx = i as usize;
+            let j_idx = j as usize;
+            assert!(
+                !base.is_zero(),
+                "[SECURITY AUDIT FAIL] h_query_wit contains a zero base at ({}, {}).",
+                i,
+                j
+            );
+            // For publication, forbid referencing any public column index (excluding const 0).
+            if (i_idx > 0 && i_idx < num_public) || (j_idx > 0 && j_idx < num_public) {
+                panic!(
+                    "[SECURITY AUDIT FAIL] h_query_wit contains a public-index pair ({}, {}). \
+                     Public indices (1..num_public) must not appear in published witness bases.",
+                    i,
+                    j
+                );
+            }
+            if i_idx == 0 && j_idx == 0 {
+                panic!("[SECURITY AUDIT FAIL] h_query_wit contains forbidden (0,0) const×const basis.");
+            }
+        }
 
         println!("[Setup] Computing q_points from gap (using custom samples)...");
         let t_const_gt = compute_t_const_points_gt_from_gap::<C, F>(
@@ -455,7 +491,6 @@ fn compute_witness_bases<C: RecursionCycle>(
     let mut sorted_pairs: Vec<(usize, usize)> = active_pairs.into_iter().collect();
     sorted_pairs.sort();
 
-    let n_scalar = domain.size_as_field_element();
     let domain_elements: Vec<_> = (0..domain.size()).map(|i| domain.element(i)).collect();
     let inv_domain_elements: Vec<_> = (0..domain.size())
         .map(|i| {

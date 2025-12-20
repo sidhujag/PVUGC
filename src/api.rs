@@ -15,6 +15,9 @@ pub use crate::ppe::{validate_pvugc_vk_subgroups, PvugcVk};
 use crate::{compute_baked_target, OneSidedCommitments};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::ops::Neg;
 
 /// Complete PVUGC bundle
 pub struct PvugcBundle<E: Pairing> {
@@ -82,6 +85,61 @@ fn split_statement_only_bases<E: Pairing>(
         .collect();
 
     Ok((aggregate.into_affine(), witness_bases))
+}
+
+/// Defensive audit for *published* statement-only bases used by arming/decap.
+///
+/// This catches practical footguns that do **not** require solving DLP:
+/// - identity bases (degenerate)
+/// - duplicates / negated duplicates (publicly known linear relations)
+/// - y_col == ±delta (publicly known linear relation with the δ leg)
+fn audit_statement_only_bases_for_publication<E: Pairing>(bases: &ColumnBases<E>) -> PvugcResult<()> {
+    // Always require subgroup validity and non-zero delta.
+    bases.validate_subgroups()?;
+
+    if bases.y_cols.is_empty() {
+        return Err(Error::MismatchedSizes);
+    }
+    if bases.y_cols.iter().any(|y| y.is_zero()) {
+        return Err(Error::Crypto("zero_y_col".to_string()));
+    }
+
+    let delta = bases.delta;
+    if delta.is_zero() {
+        return Err(Error::ZeroDelta);
+    }
+    let delta_neg = delta.into_group().neg().into_affine();
+
+    let hash_g2 = |g: &E::G2Affine| -> [u8; 32] {
+        let mut buf = Vec::new();
+        g.serialize_compressed(&mut buf).expect("serialize");
+        Sha256::digest(&buf).into()
+    };
+
+    let delta_h = hash_g2(&delta);
+    let delta_neg_h = hash_g2(&delta_neg);
+
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let mut seen_neg: HashSet<[u8; 32]> = HashSet::new();
+
+    for (idx, y) in bases.y_cols.iter().enumerate() {
+        let h = hash_g2(y);
+        if h == delta_h || h == delta_neg_h {
+            return Err(Error::Crypto(format!("y_col_eq_pm_delta_at_index_{}", idx)));
+        }
+        if !seen.insert(h) {
+            return Err(Error::Crypto(format!("duplicate_y_col_at_index_{}", idx)));
+        }
+        // Also ban y_i == -y_j (publicly known relation).
+        let y_neg = y.into_group().neg().into_affine();
+        let h_neg = hash_g2(&y_neg);
+        if seen_neg.contains(&h) {
+            return Err(Error::Crypto(format!("negated_duplicate_y_col_at_index_{}", idx)));
+        }
+        seen_neg.insert(h_neg);
+    }
+
+    Ok(())
 }
 
 /// Optional verification limits
@@ -153,6 +211,8 @@ impl OneSidedPvugc {
             return Err(Error::Crypto("R_is_identity".to_string()));
         }
         let bases = Self::build_column_bases(pvugc_vk, vk, public_inputs)?;
+        // Strict publication audit: prevent trivial linear relations / degeneracy.
+        audit_statement_only_bases_for_publication(&bases)?;
         let col_arms = arm_columns(&bases, rho)?;
         let k = Self::compute_r_to_rho(&r_baked, rho);
         Ok((bases, col_arms, r_baked, k))
