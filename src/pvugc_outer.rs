@@ -475,6 +475,14 @@ fn compute_witness_bases<C: RecursionCycle>(
         .flat_map(|chunk| {
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
+            // Reuse hot-loop buffers to avoid per-pair allocations.
+            let mut diag_bases: Vec<<C::OuterE as Pairing>::G1Affine> =
+                Vec::with_capacity(64);
+            let mut diag_scalars: Vec<OuterScalar<C>> = Vec::with_capacity(64);
+            let mut pair_bases: Vec<<C::OuterE as Pairing>::G1Affine> =
+                Vec::with_capacity(max_col_a + max_col_b + 64);
+            let mut pair_scalars: Vec<OuterScalar<C>> =
+                Vec::with_capacity(max_col_a + max_col_b + 64);
             let mut msm_tasks: Vec<(
                 Vec<<C::OuterE as Pairing>::G1Affine>,
                 Vec<OuterScalar<C>>,
@@ -514,8 +522,8 @@ fn compute_witness_bases<C: RecursionCycle>(
                 acc_v.resize(n_v, OuterScalar::<C>::zero());
 
                 // Extra bases for diagonal contributions (using q_vector)
-                let mut diag_bases = Vec::new();
-                let mut diag_scalars = Vec::new();
+                diag_bases.clear();
+                diag_scalars.clear();
 
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
                     for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
@@ -544,8 +552,14 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // 3. Collect bases for MSM
-                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
-                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
+                pair_bases.clear();
+                pair_scalars.clear();
+                // Avoid repeated growth when diagonal is larger than the default guess.
+                let needed = max_col_a + max_col_b + diag_bases.len();
+                if pair_bases.capacity() < needed {
+                    pair_bases.reserve(needed - pair_bases.capacity());
+                    pair_scalars.reserve(needed - pair_scalars.capacity());
+                }
 
                 // Add off-diagonal contributions (Lagrange bases)
                 for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
@@ -566,7 +580,13 @@ fn compute_witness_bases<C: RecursionCycle>(
                 pair_scalars.extend(diag_scalars);
 
                 if !pair_bases.is_empty() {
-                    msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
+                    // Move out of the reused buffers by cloning into owned vectors for MSM task.
+                    // This keeps the outer loop allocation-free while preserving parallelism.
+                    msm_tasks.push((
+                        pair_bases.clone(),
+                        pair_scalars.clone(),
+                        (i as u32, j as u32),
+                    ));
                 }
             }
 
