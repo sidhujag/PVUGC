@@ -475,17 +475,13 @@ fn compute_witness_bases<C: RecursionCycle>(
         .flat_map(|chunk| {
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
-            // Reuse hot-loop buffers to avoid per-pair allocations.
-            let mut diag_bases: Vec<<C::OuterE as Pairing>::G1Affine> =
-                Vec::with_capacity(64);
-            let mut diag_scalars: Vec<OuterScalar<C>> = Vec::with_capacity(64);
-            let mut pair_bases: Vec<<C::OuterE as Pairing>::G1Affine> =
-                Vec::with_capacity(max_col_a + max_col_b + 64);
-            let mut pair_scalars: Vec<OuterScalar<C>> =
-                Vec::with_capacity(max_col_a + max_col_b + 64);
-            // Accumulate MSM outputs directly to avoid cloning bases/scalars into task structs.
-            let mut point_accs: Vec<<C::OuterE as Pairing>::G1> = Vec::with_capacity(chunk.len());
-            let mut point_ids: Vec<(u32, u32)> = Vec::with_capacity(chunk.len());
+            // Build MSM tasks per pair, then run them in parallel. This preserves high throughput
+            // on many-core machines (nested parallelism can help here).
+            let mut msm_tasks: Vec<(
+                Vec<<C::OuterE as Pairing>::G1Affine>,
+                Vec<OuterScalar<C>>,
+                (u32, u32),
+            )> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -520,8 +516,10 @@ fn compute_witness_bases<C: RecursionCycle>(
                 acc_v.resize(n_v, OuterScalar::<C>::zero());
 
                 // Extra bases for diagonal contributions (using q_vector)
-                diag_bases.clear();
-                diag_scalars.clear();
+                // We may encounter multiple diagonal hits (k==m) per (i,j). Aggregate them by k so each
+                // q_vector[k] appears at most once in the MSM (reduces MSM size noticeably for dense overlaps).
+                let mut diag_terms: Vec<(usize, OuterScalar<C>)> = Vec::new();
+                diag_terms.reserve(std::cmp::min(n_u, n_v));
 
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
                     for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
@@ -532,8 +530,7 @@ fn compute_witness_bases<C: RecursionCycle>(
 
                         if k == m {
                             // Diagonal term: prod * Q[k]
-                            diag_bases.push(q_vector[k]);
-                            diag_scalars.push(prod);
+                            diag_terms.push((k, prod));
                         } else {
                             // Off-diagonal term
                             let wm = domain_elements[m];
@@ -550,14 +547,10 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // 3. Collect bases for MSM
-                pair_bases.clear();
-                pair_scalars.clear();
-                // Avoid repeated growth when diagonal is larger than the default guess.
-                let needed = max_col_a + max_col_b + diag_bases.len();
-                if pair_bases.capacity() < needed {
-                    pair_bases.reserve(needed - pair_bases.capacity());
-                    pair_scalars.reserve(needed - pair_scalars.capacity());
-                }
+                let mut pair_bases =
+                    Vec::with_capacity(max_col_a + max_col_b + diag_terms.len());
+                let mut pair_scalars =
+                    Vec::with_capacity(max_col_a + max_col_b + diag_terms.len());
 
                 // Add off-diagonal contributions (Lagrange bases)
                 for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
@@ -574,17 +567,48 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // Add diagonal contributions (Q bases)
-                pair_bases.extend(diag_bases.iter().cloned());
-                pair_scalars.extend(diag_scalars.iter().cloned());
-
-                if !pair_bases.is_empty() {
-                    // MSM for this pair, using reused buffers (no cloning).
-                    let h_acc = <C::OuterE as Pairing>::G1::msm(&pair_bases, &pair_scalars).unwrap();
-                    if !h_acc.is_zero() {
-                        point_accs.push(h_acc);
-                        point_ids.push((i as u32, j as u32));
+                if !diag_terms.is_empty() {
+                    diag_terms.sort_unstable_by_key(|(k, _)| *k);
+                    let mut cur_k = diag_terms[0].0;
+                    let mut cur_acc = OuterScalar::<C>::zero();
+                    for (k, s) in diag_terms.into_iter() {
+                        if k != cur_k {
+                            if !cur_acc.is_zero() {
+                                pair_bases.push(q_vector[cur_k]);
+                                pair_scalars.push(cur_acc);
+                            }
+                            cur_k = k;
+                            cur_acc = s;
+                        } else {
+                            cur_acc += s;
+                        }
+                    }
+                    if !cur_acc.is_zero() {
+                        pair_bases.push(q_vector[cur_k]);
+                        pair_scalars.push(cur_acc);
                     }
                 }
+
+                if !pair_bases.is_empty() {
+                    msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
+                }
+            }
+
+            // Process MSMs in parallel for this chunk.
+            let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
+                .into_par_iter()
+                .map(|(bases, scalars, pair_id)| {
+                    let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+                    (pair_id, h_acc)
+                })
+                .filter(|(_, h_acc)| !h_acc.is_zero())
+                .collect();
+
+            let mut point_accs = Vec::with_capacity(msm_results.len());
+            let mut point_ids = Vec::with_capacity(msm_results.len());
+            for (pair_id, h_acc) in msm_results {
+                point_accs.push(h_acc);
+                point_ids.push(pair_id);
             }
 
             let mut affine_results = Vec::with_capacity(point_accs.len());
