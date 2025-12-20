@@ -483,11 +483,9 @@ fn compute_witness_bases<C: RecursionCycle>(
                 Vec::with_capacity(max_col_a + max_col_b + 64);
             let mut pair_scalars: Vec<OuterScalar<C>> =
                 Vec::with_capacity(max_col_a + max_col_b + 64);
-            let mut msm_tasks: Vec<(
-                Vec<<C::OuterE as Pairing>::G1Affine>,
-                Vec<OuterScalar<C>>,
-                (u32, u32),
-            )> = Vec::with_capacity(chunk.len());
+            // Accumulate MSM outputs directly to avoid cloning bases/scalars into task structs.
+            let mut point_accs: Vec<<C::OuterE as Pairing>::G1> = Vec::with_capacity(chunk.len());
+            let mut point_ids: Vec<(u32, u32)> = Vec::with_capacity(chunk.len());
 
             for &(i, j) in chunk {
                 let prog = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -580,31 +578,13 @@ fn compute_witness_bases<C: RecursionCycle>(
                 pair_scalars.extend(diag_scalars.iter().cloned());
 
                 if !pair_bases.is_empty() {
-                    // Move out of the reused buffers by cloning into owned vectors for MSM task.
-                    // This keeps the outer loop allocation-free while preserving parallelism.
-                    msm_tasks.push((
-                        pair_bases.clone(),
-                        pair_scalars.clone(),
-                        (i as u32, j as u32),
-                    ));
+                    // MSM for this pair, using reused buffers (no cloning).
+                    let h_acc = <C::OuterE as Pairing>::G1::msm(&pair_bases, &pair_scalars).unwrap();
+                    if !h_acc.is_zero() {
+                        point_accs.push(h_acc);
+                        point_ids.push((i as u32, j as u32));
+                    }
                 }
-            }
-
-            // Process MSMs
-            let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
-                .into_par_iter()
-                .map(|(bases, scalars, pair_id)| {
-                    let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
-                    (pair_id, h_acc)
-                })
-                .filter(|(_, h_acc)| !h_acc.is_zero())
-                .collect();
-
-            let mut point_accs = Vec::with_capacity(msm_results.len());
-            let mut point_ids = Vec::with_capacity(msm_results.len());
-            for (pair_id, h_acc) in msm_results {
-                point_accs.push(h_acc);
-                point_ids.push(pair_id);
             }
 
             let mut affine_results = Vec::with_capacity(point_accs.len());
