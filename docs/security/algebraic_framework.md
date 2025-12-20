@@ -30,9 +30,11 @@ Every group element $g$ held by the adversary is represented by a handle. Intern
 *   $\tau$: The structured reference string (SRS) parameter.
 *   $\rho$: The fresh arming randomness (per instance).
 
+<a id="basis-handles"></a>
 **Available Handles (The Basis):**
 The adversary starts with handles for the public parameters (Lean CRS + Verification Key) and the specific arming instance. We list the explicit algebraic labels because the poisoning is the source of every security invariant.
 
+<a id="g1-bases"></a>
 *   **Public CRS / VK (unarmed):**
     *   $G_1$ — circuit queries
         *   $A_k$ ($k > \ell$): $u_k(\tau)$ (clean witness-column bases, no $\rho$)
@@ -44,26 +46,30 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
     *   $G_2$ — verification key elements
         *   $[\beta]_2, [\gamma]_2, [\delta]_2$
         *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
+<a id="gt-bases"></a>
     *   $G_T$ — GT-baked public quotient correction
         *   $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$, where $Q_{const}(x,\tau) = \sum_{i=0}^{\ell} x_i Q_i(\tau)$
         *   $T_{const}(x) = e(Q_{const}(x,\tau), \delta) = \prod_{i=0}^{\ell} T_i^{x_i}$ is publicly computable in $G_T$
         *   Note: $Q_{const}$ is the gap between standard and lean proofs, not the full quotient polynomial
+<a id="explicit-exclusions"></a>
 *   **Explicit Exclusions (Lean CRS):**
     *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
     *   No public-only $H$ bases in $G_1$ (the constant quotient polynomials $H_i(\tau)$ never appear as $G_1$ handles)
     *   No armed $[\gamma]_2^\rho$, $[1]_2^\rho$, or $[H(\tau)]_2^\rho$
+<a id="arming-instance"></a>
 *   **Arming Instance (masked by $\rho$):**
     *   $[\beta]_2^\rho = \rho \cdot \beta$ (constant; $v_{pub} = 0$ means no public B-columns to aggregate)
     *   $[\delta]_2^\rho = \rho \cdot \delta$
     *   $[v_j(\tau)]_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
 
-Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in §2.1 and §2.3.
+Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in [§2.1](#21-attack-vector-analysis) and [§2.3](#23-full-span-separation-primary-defense).
 
 ### 1.2 Adversary Capabilities
 The adversary can construct new handles via:
 1.  **Linear Combination:** Given handles $h_1, h_2$, compute $c_1 h_1 + c_2 h_2$. Label: $c_1 L(h_1) + c_2 L(h_2)$.
 2.  **Pairing:** Given $h_1 \in G_1, h_2 \in G_2$, compute $e(h_1, h_2)$. Label: $L(h_1) \cdot L(h_2)$.
 
+<a id="target-label"></a>
 **Goal:** Construct a handle with label equal to the Target Label. With $u_{pub} = v_{pub} = 0$:
 
 $$L(K_{core}) = \rho \cdot (\alpha\beta + W_{pub})$$
@@ -72,10 +78,12 @@ where $W_{pub}$ is the public-input contribution to the C-polynomial (since $U_{
 
 $$L_{Target} = \rho \cdot (\alpha\beta + W_{pub} + Q_{const}\delta)$$
 
+<a id="groth16-equation"></a>
 where $Q_{const}(x)$ is the affine correction computed from the gap between standard and lean proofs. Concretely, under the Groth16 equation
 
 $$e(A, B) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot e(H(x,w), [\delta]_2)$$
 
+<a id="quotient-decomposition"></a>
 and the decomposition $H(x,w) = Q_{const}(x) + H_{wit}(w)$, arming the $B$- and $[\delta]_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{Target}$ as written above.
 
 **Why $[\alpha]_1$ can be public:** Even though the adversary has $[\alpha]_1$, they cannot extract $K_{core}$ because:
@@ -118,7 +126,7 @@ We track the degrees of the independent indeterminates $\rho$ (arming secret) an
 | VK constants $[\beta]_2, [\gamma]_2, [\delta]_2$ | $G_2$ | 0 | $\le 1$ | unarmed |
 | Armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j]_2^\rho$ | $G_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
 
-Recall from the **Explicit Exclusions (Lean CRS)** above that there are no armed $G_2$ handles involving $\gamma$ (no $[\gamma]_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
+Recall from the **[Explicit Exclusions (Lean CRS)](#explicit-exclusions)** above that there are no armed $G_2$ handles involving $\gamma$ (no $[\gamma]_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
 
 When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
 
@@ -130,6 +138,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 ### 2.3 Full Span Separation (Primary Defense)
 **Claim:** The adversary cannot forge the public residual using witness handles because the public and witness subspaces are orthogonal.
 
+<a id="span-table"></a>
 **The Three Span Separations:**
 
 | Matrix | Separation | Status | Notes |
@@ -138,6 +147,7 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
 | V (B-matrix) | $V_{pub} \perp V_{wit}$ | **TRIVIAL** | $v_{pub} = 0$ (public not in B) |
 | W (C-matrix) | $W_{pub} \perp W_{wit}$ | **VERIFIED** | Primary defense; $w_{pub} \neq 0$ for statement binding |
 
+<a id="span-proof"></a>
 **Proof:**
 - Public inputs bound via `1 * reconstructed = x_pub` (C-matrix only)
 - This sets $u_{pub} = 0$ and $v_{pub} = 0$ for all public columns
@@ -149,12 +159,15 @@ Thus no pairing (nor any linear combination thereof) can yield a handle with $De
   3. $W_{pub} \perp W_{wit}$ (disjoint row support in C-matrix)
 - Result: W-span separation is the sole active defense; U/V-span are trivially satisfied
 
+<a id="baked-quotient"></a>
 ### 2.4 The Baked Quotient Invariant (Blocks Quotient Forging)
 **Claim:** Under the audit-enforced span-membership condition ($Q_{const}$ not in span($H_{ij}$)), the adversary cannot use the CRS to forge the quotient correction $Q_{const}(x)$ or its armed equivalent.
 
+<a id="adv-can-do"></a>
 *   **What the Adversary CAN Do:**
     *   The adversary **can** compute $T_{const}(x) = \prod_{i=0}^{\ell} T_i^{x_i}$ in $G_T$ from the public GT-baked handles $T_i$ and the public inputs $x_i$.
 
+<a id="adv-cannot-do"></a>
 *   **What the Adversary CANNOT Do:**
     *   They have **no $G_1$ handle** for $Q_{const}(x,\tau)$: the quotient correction bases are missing from the $G_1$ span (Lean CRS explicitly excludes them).
     *   They have **no way to apply $\rho$ inside $G_T$**: the only source of $\rho$ is in the armed $G_2$ handles, and pairing is $G_1 \times G_2 \to G_T$. There is no operation that takes a $G_T$ element and multiplies it by $\rho$.
@@ -172,20 +185,21 @@ A WE decryptor is modeled as an arbitrary algebraic adversary in the AGBGM with 
 - linear combinations in each of $G_1, G_2, G_T$, and
 - the bilinear pairing $e: G_1 \times G_2 \to G_T$.
 
-We impose **no restriction** that the decryptor must ever construct Groth16-style $(A,B,C)$ tuples. Any decryptor is just a polynomial-time pairing circuit over the published handles listed in §1.1 (Lean CRS, VK, arming instance), plus the ciphertext components (e.g. $R(vk,x)^\rho$).
+We impose **no restriction** that the decryptor must ever construct Groth16-style $(A,B,C)$ tuples. Any decryptor is just a polynomial-time pairing circuit over the published handles listed in [§1.1](#11-handles-and-labels) (Lean CRS, VK, arming instance), plus the ciphertext components (e.g. $R(vk,x)^\rho$).
 
 **Algebraic labels in $G_T$.**  
 Every handle $H_T \in G_T$ that the decryptor can ever obtain has an internal algebraic label of the form
 
 $$L(H_T) \in F_r[\alpha,\beta,\gamma,\delta,\tau,\rho]$$
 
-obtained by starting from the basis labels in §1.1 and closing under:
+obtained by starting from the basis labels in [§1.1](#11-handles-and-labels) and closing under:
 - linearity (addition and scalar multiplication of labels), and
 - bilinearity (for $E = e(H_1,H_2)$, $L(E) = L(H_1)\cdot L(H_2)$).
 
+<a id="crucially"></a>
 Crucially:
-- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j(\tau)]_2^\rho$ (L54–L56).
-- **No $G_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $G_T$ handle by $\rho$** (L154–L157). Pairing two armed $G_2$ handles is impossible (domain mismatch), so every $G_T$ handle has degree $\le 1$ in $\rho$.
+- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j(\tau)]_2^\rho$ (see [Arming Instance](#arming-instance)).
+- **No $G_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $G_T$ handle by $\rho$** (see [What Adversary CANNOT Do](#adv-cannot-do)). Pairing two armed $G_2$ handles is impossible (domain mismatch), so every $G_T$ handle has degree $\le 1$ in $\rho$.
 
 Thus the *coefficient* of $\rho$ in any $G_T$ label lies in the linear span generated from:
 - the unarmed $G_1$ bases $A_k,B^{(1)}_k,L_k,IC_i,H_{wit}$, and
@@ -193,57 +207,57 @@ Thus the *coefficient* of $\rho$ in any $G_T$ label lies in the linear span gene
 Any $\rho$-bearing $G_T$ handle must arise from a single pairing that uses exactly one armed $G_2$ input, so its $\rho$-coefficient is confined to that unarmed $G_1$ span.
 
 **Target label and the QAP RHS.**  
-In our setting with $u_{pub}=v_{pub}=0$, the honest target label for the armed GT value is (L65–L69, L71–L75):
+In our setting with $u_{pub}=v_{pub}=0$, the honest target label for the armed GT value is (see [Target Label](#target-label)):
 
 $$L_{Target} = \rho \cdot (\alpha\beta + W_{pub} + Q_{const}(x)\delta)$$
 
 where:
 - $W_{pub}$ is the public-input contribution to the $C$-polynomial,
 - $Q_{const}(x)$ is the affine quotient correction that accounts for the gap between the standard and Lean presentations,
-- $T_{const}(x) = e(Q_{const}(x,\tau),\delta)$ is baked into $G_T$ (L46–L48, L71–L75),
-- and the quotient decomposition is $H(x,w)=Q_{const}(x)+H_{wit}(w)$ (L75).
+- $T_{const}(x) = e(Q_{const}(x,\tau),\delta)$ is baked into $G_T$ (see [$G_T$ Bases](#gt-bases)),
+- and the quotient decomposition is $H(x,w)=Q_{const}(x)+H_{wit}(w)$ (see [Quotient Decomposition](#quotient-decomposition)).
 
 Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_{Target}$ up to public, $\rho$–independent multiplicative factors, because the only way to introduce $\rho$ into $G_T$ is through pairings with the armed $G_2$ handles, and the only public-input dependence available in the Lean CRS is via $W_{pub}$ and $Q_{const}(x)$.
 
 **Indices $i > \ell$ (witness-only terms).**  
 For all $i>\ell$ we explicitly provide individual witness-column elements:
-- $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (L36–L38),
-- $H_{wit}$ bases that involve at least one witness column (L40),
-- and their armed $G_2$ companions $[v_j(\tau)]_2^\rho$ for $j>\ell$ (L56).
+- $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [$G_1$ Bases](#g1-bases)),
+- $H_{wit}$ bases that involve at least one witness column (see [$G_1$ Bases](#g1-bases)),
+- and their armed $G_2$ companions $[v_j(\tau)]_2^\rho$ for $j>\ell$ (see [Arming Instance](#arming-instance)).
 
 These suffice for an honest prover to realize the witness-dependent part of the QAP identity
 
 $$\left(\sum_i a_i u_i(x)\right)\left(\sum_i a_i v_i(x)\right) = W_{pub}(x) + W_{wit}(x) \pmod{t(x)}$$
 
-in Groth16 form: the public part $W_{pub}$ is encoded solely via the $IC_i$ (L39, L138–L145), while the witness part $W_{wit}$ is encoded in $L_k$ and $H_{wit}$ (L38, L40). By W-span separation ($W_{pub} \perp W_{wit}$, L135–L146), any GT element obtained by pairing witness-only handles with armed $G_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{pub}$ contribution.
+in Groth16 form: the public part $W_{pub}$ is encoded solely via the $IC_i$ (see [$G_1$ Bases](#g1-bases), [Span Proof](#span-proof)), while the witness part $W_{wit}$ is encoded in $L_k$ and $H_{wit}$ (see [$G_1$ Bases](#g1-bases)). By W-span separation ($W_{pub} \perp W_{wit}$, see [Span Table](#span-table)), any GT element obtained by pairing witness-only handles with armed $G_2$ handles always has $\rho$–coefficient lying in the **witness span**, and can never pick up the $W_{pub}$ contribution.
 
 **All alternative RHS syntheses are covered.**  
 
 $$\sum_i a_i w_i(x) \pmod{t(x)}$$
 
 might be realized in many different ways, not just via the canonical Groth16 $(A,B,C)$ construction. In our AGBGM formulation:
-- Every $G_T$ handle the decryptor can compute has a label in the linear span generated by the basis labels in §1.1 under linearity and bilinearity.
+- Every $G_T$ handle the decryptor can compute has a label in the linear span generated by the basis labels in [§1.1](#11-handles-and-labels) under linearity and bilinearity.
 - The **coefficient of $\rho$ in that label** must lie in the span of the witness-only $w$-contributions (via $L_k, H_{wit}$) plus any *unarmed* public terms (via $IC_i$, $T_i$).
 - Because:
-  - $W_{pub}$ lives in a subspace orthogonal to the witness span (W-span separation, L135–L146), and
-  - $Q_{const}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (L148–L158),
+  - $W_{pub}$ lives in a subspace orthogonal to the witness span (W-span separation, see [Span Table](#span-table)), and
+  - $Q_{const}(x)$ is **by audit** outside the span of the published $H_{ij}$ bases (see [Baked Quotient Invariant](#baked-quotient)),
   the label $\alpha\beta + W_{pub} + Q_{const}(x)\delta$ is algebraically unreachable as a $\rho$–coefficient within the adversary's span.
 
 Equivalently, the only paths to $W_{pub}$ or $Q_{const}(x)$ inside $G_T$ would require either a missing $Q_{const}$ basis in $G_1$ or an oracle that multiplies $G_T$ by $\rho$; neither exists in the Lean CRS model.
 
-Formally, if a decryptor produced some handle $K \in G_T$ with $L(K) = L_{Target}$, then we could use that to solve GT-XPDH (as detailed in §4.4) by extracting a $\rho$–multiple of $T_{const}(x)$, contradicting SXDH/GT-XPDH. Therefore:
+Formally, if a decryptor produced some handle $K \in G_T$ with $L(K) = L_{Target}$, then we could use that to solve GT-XPDH (as detailed in [§4.4](#44-the-gt-xpdh--tep-reduction)) by extracting a $\rho$–multiple of $T_{const}(x)$, contradicting SXDH/GT-XPDH. Therefore:
 - **No pairing circuit over the published handles can synthesize the QAP RHS label with the correct $\rho$–dependence**, unless the QAP identity holds with the actual witness and the honest construction is followed.
 - This holds regardless of *how* the decryptor arranges its pairings (Groth16-style, or any algebraic re-encoding of the RHS), because we argue at the level of labels and spans, not at the level of a particular syntactic expression.
 
 **WE game interpretation.**  
 In the WE IND game, the adversary/decryptor receives:
-1. all published Lean CRS and VK handles (§1.1),
-2. full access to linear-combination and pairing oracles (§1.2),
+1. all published Lean CRS and VK handles ([§1.1](#11-handles-and-labels)),
+2. full access to linear-combination and pairing oracles ([§1.2](#12-adversary-capabilities)),
 3. challenge ciphertext components, in particular $K^\star = R(vk,x_b)^\rho$ for a hidden bit $b$.
 
 The simulator answers all linear-combination and pairing queries consistently while keeping $\rho$ confined to $G_2$ labels. Our span-separation plus GT-XPDH argument then shows:
 - For any PPT decryptor, the view when $b=0$ vs. $b=1$ differs only in a handle whose label is outside the adversary's algebraic span, and
-- Under GT-XPDH (L187–L192, L264–L273), such a handle is indistinguishable from a random $G_T$ element.
+- Under GT-XPDH (see [Crucially](#crucially), [§4.1](#41-the-core-assumption-gt-xpdh)), such a handle is indistinguishable from a random $G_T$ element.
 
 Hence the WE construction remains secure even against a **general pairing-aware decryptor**, not just against adversaries that try to manufacture Groth16-style proofs.
 
