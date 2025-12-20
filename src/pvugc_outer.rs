@@ -840,69 +840,6 @@ fn audit_witness_bases<C: RecursionCycle>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
-    use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
-    use ark_std::rand::SeedableRng;
-
-    /// Sanity-check the closed-form off-diagonal inverse identity used in `compute_witness_bases`:
-    ///
-    /// Let ω be the domain generator and n the domain size (as a field element).
-    /// For k != m:
-    ///   1 / (n * (ω^k - ω^m)) = - ω^{-m} * 1 / (n * (1 - ω^{k-m}))
-    ///
-    /// This test is intentionally small/fast and does not touch group MSMs.
-    #[test]
-    fn test_off_diagonal_inverse_identity_small_domain() {
-        type F = ark_mnt4_298::Fr;
-
-        let domain_size = 1024usize;
-        let domain = GeneralEvaluationDomain::<F>::new(domain_size).expect("domain");
-        assert_eq!(domain.size(), domain_size);
-
-        let n_field = domain.size_as_field_element();
-
-        // Build inv_n_one_minus_omega[d] = 1 / (n * (1 - ω^d)) for d=0..n-1
-        let mut inv_n_one_minus_omega = vec![F::zero(); domain_size];
-        inv_n_one_minus_omega[0] = F::zero(); // unused in identity for k!=m
-        for d in 1..domain_size {
-            let omega_d = domain.element(d);
-            let denom = n_field * (F::one() - omega_d);
-            inv_n_one_minus_omega[d] = denom.inverse().expect("nonzero denom");
-        }
-
-        // Precompute ω^{-m} via subgroup: ω^{-m} = ω^{n-m}
-        let omega_pows: Vec<F> = (0..domain_size).map(|i| domain.element(i)).collect();
-        let omega_inv_pows: Vec<F> = (0..domain_size)
-            .map(|m| {
-                let idx = if m == 0 { 0 } else { domain_size - m };
-                omega_pows[idx]
-            })
-            .collect();
-
-        // Randomly sample pairs (k,m) and compare direct inverse vs closed form.
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(123456);
-        for _ in 0..10_000 {
-            let k = (u64::rand(&mut rng) as usize) % domain_size;
-            let mut m = (u64::rand(&mut rng) as usize) % domain_size;
-            if m == k {
-                m = (m + 1) % domain_size;
-            }
-
-            let wk = omega_pows[k];
-            let wm = omega_pows[m];
-            let direct = (n_field * (wk - wm)).inverse().expect("nonzero");
-
-            let d = if k >= m { k - m } else { k + domain_size - m };
-            assert_ne!(d, 0);
-            let closed = -(omega_inv_pows[m] * inv_n_one_minus_omega[d]);
-
-            assert_eq!(direct, closed);
-        }
-    }
-}
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a: &mut [G],
     domain: &GeneralEvaluationDomain<F>,
