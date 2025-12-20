@@ -576,8 +576,8 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // Add diagonal contributions (Q bases)
-                pair_bases.extend(diag_bases);
-                pair_scalars.extend(diag_scalars);
+                pair_bases.extend(diag_bases.iter().cloned());
+                pair_scalars.extend(diag_scalars.iter().cloned());
 
                 if !pair_bases.is_empty() {
                     // Move out of the reused buffers by cloning into owned vectors for MSM task.
