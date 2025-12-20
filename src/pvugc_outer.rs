@@ -340,7 +340,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     }
 
     let mut active_pairs = HashSet::new();
-     
+
     for &i in &vars_a {
         for &j in &vars_b {
             if i < num_pub && j < num_pub {
@@ -402,6 +402,16 @@ fn compute_witness_bases<C: RecursionCycle>(
         u[j] = denoms[i];
     }
 
+    // For off-diagonal terms we repeatedly need:
+    //   inv(n * (ω^k - ω^m)) for k != m
+    // Using ω^k - ω^m = ω^m (ω^{k-m} - 1) = -ω^m (1 - ω^{k-m}),
+    // we have:
+    //   1/(n(ω^k-ω^m)) = -ω^{-m} * 1/(n(1-ω^{k-m})).
+    //
+    // We already computed inv_n_one_minus_omega[d] = 1/(n(1-ω^d)) as u[d] (time domain).
+    // Precompute ω^{-m} as ω^{n-m} in the subgroup (no inversions required).
+    let inv_n_one_minus_omega = u.clone();
+
     // Reverse u[1..] to compute correlation via convolution
     // We want sum_j L_j * u_{j-k} = sum_j L_j * u_{-(k-j)}
     // Convolution computes sum_j L_j * v_{k-j}. So we need v_x = u_{-x}.
@@ -447,6 +457,13 @@ fn compute_witness_bases<C: RecursionCycle>(
 
     let n_scalar = domain.size_as_field_element();
     let domain_elements: Vec<_> = (0..domain.size()).map(|i| domain.element(i)).collect();
+    let inv_domain_elements: Vec<_> = (0..domain.size())
+        .map(|i| {
+            // ω^{-i} = ω^{n-i} in the multiplicative subgroup (with ω^0 = 1)
+            let idx = if i == 0 { 0 } else { domain.size() - i };
+            domain_elements[idx]
+        })
+        .collect();
     let total_pairs = sorted_pairs.len();
     let progress_counter = std::sync::atomic::AtomicUsize::new(0);
 
@@ -456,7 +473,6 @@ fn compute_witness_bases<C: RecursionCycle>(
     let h_wit: Vec<_> = sorted_pairs
         .par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
-            let mut denominators = Vec::with_capacity(buffer_capacity);
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
             let mut msm_tasks: Vec<(
@@ -490,29 +506,8 @@ fn compute_witness_bases<C: RecursionCycle>(
 
                 let n_u = rows_u.len();
                 let n_v = rows_v.len();
-                let cap = n_u * n_v;
 
-                // 1. Compute denominators for off-diagonal
-                denominators.clear();
-                if denominators.capacity() < cap {
-                    denominators.reserve(cap - denominators.capacity());
-                }
-
-                for &(k, _) in rows_u {
-                    for &(m, _) in rows_v {
-                        if k != m {
-                            let diff = domain_elements[k] - domain_elements[m];
-                            denominators.push(n_scalar * diff);
-                        } else {
-                            denominators.push(OuterScalar::<C>::one()); // Dummy for index alignment
-                        }
-                    }
-                }
-
-                // Batch inversion for off-diagonal denominators
-                ark_ff::batch_inversion(&mut denominators);
-
-                // 2. Accumulate coefficients
+                // 1. Accumulate coefficients
                 acc_u.clear();
                 acc_u.resize(n_u, OuterScalar::<C>::zero());
                 acc_v.clear();
@@ -522,13 +517,10 @@ fn compute_witness_bases<C: RecursionCycle>(
                 let mut diag_bases = Vec::new();
                 let mut diag_scalars = Vec::new();
 
-                let mut denom_idx = 0;
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
                     for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
                         let k = rows_u[idx_u].0;
                         let m = rows_v[idx_v].0;
-                        let inv_denom = denominators[denom_idx];
-                        denom_idx += 1;
 
                         let prod = val_u * val_v;
 
@@ -540,6 +532,10 @@ fn compute_witness_bases<C: RecursionCycle>(
                             // Off-diagonal term
                             let wm = domain_elements[m];
                             let wk = domain_elements[k];
+                            // inv(n*(wk-wm)) = -ω^{-m} * inv_n_one_minus_omega[(k-m) mod n]
+                            let d = if k >= m { k - m } else { k + domain_size - m };
+                            // inv_n_one_minus_omega[0] is special and not used here because k != m ⇒ d != 0.
+                            let inv_denom = -(inv_domain_elements[m] * inv_n_one_minus_omega[d]);
                             let common = prod * inv_denom;
                             acc_u[idx_u] += common * wm;
                             acc_v[idx_v] -= common * wk;
@@ -782,6 +778,70 @@ fn audit_witness_bases<C: RecursionCycle>(
     let only_safe_pairs = pub_wit_count == 0 && const_const_count == 0;
     if only_safe_pairs {
         println!("[PASS] Quotient Reachability: h_query_wit contains clean span.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
+    use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+    use ark_std::rand::SeedableRng;
+
+    /// Sanity-check the closed-form off-diagonal inverse identity used in `compute_witness_bases`:
+    ///
+    /// Let ω be the domain generator and n the domain size (as a field element).
+    /// For k != m:
+    ///   1 / (n * (ω^k - ω^m)) = - ω^{-m} * 1 / (n * (1 - ω^{k-m}))
+    ///
+    /// This test is intentionally small/fast and does not touch group MSMs.
+    #[test]
+    fn test_off_diagonal_inverse_identity_small_domain() {
+        type F = ark_mnt4_298::Fr;
+
+        let domain_size = 1024usize;
+        let domain = GeneralEvaluationDomain::<F>::new(domain_size).expect("domain");
+        assert_eq!(domain.size(), domain_size);
+
+        let n_field = domain.size_as_field_element();
+
+        // Build inv_n_one_minus_omega[d] = 1 / (n * (1 - ω^d)) for d=0..n-1
+        let mut inv_n_one_minus_omega = vec![F::zero(); domain_size];
+        inv_n_one_minus_omega[0] = F::zero(); // unused in identity for k!=m
+        for d in 1..domain_size {
+            let omega_d = domain.element(d);
+            let denom = n_field * (F::one() - omega_d);
+            inv_n_one_minus_omega[d] = denom.inverse().expect("nonzero denom");
+        }
+
+        // Precompute ω^{-m} via subgroup: ω^{-m} = ω^{n-m}
+        let omega_pows: Vec<F> = (0..domain_size).map(|i| domain.element(i)).collect();
+        let omega_inv_pows: Vec<F> = (0..domain_size)
+            .map(|m| {
+                let idx = if m == 0 { 0 } else { domain_size - m };
+                omega_pows[idx]
+            })
+            .collect();
+
+        // Randomly sample pairs (k,m) and compare direct inverse vs closed form.
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(123456);
+        for _ in 0..10_000 {
+            let k = (u64::rand(&mut rng) as usize) % domain_size;
+            let mut m = (u64::rand(&mut rng) as usize) % domain_size;
+            if m == k {
+                m = (m + 1) % domain_size;
+            }
+
+            let wk = omega_pows[k];
+            let wm = omega_pows[m];
+            let direct = (n_field * (wk - wm)).inverse().expect("nonzero");
+
+            let d = if k >= m { k - m } else { k + domain_size - m };
+            assert_ne!(d, 0);
+            let closed = -(omega_inv_pows[m] * inv_n_one_minus_omega[d]);
+
+            assert_eq!(direct, closed);
+        }
     }
 }
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
