@@ -297,7 +297,7 @@ In the GBGM, the adversary interacts with group elements through an **oracle** t
 
 | World | τ (toxic waste) | CRS Elements | Target |
 |-------|-----------------|--------------|--------|
-| Real | Concrete field element | $\tau^i$ in $G_1$, $G_2$ at real τ | $e((q_0 + q_1 \cdot \tau), \delta)$ in $G_T$ |
+| Real | Concrete field element | $\tau^i$ in $G_1$, $G_2$ at real τ | $e(Q_{const}(x,\tau), \delta)$ in $G_T$ |
 | Simulated | Symbolic (never revealed) | Random handles with algebraic relations | Consistent random handle |
 
 The simulator tracks all algebraic relations between handles. For any adversary query:
