@@ -1,7 +1,4 @@
 //! Deterministic Poseidon2 parameters for BLS12-381 Fr, width=3.
-//! Mirrors the Fr(377) construction used by the STARK verifier but targets
-//! the Groth16 scalar field so we can reuse the same hash inside the VE circuit
-//! and host-side DEM.
 
 use ark_bls12_381::Fr;
 use ark_crypto_primitives::sponge::poseidon::PoseidonConfig;

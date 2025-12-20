@@ -41,8 +41,8 @@ use ark_std::rand::SeedableRng;
 use ark_std::UniformRand;
 use arkworks_groth16::{
     outer_compressed::{DefaultCycle, InnerE, InnerScalar, OuterCircuit, OuterFr},
-    test_circuits::AddCircuit,
-    test_fixtures::get_fixture,
+    test_circuits::TwoInputCircuit,
+    test_fixtures::get_fixture_two_input,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -741,20 +741,112 @@ fn verify_public_only_in_c_and_w_span_separated(
         println!("         Shared rows (first {}): {:?}", show, &shared[..show]);
     }
 
+    // 4) Public-C rows vs ALL published H_{*,*} handles
+    // Published handles: (const×wit), (wit×const), (wit×wit)
+    // For Q_const unreachable, ALL must be zero on every public-C row.
+    println!("\n  [Span] Public-C Rows vs Published Handles");
+    
+    // Build row sets for const (col 0) and witness columns
+    let const_a_rows: HashSet<usize> = extractor.a_cols[0].iter().map(|(r,_)| *r).collect();
+    let const_b_rows: HashSet<usize> = extractor.b_cols[0].iter().map(|(r,_)| *r).collect();
+    
+    let mut wit_a_rows: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.a_cols[col] {
+            wit_a_rows.insert(row);
+        }
+    }
+    let mut wit_b_rows: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.b_cols[col] {
+            wit_b_rows.insert(row);
+        }
+    }
+
+    // === NEW: Public-C binding row diagnostics (const×wit touching public rows) ===
+    //
+    // This is the specific failure mode you were worried about:
+    // witness columns appearing in B on the same row where public inputs appear in C.
+    //
+    // After the OuterCircuit refactor, each public input should have exactly ONE such
+    // witness column (`x_wit`) on its binding row (1 * x_wit = x_pub). All bit-witness
+    // columns should be confined to witness-only rows.
+    println!("\n  [Span] Public-C Row B-Witness Diagnostics");
+    if w_pub_rows.is_empty() {
+        println!("         INFO: No public-C rows (w_pub_rows empty) — statement binding missing?");
+    } else {
+        let mut pub_rows_sorted: Vec<usize> = w_pub_rows.iter().copied().collect();
+        pub_rows_sorted.sort_unstable();
+
+        let mut all_b_wit_cols: HashSet<usize> = HashSet::new();
+        for &row in &pub_rows_sorted {
+            let mut cols_on_row: Vec<usize> = Vec::new();
+            for col in num_pub..num_vars {
+                if extractor.b_cols[col].iter().any(|(r, _)| *r == row) {
+                    cols_on_row.push(col);
+                    all_b_wit_cols.insert(col);
+                }
+            }
+            cols_on_row.sort_unstable();
+            let show = cols_on_row.len().min(8);
+            if cols_on_row.is_empty() {
+                println!("         Row {}: B has no witness columns (good; no const×wit on public row)", row);
+            } else {
+                println!(
+                    "         Row {}: B witness cols = {} (showing first {}): {:?}",
+                    row,
+                    cols_on_row.len(),
+                    show,
+                    &cols_on_row[..show]
+                );
+            }
+        }
+        let mut uniq: Vec<usize> = all_b_wit_cols.into_iter().collect();
+        uniq.sort_unstable();
+        let show = uniq.len().min(12);
+        println!(
+            "         Summary: {} distinct witness columns appear in B on public-C rows (showing first {}): {:?}",
+            uniq.len(),
+            show,
+            &uniq[..show]
+        );
+        // Expected: one B-witness column per public input (num_pub - 1, excluding constant "1")
+        let expected_b_wit_cols = num_pub.saturating_sub(1);
+        if uniq.len() == expected_b_wit_cols {
+            println!("         PASS: exactly {} B-witness column(s) touch public-C rows (expected: one per public input).", expected_b_wit_cols);
+        } else if uniq.is_empty() {
+            println!("         INFO: no B-witness columns touch public-C rows (stronger than expected).");
+        } else {
+            println!("         WARN: {} B-witness columns touch public-C rows, expected {} (one per public input).", uniq.len(), expected_b_wit_cols);
+        }
+    }
+    
+    // 5) H_{0,0} isolation check (INFORMATIONAL ONLY)
+    //
+    // NOTE: The Lean CRS removes B column 0 (the constant "1") from b_g2_query.
+    // This means the prover has NO bases for B[r,0], so H_{0,0} = const×const
+    // CANNOT be forged regardless of circuit structure.
+    //
+    // This check is kept for circuit analysis purposes but is NOT a security requirement.
+    println!("\n  [Span] H_{{0,0}} Isolation Check (informational)");
+    
+    let const_const_rows: Vec<usize> = const_a_rows.intersection(&const_b_rows).copied().collect();
+    println!("         Rows with H_{{0,0}} support (const×const): {}", const_const_rows.len());
+    println!("         NOTE: Lean CRS removes B column 0 → H_{{0,0}} unforgeable at CRS level");
+
     let passed = u_pub_nonzero.is_empty()
         && v_pub_nonzero.is_empty()
         && c_pub_missing.is_empty()
         && w_sep;
 
     if passed {
-        println!("\n  --- Span Membership Verdict ---");
-        println!("  u_pub=0, v_pub=0 ⇒ published H_ij are witness-only (A_wit·B_wit)/Z directions.");
-        println!("  W_pub ⟂ W_wit ⇒ the baked Q_const lives in a disjoint public-C quotient direction.");
-        println!("  Therefore Q_const ∉ span(H_ij), so T_const^ρ is unreachable via e(·, δ^ρ).");
-        println!("[PASS] DECISIVE: Q_const ∉ span(H_{{ij}})");
-        println!("       → Adversary CANNOT synthesize T_const^ρ from e(H_ij, δ^ρ)");
+        println!("\n  --- Security Verdict: PASS ---");
+        println!("  ✓ u_pub=0, v_pub=0 (public not in A/B)");
+        println!("  ✓ W_pub ⟂ W_wit (C-row separation)");
+        println!("  ✓ H_{{0,0}}: N/A (Lean CRS strips B column 0)");
+        println!("[PASS] All structural security properties hold");
     } else {
-        println!("[FAIL] Span membership check failed - potential security issue!");
+        println!("[FAIL] Structural checks failed!");
     }
 
     passed
@@ -1077,13 +1169,17 @@ where
 
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
-    let fixture = get_fixture();
-    let x_val = InnerScalar::<DefaultCycle>::from(10u64);
-    let circuit_inner = AddCircuit::with_public_input(x_val);
+    let fixture = get_fixture_two_input();
+    
+    // SP1-style: 2 public inputs (vkey_hash, committed_values_digest)
+    let input1 = InnerScalar::<DefaultCycle>::from(67890u64);  // vkey_hash
+    let input2 = InnerScalar::<DefaultCycle>::from(11111u64);  // committed_values_digest
+    
+    let circuit_inner = TwoInputCircuit::new(input1, input2);
     let proof_inner =
         Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut rng).expect("inner proof");
 
-    let x_inner = vec![x_val];
+    let x_inner = vec![input1, input2];
 
     OuterCircuit::new((*fixture.vk_inner).clone(), x_inner, proof_inner)
 }
@@ -1200,13 +1296,13 @@ impl MatrixExtractor {
                 // Only accumulate barycentric terms when we have not hit a root.
                 // If r == ω_k for some k, the true value is just the sum of coeffs at row k.
                 if root_sum.is_none() {
-                    acc += (val * omega_i) * denom.inverse().unwrap();
-                }
+                acc += (val * omega_i) * denom.inverse().unwrap();
+            }
             }
             if let Some(s) = root_sum {
                 s
             } else {
-                acc * common
+            acc * common
             }
         };
 
@@ -1445,32 +1541,32 @@ fn check_independence_streaming(
         // of the baked trapdoor (α), not as a U_wit direction. We therefore only model
         // these U_wit handles for k >= num_pub (witness columns).
         if k >= num_pub {
-            // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
+        // 1. u_k * D_pub * delta -> beta*delta*u + delta*u*V
             // Uses BetaDeltaUWit because only witness columns have non-zero A-queries.
-            add_basis_vec(
-                "u_k * D_pub * delta",
-                k,
-                vec![
+        add_basis_vec(
+            "u_k * D_pub * delta",
+            k,
+            vec![
                     (TrapdoorMonomial::BetaDeltaUWit, u_val),
-                    (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
-                ],
-            );
+                (TrapdoorMonomial::DeltaUV, u_val * v_pub_r),
+            ],
+        );
 
             // 2. u_k * D_delta * delta -> u * delta^2 (under δ-normalization)
             // Actual: e([u_k]_1, [δ]_2^ρ) = ρ·δ·u_k
             // Normalized: δ · (ρ·δ·u_k) = ρ·δ²·u_k → DeltaSqUWit
-            add_basis_vec(
-                "u_k * D_delta * delta",
-                k,
+        add_basis_vec(
+            "u_k * D_delta * delta",
+            k,
                 vec![(TrapdoorMonomial::DeltaSqUWit, u_val)],
-            );
+        );
 
-            // 3. u_k * D_j * delta -> u * v_j * delta
-            add_basis_vec(
-                "u_k * D_j * delta",
-                k,
-                vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
-            );
+        // 3. u_k * D_j * delta -> u * v_j * delta
+        add_basis_vec(
+            "u_k * D_j * delta",
+            k,
+            vec![(TrapdoorMonomial::DeltaPureUV, u_val)],
+        );
         }
 
         if k >= num_pub {

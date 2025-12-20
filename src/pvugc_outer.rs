@@ -271,6 +271,56 @@ fn compute_witness_bases<C: RecursionCycle>(
     );
 
     let num_pub = cs.num_instance_variables();
+
+    // Identify the single witness columns that appear in B on the public-input binding row(s).
+    //
+    // After the OuterCircuit refactor, each public input x_pub is bound via a constraint:
+    //   1 * x_wit = x_pub
+    // which places:
+    //   - x_pub (public) in C on some row r,
+    //   - x_wit (witness) in B on that same row r,
+    //   - and the constant ONE wire in A.
+    //
+    // Publishing the const×wit quotient bases H_{0, x_wit} for those rows would give the
+    // adversary a /δ-direction handle with support on the public-C row. We therefore omit
+    // exactly those (0, x_wit) pairs from the Lean CRS and rely on the standard–lean C-gap
+    // machinery to bake their (statement-dependent, witness-independent) GT effect into
+    // t_const_points_gt.
+    let mut omit_const_wit_cols: HashSet<usize> = HashSet::new();
+    if num_pub > 1 {
+        for pub_col in 1..num_pub {
+            // Find rows where this public column appears in C.
+            // We expect exactly one such row per public input under the binding architecture.
+            let mut c_rows: Vec<usize> = Vec::new();
+            for (row, terms) in matrices.c.iter().enumerate() {
+                if row >= domain_size {
+                    continue;
+                }
+                if terms.iter().any(|&(_, col)| col == pub_col) {
+                    c_rows.push(row);
+                }
+            }
+            for &row in &c_rows {
+                // Collect witness columns that appear in B on this row.
+                let b_wit_cols: Vec<usize> = matrices.b[row]
+                    .iter()
+                    .filter_map(|&(_, col)| if col >= num_pub { Some(col) } else { None })
+                    .collect();
+                // Heuristic (tight for our intended binding row): exactly one witness col in B.
+                if b_wit_cols.len() == 1 {
+                    omit_const_wit_cols.insert(b_wit_cols[0]);
+                }
+            }
+        }
+    }
+    if !omit_const_wit_cols.is_empty() {
+        println!(
+            "[Quotient] Omitting {} (const,wit) columns touching public-C binding row(s): {:?}",
+            omit_const_wit_cols.len(),
+            omit_const_wit_cols.iter().take(8).collect::<Vec<_>>()
+        );
+    }
+
     let mut vars_a = HashSet::new();
     let mut vars_b = HashSet::new();
     for (row, terms) in matrices.a.iter().enumerate() {
@@ -294,6 +344,10 @@ fn compute_witness_bases<C: RecursionCycle>(
     for &i in &vars_a {
         for &j in &vars_b {
             if i < num_pub && j < num_pub {
+                continue;
+            }
+            // Critical hardening: omit const×wit bases that touch public-C binding rows.
+            if i == 0 && omit_const_wit_cols.contains(&j) {
                 continue;
             }
             active_pairs.insert((i, j));
@@ -554,6 +608,31 @@ fn compute_witness_bases<C: RecursionCycle>(
         count,
         wit_start.elapsed()
     );
+
+    // Post-compute audit: ensure our omission rule actually took effect.
+    //
+    // We intentionally omit (const,wit) bases (0, j) for witness columns `j` that touch the
+    // public-input binding row(s). If these pairs appear here, then the lean CRS would include
+    // the very bases we meant to bake via the standard–lean C-gap machinery.
+    if !omit_const_wit_cols.is_empty() {
+        let mut offenders: Vec<(u32, u32)> = Vec::new();
+        for &(i, j, _) in &h_wit {
+            if i == 0 && omit_const_wit_cols.contains(&(j as usize)) {
+                offenders.push((i, j));
+                if offenders.len() >= 8 {
+                    break;
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "[SECURITY AUDIT FAIL] Found forbidden (const,wit) quotient bases for omitted witness cols. \
+             Expected no (0,j) bases for j in {:?}, but saw examples: {:?}",
+            omit_const_wit_cols,
+            offenders
+        );
+    }
+
     WitnessBasesResult { h_query_wit: h_wit }
 }
 // --- Group FFT Helpers ---

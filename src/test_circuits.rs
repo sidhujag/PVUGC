@@ -73,3 +73,62 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for AddCircuit<F> {
         Ok(())
     }
 }
+
+/// Two-input circuit mimicking SP1's Groth16 wrapper structure
+///
+/// PUBLIC inputs:
+/// - input1: First public input (e.g., vkey_hash)
+/// - input2: Second public input (e.g., committed_values_digest)
+///
+/// PRIVATE witness:
+/// - witness: A value that satisfies: witness = input1 + input2
+#[derive(Clone)]
+pub struct TwoInputCircuit<F: PrimeField> {
+    pub input1: Option<F>,
+    pub input2: Option<F>,
+    pub witness: Option<F>,
+}
+
+impl<F: PrimeField> TwoInputCircuit<F> {
+    /// Create circuit with two public inputs
+    pub fn new(input1: F, input2: F) -> Self {
+        let witness = input1 + input2;
+        Self {
+            input1: Some(input1),
+            input2: Some(input2),
+            witness: Some(witness),
+        }
+    }
+    
+    /// Create with specific witness
+    pub fn with_witness(input1: F, input2: F, witness: F) -> Self {
+        Self {
+            input1: Some(input1),
+            input2: Some(input2),
+            witness: Some(witness),
+        }
+    }
+}
+
+impl<F: PrimeField> ConstraintSynthesizer<F> for TwoInputCircuit<F> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
+        // Two public inputs (like SP1's vkey_hash and committed_values_digest)
+        let input1_var = FpVar::new_input(cs.clone(), || {
+            self.input1.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        
+        let input2_var = FpVar::new_input(cs.clone(), || {
+            self.input2.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+        let witness_var = FpVar::new_witness(cs.clone(), || {
+            self.witness.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+
+        // Constraint: witness = input1 + input2
+        let sum = &input1_var + &input2_var;
+        witness_var.enforce_equal(&sum)?;
+
+        Ok(())
+    }
+}

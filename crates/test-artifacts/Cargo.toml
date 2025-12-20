@@ -1,0 +1,11 @@
+[package]
+name = "test-artifacts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "test_artifacts"
+path = "src/lib.rs"
+
+

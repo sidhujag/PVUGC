@@ -549,7 +549,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "heavy circuit generation; run manually"]
     fn adaptor_ve_constraint_count() {
         let key_len = super::gt_serialized_len();
         let ct_len = super::VE_KEYS.ct_len;

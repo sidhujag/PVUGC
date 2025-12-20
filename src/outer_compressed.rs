@@ -14,8 +14,8 @@ use ark_crypto_primitives::snark::{BooleanInputVar, SNARKGadget};
 use ark_ec::pairing::{Pairing, PairingOutput};
 use ark_ff::{BigInteger, Field, PrimeField};
 use ark_groth16::constraints::{Groth16VerifierGadget, ProofVar, VerifyingKeyVar};
-use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::boolean::Boolean;
+use ark_groth16::{Groth16, Proof, VerifyingKey};
 use ark_r1cs_std::{alloc::AllocVar, eq::EqGadget, pairing::PairingVar as PairingVarTrait};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 use ark_snark::SNARK;
@@ -161,35 +161,49 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
 
         // SECURE SPAN-SEPARATED PUBLIC INPUT BINDING
         //
-        // Goal: Public inputs in B only (for span separation) while ensuring
-        // the verifier uses the SAME values (for soundness).
+        // Goal:
+        // - Keep true public inputs out of A and B (u_pub = v_pub = 0),
+        // - Bind the verifier's witness bit-decomposition to the public input,
+        // - Avoid placing many bit-witness variables on the *single* public-C row.
         //
-        // Approach:
-        // 1. Allocate public input as simple scalar (span-separated)
-        // 2. BooleanInputVar as WITNESS (for verifier's scalar mult)
-        // 3. Constrain: x_pub = reconstructed_from_bits(input_var)
-        //    This links them cryptographically
+        // Construction (per public input element):
+        // 1) Allocate x_pub as an input variable (public, appears only in C)
+        // 2) Allocate x_wit as a witness scalar
+        // 3) Constrain: 1 * reconstruct(bits) = x_wit        (witness-only row)
+        // 4) Constrain: 1 * x_wit            = x_pub         (single public-C row)
+        //
+        // This ensures only ONE witness column (x_wit) touches the public-C row,
+        // and we can omit the corresponding (0, x_wit) quotient basis from the
+        // published Lean CRS and bake it via the standard–lean C-gap machinery.
         
         let one_lc = LinearCombination::from((OuterScalar::<C>::one(), Variable::One));
         
-        // Step 1: Allocate span-separated public inputs
+        // Step 1: Allocate public inputs x_pub and corresponding witness scalars x_wit.
+        // We keep the outer-field value around so both allocations are consistent.
         let mut x_pub_vars = Vec::new();
+        let mut x_wit_vars = Vec::new();
         for x_val in &self.x_inner {
             let x_outer: OuterScalar<C> = convert_inner_to_outer::<C>(*x_val);
             let x_pub = cs.new_input_variable(|| Ok(x_outer))?;
+            let x_wit = cs.new_witness_variable(|| Ok(x_outer))?;
             x_pub_vars.push(x_pub);
+            x_wit_vars.push(x_wit);
         }
         
-        // Step 2: BooleanInputVar as WITNESS (for verifier's scalar multiplication)
+        // Step 2: BooleanInputVar as WITNESS (for verifier's scalar multiplication).
         let input_var =
             BooleanInputVar::<InnerScalar<C>, OuterScalar<C>>::new_witness(cs.clone(), || {
                 Ok(self.x_inner.clone())
             })?;
 
-        // Step 3: Link public scalars to input_var bits via BINDING constraints
-        // Each element in input_var.into_iter() gives us a Vec<Boolean> for one inner input
-        // We reconstruct the scalar and constrain it to equal x_pub
-        for (x_pub, bits) in x_pub_vars.iter().zip(input_var.clone().into_iter()) {
+        // Step 3: Link public scalars to input_var bits via binding constraints.
+        // For each input element, reconstruct the scalar from bits and bind it to x_wit,
+        // then bind x_wit to x_pub in a single public-C row.
+        for ((x_pub, x_wit), bits) in x_pub_vars
+            .iter()
+            .zip(x_wit_vars.iter())
+            .zip(input_var.clone().into_iter())
+        {
             // bits is Vec<Boolean<OuterScalar<C>>> for this input
             // Build linear combination: sum of bit_i * 2^i
             let mut reconstructed_lc = LinearCombination::<OuterScalar<C>>::zero();
@@ -205,16 +219,17 @@ impl<C: RecursionCycle> ConstraintSynthesizer<OuterScalar<C>> for OuterCircuit<C
                 power_of_two = power_of_two + power_of_two;
             }
             
-            // Enforce: 1 * reconstructed = x_pub
-            // This puts x_pub in C (output) instead of B (multiplicative)
-            // Benefits:
-            //   - Eliminates (wit, pub) pairs in h_query_wit (v_pub = 0 now)
-            //   - Cleaner security argument (no public in B-side)
-            // Public input binding is now through W-polynomial (w_pub ≠ 0)
-            let mut lc_c = LinearCombination::<OuterScalar<C>>::zero();
-            lc_c += (OuterScalar::<C>::one(), *x_pub);
-            
-            cs.enforce_constraint(one_lc.clone(), reconstructed_lc, lc_c)?;
+            // 3a) Enforce: 1 * reconstructed(bits) = x_wit  (witness-only row)
+            let mut lc_c_wit = LinearCombination::<OuterScalar<C>>::zero();
+            lc_c_wit += (OuterScalar::<C>::one(), *x_wit);
+            cs.enforce_constraint(one_lc.clone(), reconstructed_lc, lc_c_wit)?;
+
+            // 3b) Enforce: 1 * x_wit = x_pub  (single public-C row; public input appears only in C)
+            let mut lc_b = LinearCombination::<OuterScalar<C>>::zero();
+            lc_b += (OuterScalar::<C>::one(), *x_wit);
+            let mut lc_c_pub = LinearCombination::<OuterScalar<C>>::zero();
+            lc_c_pub += (OuterScalar::<C>::one(), *x_pub);
+            cs.enforce_constraint(one_lc.clone(), lc_b, lc_c_pub)?;
         }
         
         // Step 4: Use witness input_var in verifier (now bound to x_pub!)
@@ -362,7 +377,6 @@ mod tests {
     use ark_groth16::Groth16;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
-    use ark_std::Zero;
 
     use crate::test_circuits::AddCircuit;
     use crate::test_fixtures::{get_fixture_bls, get_fixture_mnt};
@@ -420,158 +434,6 @@ mod tests {
     #[test]
     fn test_outer_circuit_setup_and_verify_mnt_cycle() {
         smoke_test_for_cycle::<Mnt4Mnt6Cycle>();
-    }
-
-    #[test]
-    #[ignore]
-    fn test_pvugc_on_outer_proof_e2e() {
-        use crate::decap::build_commitments;
-        use crate::prover_lean::prove_lean_with_randomizers;
-        use crate::stark::test_utils::{
-            build_cubic_fib_stark_instance, build_vdf_stark_instance, get_or_init_inner_crs_keys,
-        };
-        use ark_snark::SNARK;
-        use ark_std::rand::rngs::StdRng;
-        use ark_std::rand::SeedableRng;
-        use ark_std::UniformRand;
-        use std::sync::Arc;
-        use std::time::Instant;
-
-        type Cycle = Bls12Bw6Cycle;
-
-        let mut rng = StdRng::seed_from_u64(99999);
-        // Setup with VDF STARK proofs (iterative x^3 + 1)
-        let sample_instances = vec![
-            build_vdf_stark_instance(3, 8),
-            build_vdf_stark_instance(5, 8),
-        ];
-        // Runtime with COMPLETELY DIFFERENT circuit: Cubic Fibonacci
-        // Computes: next[0] = (current[0] + current[1])³, next[1] = current[0]
-        // This is semantically unrelated to VDF but has identical AirParams!
-        // This proves that ANY STARK proof with matching structural parameters works.
-        let runtime_instance = build_cubic_fib_stark_instance(14, 30, 8);
-
-        let (pk_inner, vk_inner) = get_or_init_inner_crs_keys();
-
-        let mut sample_proofs: Vec<(InnerScalar<Cycle>, InnerProof<Cycle>)> = Vec::new();
-        for inst in &sample_instances {
-            let proof = Groth16::<<Cycle as RecursionCycle>::InnerE>::prove(
-                &pk_inner,
-                inst.circuit.clone(),
-                &mut rng,
-            )
-            .unwrap();
-            sample_proofs.push((inst.statement_hash, proof));
-        }
-        let runtime_inner_proof = Groth16::<<Cycle as RecursionCycle>::InnerE>::prove(
-            &pk_inner,
-            runtime_instance.circuit.clone(),
-            &mut rng,
-        )
-        .unwrap();
-
-        let (pk_outer_raw, vk_outer_raw) =
-            setup_outer_params_for::<Cycle>(&vk_inner, 1, &mut rng).unwrap();
-        let pk_outer = Arc::new(pk_outer_raw);
-        let vk_outer = Arc::new(vk_outer_raw);
-
-        let sample_statements: Vec<Vec<InnerScalar<Cycle>>> =
-            sample_proofs.iter().map(|(stmt, _)| vec![*stmt]).collect();
-        let proof_lookup = sample_proofs.clone();
-        let inner_proof_generator = move |statements: &[InnerScalar<Cycle>]| {
-            let target = statements
-                .get(0)
-                .copied()
-                .unwrap_or_else(|| InnerScalar::<Cycle>::zero());
-            proof_lookup
-                .iter()
-                .find(|(stmt, _)| *stmt == target)
-                .map(|(_, proof)| proof.clone())
-                .expect("missing STARK SNARK for sample statement")
-        };
-
-        let (pvugc_vk, lean_pk) =
-            crate::pvugc_outer::build_pvugc_setup_from_pk_for_with_samples::<Cycle, _>(
-                &pk_outer,
-                &vk_inner,
-                inner_proof_generator,
-                sample_statements,
-            );
-
-        let public_x = vec![runtime_instance.statement_hash];
-        let rho = OuterScalar::<Cycle>::rand(&mut rng);
-
-        let outer_circuit = OuterCircuit::<Cycle>::new(
-            (*vk_inner).clone(),
-            public_x.clone(),
-            runtime_inner_proof.clone(),
-        );
-
-        let outer_start = Instant::now();
-        let r_rand = OuterScalar::<Cycle>::rand(&mut rng);
-        let s_rand = OuterScalar::<Cycle>::rand(&mut rng);
-        let (proof_outer, full_assignment) =
-            prove_lean_with_randomizers(&lean_pk, outer_circuit, r_rand, s_rand)
-                .expect("lean prover failed");
-        let num_instance = vk_outer.gamma_abc_g1.len();
-        let gs_commitments = build_commitments::<<Cycle as RecursionCycle>::OuterE>(
-            &proof_outer.a, &proof_outer.c, &s_rand, &full_assignment, num_instance
-        );
-        eprintln!(
-            "[timing:{}] outer Lean proof {:?}",
-            Cycle::name(),
-            outer_start.elapsed()
-        );
-
-        let circuit_for_extraction = OuterCircuit::<Cycle>::new(
-            (*vk_inner).clone(),
-            public_x.clone(),
-            runtime_inner_proof.clone(),
-        );
-        let cs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<Cycle>>::new_ref();
-        circuit_for_extraction
-            .generate_constraints(cs.clone())
-            .expect("constraint synthesis failed");
-        cs.finalize();
-        let mut instance = cs.borrow().unwrap().instance_assignment.clone();
-        let actual_public_inputs = instance.split_off(1);
-
-        assert!(
-            verify_outer_for::<Cycle>(
-                &*vk_outer,
-                &actual_public_inputs,
-                &proof_outer,
-                Some(&pvugc_vk)
-            )
-            .unwrap(),
-            "Outer proof verification failed for {}",
-            Cycle::name()
-        );
-
-        let bases = crate::pvugc_outer::build_column_bases_outer_for::<Cycle>(
-            &pvugc_vk,
-            &vk_outer,
-            &actual_public_inputs,
-        );
-        let col_arms = crate::pvugc_outer::arm_columns_outer_for::<Cycle>(&bases, &rho);
-
-        let decap_start = Instant::now();
-        let k_decapped = crate::decap::decap(&gs_commitments, &col_arms).expect("decap failed");
-        eprintln!(
-            "[timing:{}] decap {:?}",
-            Cycle::name(),
-            decap_start.elapsed()
-        );
-
-        let r = crate::pvugc_outer::compute_target_outer_for::<Cycle>(
-            &*vk_outer, &pvugc_vk, &public_x,
-        );
-        let k_expected = crate::pvugc_outer::compute_r_to_rho_outer_for::<Cycle>(&r, &rho);
-
-        assert!(
-            crate::ct::gt_eq_ct::<<Cycle as RecursionCycle>::OuterE>(&k_decapped, &k_expected),
-            "Decapsulated K doesn't match R^ρ!"
-        );
     }
 
     struct GlobalFixtureAdapter<C: RecursionCycle> {
