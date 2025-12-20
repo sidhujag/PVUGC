@@ -9,9 +9,9 @@ This document defines the algebraic framework used to prove the security of PVUG
 
 **Notation:** We write the group law in $G_T$ multiplicatively. The target is:
 
-$$R_{baked}(vk, x) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot T_{const}(x)$$
+$$R_{baked}(vk, x) = e(\alpha_1, \beta_2) \cdot e(IC(x), \gamma_2) \cdot T_{const}(x)$$
 
-where $T_{const}(x) = \prod_i T_i^{x_i} = e(Q_{const}(x), [\delta]_2)$ is the baked quotient correction.
+where $T_{const}(x) = \prod_i T_i^{x_i} = e(Q_{const}(x), \delta_2)$ is the baked quotient correction.
 
 **Architecture:** Public inputs are bound in the C-matrix only ($v_{pub} = 0$, $u_{pub} = 0$). This:
 - Eliminates $(wit,pub)$ cross-terms in the quotient
@@ -42,10 +42,10 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
         *   $L_k$ ($k > \ell$): $\frac{\beta u_k(\tau) + \alpha v_k(\tau) + w_k(\tau)}{\delta}$ (witness-only, poisoned by $\alpha,\beta,\delta^{-1}$)
         *   $IC_i$ ($i \le \ell$): $\frac{\beta u_i(\tau) + \alpha v_i(\tau) + w_i(\tau)}{\gamma}$ (public-input coefficients, poisoned by $\gamma^{-1}$)
         *   $H_{wit}$: $H_{i,j}(\tau)$ where at least one of $i,j$ indexes a witness column
-        *   $[\alpha]_1$: $\alpha$ (Groth16 trapdoor; public VK element)
+        *   $\alpha_1$: $\alpha$ (Groth16 trapdoor; public VK element)
     *   $G_2$ — verification key elements
-        *   $[\beta]_2, [\gamma]_2, [\delta]_2$
-        *   $B^{(2)}_k = [v_k(\tau)]_2$ (clean, unmasked)
+        *   $\beta_2, \gamma_2, \delta_2$
+        *   $B^{(2)}_k = v_k(\tau)$ in $G_2$ (clean, unmasked)
 <a id="gt-bases"></a>
     *   $G_T$ — GT-baked public quotient correction
         *   $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$, where $Q_{const}(x,\tau) = \sum_{i=0}^{\ell} x_i Q_i(\tau)$
@@ -55,12 +55,12 @@ The adversary starts with handles for the public parameters (Lean CRS + Verifica
 *   **Explicit Exclusions (Lean CRS):**
     *   No clean polynomial bases for public columns (only witness-column $A_k/B_k$ are published); no stand-alone Powers-of-$\tau$ ladder
     *   No public-only $H$ bases in $G_1$ (the constant quotient polynomials $H_i(\tau)$ never appear as $G_1$ handles)
-    *   No armed $[\gamma]_2^\rho$, $[1]_2^\rho$, or $[H(\tau)]_2^\rho$
+    *   No armed $\gamma_2^\rho$, $1_2^\rho$, or $H(\tau)_2^\rho$
 <a id="arming-instance"></a>
 *   **Arming Instance (masked by $\rho$):**
-    *   $[\beta]_2^\rho = \rho \cdot \beta$ (constant; $v_{pub} = 0$ means no public B-columns to aggregate)
-    *   $[\delta]_2^\rho = \rho \cdot \delta$
-    *   $[v_j(\tau)]_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
+    *   $\beta_2^\rho = \rho \cdot \beta$ (constant; $v_{pub} = 0$ means no public B-columns to aggregate)
+    *   $\delta_2^\rho = \rho \cdot \delta$
+    *   $v_j(\tau)_2^\rho = \rho \cdot v_j(\tau)$ for all witness columns $j > \ell$
 
 Even though the Lean CRS exposes clean witness-column bases ($A_k$, $B_k$), they span only the witness subspace. Because public-only $H$ bases and Powers-of-$\tau$ elements are withheld, and because the circuit is audited to keep public columns linear, those witness handles remain orthogonal to the baked public quotient. This is the core "span separation" analyzed in [§2.1](#21-attack-vector-analysis) and [§2.3](#23-full-span-separation-primary-defense).
 
@@ -81,13 +81,13 @@ $$L_{Target} = \rho \cdot (\alpha\beta + W_{pub} + Q_{const}\delta)$$
 <a id="groth16-equation"></a>
 where $Q_{const}(x)$ is the affine correction computed from the gap between standard and lean proofs. Concretely, under the Groth16 equation
 
-$$e(A, B) = e([\alpha]_1, [\beta]_2) \cdot e(IC(x), [\gamma]_2) \cdot e(H(x,w), [\delta]_2)$$
+$$e(A, B) = e(\alpha_1, \beta_2) \cdot e(IC(x), \gamma_2) \cdot e(H(x,w), \delta_2)$$
 
 <a id="quotient-decomposition"></a>
-and the decomposition $H(x,w) = Q_{const}(x) + H_{wit}(w)$, arming the $B$- and $[\delta]_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{Target}$ as written above.
+and the decomposition $H(x,w) = Q_{const}(x) + H_{wit}(w)$, arming the $B$- and $\delta_2$-handles multiplies this target by $\rho$, so the algebraic label of the armed target is exactly $L_{Target}$ as written above.
 
-**Why $[\alpha]_1$ can be public:** Even though the adversary has $[\alpha]_1$, they cannot extract $K_{core}$ because:
-- With $v_{pub} = 0$, pairing $[\alpha]_1$ with armed B-handles yields no statement-dependent pollution
+**Why $\alpha_1$ can be public:** Even though the adversary has $\alpha_1$, they cannot extract $K_{core}$ because:
+- With $v_{pub} = 0$, pairing $\alpha_1$ with armed B-handles yields no statement-dependent pollution
 - The adversary cannot synthesize $\rho W_{pub}$ from witness handles (blocked by W-span separation)
 - Statement binding is through $R(vk, x)$ via $IC_i = w_i/\gamma$, not through armed B-handles
 
@@ -110,7 +110,7 @@ With public inputs in C-matrix only ($v_{pub} = 0$, $u_{pub} = 0$), the attack s
 - Since $u_{pub} = v_{pub} = 0$, $H_{ij}$ only encodes $(U_{wit} \cdot V_{wit})/Z$
 - **Blocked by:** Span membership check ($Q_{const}$ not in span($H_{ij}$), verified by audit)
 
-**Note:** With $v_{pub} = 0$, pairing $[\alpha]_1$ with any armed B-handle yields no statement-dependent "pollution" term. This eliminates the classic V-span attack vector entirely by architectural design.
+**Note:** With $v_{pub} = 0$, pairing $\alpha_1$ with any armed B-handle yields no statement-dependent "pollution" term. This eliminates the classic V-span attack vector entirely by architectural design.
 
 ### 2.2 The Gamma Invariant (Supplementary Barrier)
 **Claim:** (Supplementary) The adversary cannot construct the term $\rho \cdot \gamma \cdot IC(x)$ without satisfying the R1CS. This barrier is not relied upon for the main span-separation argument but provides additional algebraic separation.
@@ -123,10 +123,10 @@ We track the degrees of the independent indeterminates $\rho$ (arming secret) an
 |-------------|:-----:|:----------:|:------------:|-------|
 | $A_k$, $L_k$, $H_{wit}$ | $G_1$ | 0 | 0 | witness-column bases (no $\gamma$ factor) |
 | $IC_i$ | $G_1$ | 0 | -1 | only source with $\gamma^{-1}$ |
-| VK constants $[\beta]_2, [\gamma]_2, [\delta]_2$ | $G_2$ | 0 | $\le 1$ | unarmed |
-| Armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j]_2^\rho$ | $G_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
+| VK constants $\beta_2, \gamma_2, \delta_2$ | $G_2$ | 0 | ≤ 1 | unarmed |
+| Armed handles $\beta_2^\rho, \delta_2^\rho, v_{j,2}^\rho$ | $G_2$ | 1 | 0 | carry $\rho$, never $\gamma$ |
 
-Recall from the **[Explicit Exclusions (Lean CRS)](#explicit-exclusions)** above that there are no armed $G_2$ handles involving $\gamma$ (no $[\gamma]_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
+Recall from the **[Explicit Exclusions (Lean CRS)](#explicit-exclusions)** above that there are no armed $G_2$ handles involving $\gamma$ (no $\gamma_2^\rho$); the only source of non-zero $\gamma$-degree is the unarmed $IC_i$ with $Deg_\gamma = -1$.
 
 When the adversary forms a pairing $E = e(H_1, H_2)$, the degrees add:
 
@@ -198,12 +198,12 @@ obtained by starting from the basis labels in [§1.1](#11-handles-and-labels) an
 
 <a id="crucially"></a>
 Crucially:
-- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $[\beta]_2^\rho, [\delta]_2^\rho, [v_j(\tau)]_2^\rho$ (see [Arming Instance](#arming-instance)).
+- **$\rho$ appears only in $G_2$ input labels**, linearly, via the armed handles $\beta_2^\rho, \delta_2^\rho, v_j(\tau)_2^\rho$ (see [Arming Instance](#arming-instance)).
 - **No $G_1$ handle carries $\rho$**, and there is **no primitive that multiplies a $G_T$ handle by $\rho$** (see [What Adversary CANNOT Do](#adv-cannot-do)). Pairing two armed $G_2$ handles is impossible (domain mismatch), so every $G_T$ handle has degree $\le 1$ in $\rho$.
 
 Thus the *coefficient* of $\rho$ in any $G_T$ label lies in the linear span generated from:
 - the unarmed $G_1$ bases $A_k,B^{(1)}_k,L_k,IC_i,H_{wit}$, and
-- the unarmed $G_2$ base $[\beta]_2,[\gamma]_2,[\delta]_2$.
+- the unarmed $G_2$ base $\beta_2,\gamma_2,\delta_2$.
 Any $\rho$-bearing $G_T$ handle must arise from a single pairing that uses exactly one armed $G_2$ input, so its $\rho$-coefficient is confined to that unarmed $G_1$ span.
 
 **Target label and the QAP RHS.**  
@@ -223,7 +223,7 @@ Any **GT element equal to the QAP RHS "honest value"** necessarily has label $L_
 For all $i>\ell$ we explicitly provide individual witness-column elements:
 - $A_k = u_k(\tau)$, $B^{(1)}_k = v_k(\tau)$, $L_k = (\beta u_k(\tau)+\alpha v_k(\tau)+w_k(\tau))/\delta$ for $k>\ell$ (see [$G_1$ Bases](#g1-bases)),
 - $H_{wit}$ bases that involve at least one witness column (see [$G_1$ Bases](#g1-bases)),
-- and their armed $G_2$ companions $[v_j(\tau)]_2^\rho$ for $j>\ell$ (see [Arming Instance](#arming-instance)).
+- and their armed $G_2$ companions $v_j(\tau)_2^\rho$ for $j>\ell$ (see [Arming Instance](#arming-instance)).
 
 These suffice for an honest prover to realize the witness-dependent part of the QAP identity
 
@@ -315,12 +315,12 @@ The adversary **cannot distinguish** real from simulated worlds because:
 
 **Adversary's View:**
 - Lean CRS in $G_1$: witness-only bases (no $Q_{const}$ bases)
-- $G_2$ VK: includes $[\delta]_2$
+- $G_2$ VK: includes $\delta_2$
 - $G_T$ handles: $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$
 
 **Key Insight**: The adversary's reachable span is:
 
-$$Span_{adv} = LinComb(Lean \; CRS) + Pairings(Lean \; CRS)$$
+$$Span_{adv} = LinComb(Lean CRS) + Pairings(Lean CRS)$$
 
 The *polynomial* $f(\tau) = Q_{const}(x,\tau)$ underlying $T_{const} = e(f(\tau), \delta)$ is still outside the $G_1$ span. Even though $T_{const}$ itself is computable in $G_T$, the adversary cannot compute $T_{const}^\rho$ because $\rho$ only appears in armed $G_2$ handles.
 
@@ -329,9 +329,9 @@ The *polynomial* $f(\tau) = Q_{const}(x,\tau)$ underlying $T_{const} = e(f(\tau)
 Our setting maps directly to **GT-XPDH**:
 
 **The Challenge:**
-- Adversary has Lean CRS: $[\tau^i]_1$ for $i$ in Lean (no $Q_{const}$ bases), $[\delta]_2$
+- Adversary has Lean CRS: $\tau^i$ in $G_1$ for $i$ in Lean (no $Q_{const}$ bases), $\delta_2$
 - Adversary has GT-baked handles: $T_i = e(Q_i(\tau), \delta)$ for $0 \le i \le \ell$
-- Target: $T_{const}^\rho$ where $T_{const} = e(Q_{const}(x,\tau), [\delta]_2)$ in $G_T$
+- Target: $T_{const}^\rho$ where $T_{const} = e(Q_{const}(x,\tau), \delta_2)$ in $G_T$
 - $Q_{const}(x,\tau)$ is **outside** the $G_1$ span of Lean CRS elements
 
 **Why GT-XPDH Applies:**
@@ -405,7 +405,7 @@ For the derived key $K = R^\rho$ to be **statement-dependent** (binding the armi
 *   **Effect**: $v_{pub} = 0$, $u_{pub} = 0$, $w_{pub} \neq 0$.
 *   **Statement Binding**: Via $IC_i = w_i/\gamma$ in the Groth16 target:
 
-$$R(vk, x) = e([\alpha]_1, [\beta]_2) \cdot e(L(x), [\gamma]_2) \cdot T_{const}(x)$$
+$$R(vk, x) = e(\alpha_1, \beta_2) \cdot e(L(x), \gamma_2) \cdot T_{const}(x)$$
 
 where $L(x) = \sum x_i \cdot IC_i$ and $IC_i = (\beta u_i + \alpha v_i + w_i)/\gamma = w_i/\gamma$ (since $u_i = v_i = 0$).
 
@@ -431,7 +431,7 @@ The algebraic framework confirms that PVUGC is secure in the AGBGM when the foll
 
 ### 6.2 Security Properties Achieved
 
-1. **Standard Groth16 Algebra** — No complex modifications needed; $[\alpha]_1$ can remain public
+1. **Standard Groth16 Algebra** — No complex modifications needed; $\alpha_1$ can remain public
 2. **Proof-Agnostic Decapsulation** — Any valid proof yields the same $K = R^\rho$
 3. **Statement-Dependent Keys** — Different $(vk, x)$ pairs yield different keys via $IC_i = w_i/\gamma$
 4. **GT-XPDH Hardness** — Reduces to DDH in $G_2$ (standard assumption)
