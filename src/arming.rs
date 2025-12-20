@@ -67,15 +67,6 @@ pub fn arm_columns<E: Pairing>(
     if rho.is_zero() {
         return Err(Error::ZeroRho);
     }
-
-    // In debug builds, do full validation to catch bugs during development
-    #[cfg(debug_assertions)]
-    {
-        if let Err(e) = bases.validate_subgroups() {
-            return Err(e);
-        }
-    }
-
     // Quick sanity check: delta must not be zero (cheap, always check)
     if bases.delta.is_zero() {
         return Err(Error::ZeroDelta);

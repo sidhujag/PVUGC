@@ -109,13 +109,16 @@ where
             beta_g1: pk_outer.beta_g1,
             delta_g1: pk_outer.delta_g1,
             a_query_wit: {
-                let mut q = pk_outer.a_query.clone();
+                let q = pk_outer.a_query.clone();
                 let num_public = pk_outer.vk.gamma_abc_g1.len();
-                // Zero out public input slots (1..num_public) to ensure no public input handles are leaked in A.
-                // Index 0 is constant '1', which must be preserved.
                 for i in 1..num_public {
                     if i < q.len() {
-                        q[i] = <C::OuterE as Pairing>::G1Affine::zero();
+                        assert!(
+                            q[i].is_zero(),
+                            "[SECURITY AUDIT FAIL] a_query has non-zero public handle at index {}. \
+                             Expected a_query[1..num_public) to be zero (public-in-C-only).",
+                            i
+                        );
                     }
                 }
                 q
@@ -125,6 +128,39 @@ where
             h_query_wit: wb_result.h_query_wit,
             l_query: pk_outer.l_query.clone(),
         };
+
+        // Pre-serialization audit: ensure the exact lean CRS view we will serialize/publish
+        // contains no forbidden public handles or forbidden basis categories.
+        let num_public = lean_pk.vk.gamma_abc_g1.len(); // includes constant "1" at index 0
+        for (i, g) in lean_pk.a_query_wit.iter().enumerate().take(num_public).skip(1) {
+            assert!(
+                g.is_zero(),
+                "[SECURITY AUDIT FAIL] LeanProvingKey leaks A-query public handle at index {}.",
+                i
+            );
+        }
+        for &(i, j, base) in &lean_pk.h_query_wit {
+            let i_idx = i as usize;
+            let j_idx = j as usize;
+            assert!(
+                !base.is_zero(),
+                "[SECURITY AUDIT FAIL] h_query_wit contains a zero base at ({}, {}).",
+                i,
+                j
+            );
+            // For publication, forbid referencing any public column index (excluding const 0).
+            if (i_idx > 0 && i_idx < num_public) || (j_idx > 0 && j_idx < num_public) {
+                panic!(
+                    "[SECURITY AUDIT FAIL] h_query_wit contains a public-index pair ({}, {}). \
+                     Public indices (1..num_public) must not appear in published witness bases.",
+                    i,
+                    j
+                );
+            }
+            if i_idx == 0 && j_idx == 0 {
+                panic!("[SECURITY AUDIT FAIL] h_query_wit contains forbidden (0,0) const×const basis.");
+            }
+        }
 
         println!("[Setup] Computing q_points from gap (using custom samples)...");
         let t_const_gt = compute_t_const_points_gt_from_gap::<C, F>(
@@ -340,7 +376,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     }
 
     let mut active_pairs = HashSet::new();
-     
+
     for &i in &vars_a {
         for &j in &vars_b {
             if i < num_pub && j < num_pub {
@@ -402,6 +438,16 @@ fn compute_witness_bases<C: RecursionCycle>(
         u[j] = denoms[i];
     }
 
+    // For off-diagonal terms we repeatedly need:
+    //   inv(n * (ω^k - ω^m)) for k != m
+    // Using ω^k - ω^m = ω^m (ω^{k-m} - 1) = -ω^m (1 - ω^{k-m}),
+    // we have:
+    //   1/(n(ω^k-ω^m)) = -ω^{-m} * 1/(n(1-ω^{k-m})).
+    //
+    // We already computed inv_n_one_minus_omega[d] = 1/(n(1-ω^d)) as u[d] (time domain).
+    // Precompute ω^{-m} as ω^{n-m} in the subgroup (no inversions required).
+    let inv_n_one_minus_omega = u.clone();
+
     // Reverse u[1..] to compute correlation via convolution
     // We want sum_j L_j * u_{j-k} = sum_j L_j * u_{-(k-j)}
     // Convolution computes sum_j L_j * v_{k-j}. So we need v_x = u_{-x}.
@@ -445,8 +491,14 @@ fn compute_witness_bases<C: RecursionCycle>(
     let mut sorted_pairs: Vec<(usize, usize)> = active_pairs.into_iter().collect();
     sorted_pairs.sort();
 
-    let n_scalar = domain.size_as_field_element();
     let domain_elements: Vec<_> = (0..domain.size()).map(|i| domain.element(i)).collect();
+    let inv_domain_elements: Vec<_> = (0..domain.size())
+        .map(|i| {
+            // ω^{-i} = ω^{n-i} in the multiplicative subgroup (with ω^0 = 1)
+            let idx = if i == 0 { 0 } else { domain.size() - i };
+            domain_elements[idx]
+        })
+        .collect();
     let total_pairs = sorted_pairs.len();
     let progress_counter = std::sync::atomic::AtomicUsize::new(0);
 
@@ -456,9 +508,10 @@ fn compute_witness_bases<C: RecursionCycle>(
     let h_wit: Vec<_> = sorted_pairs
         .par_chunks(CHUNK_SIZE)
         .flat_map(|chunk| {
-            let mut denominators = Vec::with_capacity(buffer_capacity);
             let mut acc_u = Vec::with_capacity(max_col_a);
             let mut acc_v = Vec::with_capacity(max_col_b);
+            // Build MSM tasks per pair, then run them in parallel. This preserves high throughput
+            // on many-core machines (nested parallelism can help here).
             let mut msm_tasks: Vec<(
                 Vec<<C::OuterE as Pairing>::G1Affine>,
                 Vec<OuterScalar<C>>,
@@ -490,56 +543,37 @@ fn compute_witness_bases<C: RecursionCycle>(
 
                 let n_u = rows_u.len();
                 let n_v = rows_v.len();
-                let cap = n_u * n_v;
 
-                // 1. Compute denominators for off-diagonal
-                denominators.clear();
-                if denominators.capacity() < cap {
-                    denominators.reserve(cap - denominators.capacity());
-                }
-
-                for &(k, _) in rows_u {
-                    for &(m, _) in rows_v {
-                        if k != m {
-                            let diff = domain_elements[k] - domain_elements[m];
-                            denominators.push(n_scalar * diff);
-                        } else {
-                            denominators.push(OuterScalar::<C>::one()); // Dummy for index alignment
-                        }
-                    }
-                }
-
-                // Batch inversion for off-diagonal denominators
-                ark_ff::batch_inversion(&mut denominators);
-
-                // 2. Accumulate coefficients
+                // 1. Accumulate coefficients
                 acc_u.clear();
                 acc_u.resize(n_u, OuterScalar::<C>::zero());
                 acc_v.clear();
                 acc_v.resize(n_v, OuterScalar::<C>::zero());
 
                 // Extra bases for diagonal contributions (using q_vector)
-                let mut diag_bases = Vec::new();
-                let mut diag_scalars = Vec::new();
+                // We may encounter multiple diagonal hits (k==m) per (i,j). Aggregate them by k so each
+                // q_vector[k] appears at most once in the MSM (reduces MSM size noticeably for dense overlaps).
+                let mut diag_terms: Vec<(usize, OuterScalar<C>)> = Vec::new();
+                diag_terms.reserve(std::cmp::min(n_u, n_v));
 
-                let mut denom_idx = 0;
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
                     for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
                         let k = rows_u[idx_u].0;
                         let m = rows_v[idx_v].0;
-                        let inv_denom = denominators[denom_idx];
-                        denom_idx += 1;
 
                         let prod = val_u * val_v;
 
                         if k == m {
                             // Diagonal term: prod * Q[k]
-                            diag_bases.push(q_vector[k]);
-                            diag_scalars.push(prod);
+                            diag_terms.push((k, prod));
                         } else {
                             // Off-diagonal term
                             let wm = domain_elements[m];
                             let wk = domain_elements[k];
+                            // inv(n*(wk-wm)) = -ω^{-m} * inv_n_one_minus_omega[(k-m) mod n]
+                            let d = if k >= m { k - m } else { k + domain_size - m };
+                            // inv_n_one_minus_omega[0] is special and not used here because k != m ⇒ d != 0.
+                            let inv_denom = -(inv_domain_elements[m] * inv_n_one_minus_omega[d]);
                             let common = prod * inv_denom;
                             acc_u[idx_u] += common * wm;
                             acc_v[idx_v] -= common * wk;
@@ -548,8 +582,10 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // 3. Collect bases for MSM
-                let mut pair_bases = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
-                let mut pair_scalars = Vec::with_capacity(max_col_a + max_col_b + diag_bases.len());
+                let mut pair_bases =
+                    Vec::with_capacity(max_col_a + max_col_b + diag_terms.len());
+                let mut pair_scalars =
+                    Vec::with_capacity(max_col_a + max_col_b + diag_terms.len());
 
                 // Add off-diagonal contributions (Lagrange bases)
                 for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
@@ -566,15 +602,34 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
 
                 // Add diagonal contributions (Q bases)
-                pair_bases.extend(diag_bases);
-                pair_scalars.extend(diag_scalars);
+                if !diag_terms.is_empty() {
+                    diag_terms.sort_unstable_by_key(|(k, _)| *k);
+                    let mut cur_k = diag_terms[0].0;
+                    let mut cur_acc = OuterScalar::<C>::zero();
+                    for (k, s) in diag_terms.into_iter() {
+                        if k != cur_k {
+                            if !cur_acc.is_zero() {
+                                pair_bases.push(q_vector[cur_k]);
+                                pair_scalars.push(cur_acc);
+                            }
+                            cur_k = k;
+                            cur_acc = s;
+                        } else {
+                            cur_acc += s;
+                        }
+                    }
+                    if !cur_acc.is_zero() {
+                        pair_bases.push(q_vector[cur_k]);
+                        pair_scalars.push(cur_acc);
+                    }
+                }
 
                 if !pair_bases.is_empty() {
                     msm_tasks.push((pair_bases, pair_scalars, (i as u32, j as u32)));
                 }
             }
 
-            // Process MSMs
+            // Process MSMs in parallel for this chunk.
             let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
                 .into_par_iter()
                 .map(|(bases, scalars, pair_id)| {
@@ -784,6 +839,7 @@ fn audit_witness_bases<C: RecursionCycle>(
         println!("[PASS] Quotient Reachability: h_query_wit contains clean span.");
     }
 }
+
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
     a: &mut [G],
     domain: &GeneralEvaluationDomain<F>,
