@@ -261,6 +261,18 @@ The simulator answers all linear-combination and pairing queries consistently wh
 
 Hence the WE construction remains secure even against a **general pairing-aware decryptor**, not just against adversaries that try to manufacture Groth16-style proofs.
 
+### 2.6 Defense in Depth: The Double Algebraic Lock
+
+While the formal reduction relies on the AGBGM to characterize the system's security, the protocol implements two distinct, orthogonal algebraic barriers. An adversary must effectively break both to forge a key.
+
+1. **The γ-Barrier (Scalar Independence):**
+   The statement binding relies on terms of the form $w_i \cdot \gamma^{-1}$. The arming mechanism relies on $\rho$. In the AGBGM, no combination of pairing operations can map $\rho$ to $\gamma^{-1}$. This prevents the adversary from synthesizing the IC component of the target.
+
+2. **The τ-Barrier (Polynomial Independence):**
+   The baked quotient $T_{const}$ corresponds to a polynomial $Q_{const}(x, \tau)$ that lies outside the linear span of the Lean CRS (specifically, it requires powers of $\tau$ that are withheld).
+   - Even if an adversary could bypass the γ-barrier (e.g., via an oracle for $\gamma$), they would still face the $T_{const}$ barrier.
+   - Forging the term $e(Q_{const}, \delta)^\rho$ without the underlying $G_1$ bases is equivalent to solving a **q-type Knowledge-of-Exponent** problem. While strictly proven in the AGBGM (via span separation), this provides a second layer of heuristic security comparable to Strong Diffie-Hellman assumptions.
+
 ## 3. Completeness for Honest Prover
 
 The "Honest Prover Dilemma" (Prover needs handles that Adversary abuses) is resolved by the **Linearity Assumption**.
@@ -280,11 +292,11 @@ The security of the Lean CRS / Baked Quotient construction reduces to standard a
 **GT-XPDH (Target Group Extended Power Diffie-Hellman):**
 Given statement-only bases $(Y_j)$, $\Delta$ in $G_2$, their $\rho$-powers $(Y_j^\rho)$, $\Delta^\rho$, and independent target $R$ in $G_T$, compute $R^\rho$.
 
-**Theorem (Tight Reduction):** GT-XPDH reduces tightly to DDH in $G_2$:
+**Theorem (Tight Reduction):** Random GT-XPDH (with independent $R$) reduces tightly to DDH in $G_2$:
 - If adversary breaks GT-XPDH with advantage $\epsilon$, there exists solver for DDH in $G_2$ with advantage $\geq \epsilon - 1/r$
 - **SXDH implies GT-XPDH** (only the $G_2$-half of SXDH is needed)
 
-See [gt-xpdh-reduction.md](gt-xpdh-reduction.md) for the complete proof.
+See [gt-xpdh-reduction.md](gt-xpdh-reduction.md) for this Standard Model reduction. Note: PVUGC uses the *Correlated* GT-XPDH game (statement-derived $R$), which requires the AGBGM bridging argument to connect to Random GT-XPDH (see [§2.6](#26-defense-in-depth-the-double-algebraic-lock)).
 
 ### 4.2 The GBGM Simulation
 
@@ -448,11 +460,11 @@ The combination of these defenses eliminates all known algebraic attack vectors 
 ### 6.3 Assumption Hierarchy
 
 ```
-                    GBGM (Generic Bilinear Group Model)
-                              ↓ implies
-                    GT-XPDH (Target Group XPDH)
-                              ↓ tight reduction to
-                    DDH in G₂ (SXDH suffices)
+   PVUGC Protocol (Correlated Game)
+         ↓ (Structural Security via AGBGM)
+   Generic GT-XPDH Problem
+         ↓ (Computational Hardness via Standard Model)
+   DDH in G₂
 ```
 
 In the **standard model** (non-generic), security relies on:
@@ -460,4 +472,8 @@ In the **standard model** (non-generic), security relies on:
 - **Groth16 Knowledge Soundness**: Valid proofs only from witness knowledge
 - **Collision Resistance**: SHA-256 for Fiat-Shamir
 
-The GBGM provides the cleanest reduction with bound $O(q^2/r)$ for $q$ oracle queries. See [gt-xpdh-reduction.md](gt-xpdh-reduction.md) for the full proof.
+The GBGM provides the cleanest reduction with bound $O(q^2/r)$ for $q$ oracle queries.
+
+**Two complementary proofs:**
+1. **This document**: AGBGM span-separation analysis (PVUGC → GT-XPDH)
+2. **[gt-xpdh-reduction.md](gt-xpdh-reduction.md)**: Standard Model reduction (Random GT-XPDH → DDH)

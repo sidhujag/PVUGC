@@ -138,20 +138,27 @@ These guardrails are the reduction-level restatement of the Lean-CRS / baked-quo
 
 Under these conditions, **$R(vk, x)$ contains a factor $e(L(x), \gamma_2)$ that cannot be computed from the armed transcript** since $\gamma_2^\rho$ is never published ([Lemma 2](#lemma-2)). We define the **correlated GT-XPDH game** as: armed bases $\beta_2^\rho$, $v_{j,2}^\rho$, $\delta_2^\rho$ are derived from $(vk, x)$ under the guardrails, the challenger samples $\rho$, and sets $R = R(vk, x)$. An adversary wins if it outputs $R^\rho$.
 
-<a id="theorem-1-prime"></a>
-### Theorem 1′ (Tight DDH reduction for the correlated game)
+<a id="pvu-bridge"></a>
+### Bridging Correlated (PVUGC) to Random GT-XPDH
 
-Let $A$ break the correlated GT-XPDH game with advantage $\epsilon$. Construct $B$ against DDH in $G_2$ just as before, except that:
+A direct Standard Model reduction from the Correlated Game (PVUGC) to DDH is obstructed by the **Inverse Gamma ($\gamma^{-1}$)** problem: embedding a DDH challenge into $\gamma$ prevents the simulator from generating the Verification Key terms $IC_i = \frac{w_i}{\gamma} \cdot G_1$.
 
-1. Embed the DDH challenge element $Y = g_2^v$ as $\gamma_2$ inside the CRS (this is consistent with the hygiene rule).
-2. Program $\alpha_1 = g_1^u$ with $u \leftarrow Z_r^*$ and keep the public input $x$ fixed so $IC(x)$ is known.
-3. Publish the armed transcript derived from $vk$ along with $R(vk, x) = e(g_1^u, \beta_2) \cdot e(IC(x), Y)$. (The simulator can compute $\beta_2^\rho$ as $X^b$ because it chose $\beta_2 = g_2^b$ and the DDH challenger supplies $X = g_2^\rho$.)
+However, the security relies on the **Algebraic Generic Bilinear Group Model (AGBGM)** to bridge this gap:
 
-If the DDH challenge is real ($T = g_2^{\rho v}$), then
+1. **Algebraic Independence (AGBGM):**
+   The AGBGM analysis (see [Theorem 2](#theorem-2)) proves that the algebraic span of the $IC_i$ elements is orthogonal to the $\rho$-armed target components. Specifically:
+   - $IC_i$ contains $\gamma^{-1}$ but no $\rho$.
+   - Armed handles contain $\rho$ but no $\gamma$.
+   - No pairing operation can mix them to form the target's $\rho \cdot \gamma^{-1}$ structure.
 
-$$R(vk, x)^\rho = e(g_1^u, \beta_2)^\rho \cdot e(IC(x), Y)^\rho = e(g_1^u, \beta_2^\rho) \cdot e(IC(x), T)$$
+   Therefore, in the generic model, the **Correlated GT-XPDH** game is strictly as hard as the **Random GT-XPDH** game.
 
-and $A$'s output lets $B$ compare against $e(IC(x), T)$ exactly as in [Theorem 1](#theorem-1) after cancelling the known $\beta_2^\rho$ term. If the challenge is random, the comparison succeeds only with probability $1/r$. Thus $B$ decides DDH with advantage at least $\epsilon - 1/r$, showing that SXDH implies security for PVUGC even in the correlated setting.
+2. **Computational Hardness (Standard Model):**
+   Combining this with [Theorem 1](#theorem-1), we obtain the final security claim:
+
+   > **Result:** Any adversary breaking PVUGC in the AGBGM implies a solver for DDH in $G_2$ (Standard Model) with tight advantage.
+
+This hybrid argument uses the AGBGM to handle the structural properties of the Setup (the $1/\gamma$ barrier) and DDH to characterize the cryptographic hardness of the Arming ($\rho$).
 
 ---
 
@@ -193,7 +200,7 @@ Consequently the PVUGC key $K_i = Hash(ser_{G_T}(M_i) \| \ldots)$ remains hidden
 
 **Key observation:** Statement binding is through $R(vk, x)$ which includes $e(L(x), \gamma_2)$ where $L(x) = \sum x_i \cdot IC_i$ and $IC_i = w_i/\gamma$. Since $\gamma_2$ is never armed, the adversary cannot compute $R^\rho$ without producing a valid Groth16 proof.
 
-This reduces to **DDH in G₂**: the reduction embeds the DDH challenge element into $\gamma_2$, allowing detection of whether the adversary computed $R(vk, x)^\rho$ (see [Theorem 1′](#theorem-1-prime)).
+This reduces to **DDH in G₂** via the AGBGM bridge: the algebraic independence of $\gamma^{-1}$ from $\rho$-armed handles (see [Bridging section](#pvu-bridge)) combined with the tight DDH reduction for random GT-XPDH (see [Theorem 1](#theorem-1)).
 
 ---
 
@@ -205,6 +212,7 @@ The above results do not rely on any additional $G_T$-side assumptions. One may 
 
 ## Summary
 
-- GT-XPDH tightly reduces to DDH in G₂ (see [Theorem 1](#theorem-1)); thus SXDH (using only the G₂ half) suffices.
-- In the algebraic GBGM the success probability is bounded by $O(q^2 / r)$ (see [Theorem 2](#theorem-2)).
-- PVUGC's No-Proof-Spend property follows directly under these standard assumptions (see [Corollary](#corollary)).
+- **Random GT-XPDH → DDH:** GT-XPDH (with random $R$) tightly reduces to DDH in G₂ in the Standard Model (see [Theorem 1](#theorem-1)); thus SXDH (using only the G₂ half) suffices.
+- **Correlated → Random (AGBGM):** The Correlated GT-XPDH game (PVUGC's statement-derived $R$) reduces to Random GT-XPDH via algebraic independence in the AGBGM (see [Bridging section](#pvu-bridge)). A direct Standard Model reduction is blocked by the Inverse Gamma ($\gamma^{-1}$) problem.
+- **GBGM bound:** The algebraic success probability is bounded by $O(q^2 / r)$ (see [Theorem 2](#theorem-2)).
+- **PVUGC security:** The No-Proof-Spend property follows from the two-step chain: PVUGC →(AGBGM)→ GT-XPDH →(Standard Model)→ DDH (see [Corollary](#corollary)).
