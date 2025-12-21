@@ -362,7 +362,7 @@ The Target Exponent Problem is the "search" version: given the target $T_{const}
 - The adversary cannot find such $(a, b)$ without knowing $Q_{const}(\tau)$
 - $Q_{const}(\tau)$ is not computable from the Lean CRS
 
-**Theorem**: If $A$ can forge a Lean proof with advantage $\epsilon$, we can solve GT-XPDH with advantage $\epsilon / poly(\lambda)$.
+**Theorem**: **In the AGBGM**, if $A$ can forge a Lean proof with advantage $\epsilon$, we can solve GT-XPDH with advantage $\epsilon / poly(\lambda)$.
 
 ### 4.5 Why Affine Quotient Correction is Critical
 

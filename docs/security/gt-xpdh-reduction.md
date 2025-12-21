@@ -68,7 +68,10 @@ where $L(x) = \sum_i x_i \cdot IC_i$ is the public-input linear combination.
 
 **Independence claim:** Since $\gamma_2$ is not in span(armed bases), the **ρ-armed** component $e(L(x), \gamma_2)^\rho$ (and hence $R(vk,x)^\rho$) cannot be computed from the armed transcript alone. The adversary can pair $\alpha_1$ with armed bases, but these never produce terms involving $\gamma_2^\rho$.
 
-**For the reduction:** We treat $R(vk, x)$ as a fixed statement-derived $G_T$ element. The reduction embeds the DDH challenge element $Y = g_2^v$ into $\gamma_2$, allowing the simulator to detect whether the adversary computed $R(vk, x)^\rho$. This works because $R(vk, x)$ contains a factor $e(L(x), \gamma_2)$ that depends on $\gamma_2$, which the adversary cannot access in armed form.
+**For the reductions:** In PVUGC, $R(vk,x)$ is a **correlated** (statement-derived) $G_T$ element, so a direct Standard Model reduction that embeds a DDH challenge into $\gamma_2$ is obstructed by the need to simultaneously generate $IC_i = (w_i/\gamma)\cdot G_1$ consistently (the "Inverse Gamma" issue; see [Bridging Correlated (PVUGC) to Random GT-XPDH](#pvu-bridge)). Instead:
+
+- **Structural step (AGBGM):** The independence above is used in the AGBGM to show Correlated GT-XPDH (PVUGC form) is as hard as the Random GT-XPDH game.
+- **Computational step (Standard Model):** Once in the Random GT-XPDH game (with independent random $R$), [Theorem 1](#theorem-1) gives a tight black-box reduction to DDH in $G_2$ by *programming* $R := e(g_1^u, Y)$ from the DDH challenge.
 
 ---
 
