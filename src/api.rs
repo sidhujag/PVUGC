@@ -100,8 +100,14 @@ fn audit_statement_only_bases_for_publication<E: Pairing>(bases: &ColumnBases<E>
     if bases.y_cols.is_empty() {
         return Err(Error::MismatchedSizes);
     }
-    if bases.y_cols.iter().any(|y| y.is_zero()) {
-        return Err(Error::Crypto("zero_y_col".to_string()));
+    // NOTE: It is common for Groth16 `b_g2_query` to contain identity points for columns that
+    // never appear in the B-polynomials. These witness columns are safe to publish as identities
+    // (they arm to identity and contribute nothing).
+    //
+    // However, the *public aggregated leg* (index 0) being identity is a much stronger and
+    // unexpected degeneracy for statement binding, so we fail-closed on that case.
+    if bases.y_cols[0].is_zero() {
+        return Err(Error::Crypto("zero_public_y_col".to_string()));
     }
 
     let delta = bases.delta;
@@ -123,6 +129,11 @@ fn audit_statement_only_bases_for_publication<E: Pairing>(bases: &ColumnBases<E>
     let mut seen_neg: HashSet<[u8; 32]> = HashSet::new();
 
     for (idx, y) in bases.y_cols.iter().enumerate() {
+        // Skip identity witness columns (idx >= 1). Multiple zeros are fine and expected.
+        if idx != 0 && y.is_zero() {
+            continue;
+        }
+
         let h = hash_g2(y);
         if h == delta_h || h == delta_neg_h {
             return Err(Error::Crypto(format!("y_col_eq_pm_delta_at_index_{}", idx)));
