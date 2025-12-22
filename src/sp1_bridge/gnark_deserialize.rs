@@ -17,7 +17,7 @@
 //! **uncompressed** points we must clear those flag bits before interpreting X.
 
 use ark_bls12_377::{Bls12_377, Fq, Fq2, G1Affine, G2Affine, Fr as Fr377};
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use ark_groth16::{Proof, VerifyingKey};
 use ark_serialize::CanonicalDeserialize;
 use core::str::FromStr;
@@ -89,8 +89,22 @@ fn parse_fq_be_48(bytes48: &[u8]) -> Result<Fq, Sp1BridgeError> {
             bytes48.len()
         )));
     }
-    // Interpret as big-endian integer; gnark guarantees canonical encoding.
-    Ok(Fq::from_be_bytes_mod_order(bytes48))
+    // Interpret as a big-endian integer; enforce canonical encoding (no reduction).
+    let fe = Fq::from_be_bytes_mod_order(bytes48);
+    let canon = fe.into_bigint().to_bytes_be();
+    let mut canon48 = [0u8; 48];
+    if canon.len() > 48 {
+        return Err(Sp1BridgeError::DeserializationError(
+            "Invalid Fq encoding (too large)".to_string(),
+        ));
+    }
+    canon48[48 - canon.len()..].copy_from_slice(&canon);
+    if canon48 != bytes48 {
+        return Err(Sp1BridgeError::DeserializationError(
+            "Non-canonical Fq encoding".to_string(),
+        ));
+    }
+    Ok(fe)
 }
 
 fn parse_g1_affine_gnark_raw(bytes: &[u8]) -> Result<G1Affine, Sp1BridgeError> {
@@ -125,6 +139,12 @@ fn parse_g1_affine_gnark_raw(bytes: &[u8]) -> Result<G1Affine, Sp1BridgeError> {
     let p = G1Affine::new(x, y);
     if !p.is_on_curve() {
         return Err(Sp1BridgeError::InvalidProofFormat("G1 not on curve".to_string()));
+    }
+    // Subgroup check is required when bypassing arkworks' canonical deserialization.
+    if !p.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(Sp1BridgeError::InvalidProofFormat(
+            "G1 not in correct subgroup".to_string(),
+        ));
     }
     Ok(p)
 }
@@ -170,6 +190,12 @@ fn parse_g2_affine_gnark_raw(bytes: &[u8]) -> Result<G2Affine, Sp1BridgeError> {
     let p = G2Affine::new(x, y);
     if !p.is_on_curve() {
         return Err(Sp1BridgeError::InvalidProofFormat("G2 not on curve".to_string()));
+    }
+    // Subgroup check is required when bypassing arkworks' canonical deserialization.
+    if !p.is_in_correct_subgroup_assuming_on_curve() {
+        return Err(Sp1BridgeError::InvalidProofFormat(
+            "G2 not in correct subgroup".to_string(),
+        ));
     }
     Ok(p)
 }
