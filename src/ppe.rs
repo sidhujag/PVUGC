@@ -68,12 +68,14 @@ pub fn validate_pvugc_vk_subgroups<E: Pairing>(pvugc_vk: &PvugcVk<E>) -> bool {
     }
 
     // Validate t_const_points_gt
+    //
+    // GT subgroup check: For g ∈ GT, verify g^r = 1 where r is the prime subgroup order.
     let is_good_gt = |g: &PairingOutput<E>| {
-        if g.0.is_zero() { // GT zero is invalid (multiplicative group)
-             return false;
+        if g.0.is_zero() {
+            return false;
         }
-        // Ideally check subgroup, but usually hard for GT
-        true
+        let order = <<E as Pairing>::ScalarField as PrimeField>::MODULUS;
+        g.0.pow(order).is_one()
     };
     if pvugc_vk.t_const_points_gt.iter().any(|g| !is_good_gt(g)) {
         return false;
