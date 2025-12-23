@@ -14,8 +14,8 @@ use arkworks_groth16::outer_compressed::{
 use arkworks_groth16::ppe::compute_baked_target;
 use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers};
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
-use arkworks_groth16::test_circuits::AddCircuit;
-use arkworks_groth16::test_fixtures::get_fixture;
+use arkworks_groth16::test_circuits::{AddCircuit, TwoInputCircuit};
+use arkworks_groth16::test_fixtures::{get_fixture, get_fixture_two_input};
 use arkworks_groth16::RecursionCycle;
 use arkworks_groth16::decap::build_commitments;
 
@@ -25,17 +25,21 @@ fn test_lean_prover_end_to_end() {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
 
     // 1. Get Inner Proof (Fixture)
-    let fixture = get_fixture();
+    //
+    // Use a two-public-input inner circuit to match SP1-style statements:
+    // - instance_variables includes the implicit 1, so this yields "+3 inputs" in logs.
+    let fixture = get_fixture_two_input();
 
     // Runtime statement - this would be a hash in production (e.g., Bitcoin UTXO)
-    let x_val = InnerScalar::<DefaultCycle>::from(1001001000122u64);
-    let x_inner = vec![x_val];
+    let input1 = InnerScalar::<DefaultCycle>::from(1001001000122u64);
+    let input2 = InnerScalar::<DefaultCycle>::from(999_000_111_222u64);
+    let x_inner = vec![input1, input2];
 
     // PRODUCTION SIMULATION: Runtime proof can use any seed!
     // With algebraic q_const computation, setup doesn't depend on proof coords.
     const RUNTIME_SEED: u64 = 12345;
 
-    let circuit_inner = AddCircuit::with_public_input(x_val);
+    let circuit_inner = TwoInputCircuit::new(input1, input2);
     let mut runtime_rng = ark_std::rand::rngs::StdRng::seed_from_u64(RUNTIME_SEED);
     let proof_inner = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner, &mut runtime_rng)
         .expect("inner proof failed");
@@ -65,11 +69,15 @@ fn test_lean_prover_end_to_end() {
     let inner_proof_generator = move |statements: &[InnerScalar<DefaultCycle>]| {
         // Use a fixed seed for reproducibility during q_const computation
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(99999);
-        let statement = statements
+        let input1 = statements
             .get(0)
             .copied()
             .unwrap_or(InnerScalar::<DefaultCycle>::zero());
-        let circuit = AddCircuit::with_public_input(statement);
+        let input2 = statements
+            .get(1)
+            .copied()
+            .unwrap_or(InnerScalar::<DefaultCycle>::zero());
+        let circuit = TwoInputCircuit::new(input1, input2);
         Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng)
             .expect("inner proof generation failed")
     };
@@ -89,9 +97,10 @@ fn test_lean_prover_end_to_end() {
             x_inner.clone(),
             proof_inner.clone(),
         );
-        let public_inputs_outer =
-            arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner[0]);
-        let inputs_outer = vec![public_inputs_outer];
+        let inputs_outer: Vec<OuterScalar<DefaultCycle>> = x_inner
+            .iter()
+            .map(arkworks_groth16::outer_compressed::fr_inner_to_outer)
+            .collect();
 
         // 6. Prove using Lean Prover
         let circuit_lean = OuterCircuit::<DefaultCycle>::new(
