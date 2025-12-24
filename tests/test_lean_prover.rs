@@ -14,8 +14,8 @@ use arkworks_groth16::outer_compressed::{
 use arkworks_groth16::ppe::compute_baked_target;
 use arkworks_groth16::prover_lean::{prove_lean, prove_lean_with_randomizers};
 use arkworks_groth16::pvugc_outer::build_pvugc_setup_from_pk_for;
-use arkworks_groth16::test_circuits::{AddCircuit, TwoInputCircuit};
-use arkworks_groth16::test_fixtures::{get_fixture, get_fixture_two_input};
+use arkworks_groth16::test_circuits::TwoInputCircuit;
+use arkworks_groth16::test_fixtures::get_fixture_two_input;
 use arkworks_groth16::RecursionCycle;
 use arkworks_groth16::decap::build_commitments;
 
@@ -140,33 +140,44 @@ fn test_outer_circuit_proof_agnostic() {
     };
 
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
-    let fixture = get_fixture();
+    // Match the Lean Prover E2E test shape: inner statement has *two* public inputs.
+    let fixture = get_fixture_two_input();
 
-    // Use separate RNG for inner proofs so outer setup RNG stays consistent
-    let mut inner_rng = ark_std::rand::rngs::StdRng::seed_from_u64(1234);
+    // Use separate RNG for inner proofs so outer setup RNG stays consistent.
+    // In production, inner proofs are runtime-generated and can use any seed.
+    let mut inner_rng_1 = ark_std::rand::rngs::StdRng::seed_from_u64(1234);
+    let mut inner_rng_2 = ark_std::rand::rngs::StdRng::seed_from_u64(5678);
 
     // === STATEMENT 1 ===
-    let x_val_1 = InnerScalar::<DefaultCycle>::from(10u64);
-    let x_inner_1 = vec![x_val_1];
+    let x1a = InnerScalar::<DefaultCycle>::from(10u64);
+    let x1b = InnerScalar::<DefaultCycle>::from(11u64);
+    let x_inner_1 = vec![x1a, x1b];
 
-    // Generate inner proof for statement 1
-    let circuit_inner_1 = AddCircuit::with_public_input(x_val_1);
-    let proof_inner_1 = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_1, &mut inner_rng)
-        .expect("inner proof 1 failed");
+    // Generate TWO different inner proofs for the SAME statement (different inner randomness).
+    let circuit_inner_1a = TwoInputCircuit::new(x1a, x1b);
+    let proof_inner_1a =
+        Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_1a, &mut inner_rng_1)
+            .expect("inner proof 1a failed");
+    let circuit_inner_1b = TwoInputCircuit::new(x1a, x1b);
+    let proof_inner_1b =
+        Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_1b, &mut inner_rng_2)
+            .expect("inner proof 1b failed");
 
     // === STATEMENT 2 (DIFFERENT) ===
-    let x_val_2 = InnerScalar::<DefaultCycle>::from(20u64);
-    let x_inner_2 = vec![x_val_2];
+    let y1 = InnerScalar::<DefaultCycle>::from(20u64);
+    let y2 = InnerScalar::<DefaultCycle>::from(21u64);
+    let x_inner_2 = vec![y1, y2];
 
-    let circuit_inner_2 = AddCircuit::with_public_input(x_val_2);
-    let proof_inner_2 = Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_2, &mut inner_rng)
-        .expect("inner proof 2 failed");
+    let circuit_inner_2 = TwoInputCircuit::new(y1, y2);
+    let proof_inner_2 =
+        Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_2, &mut inner_rng_1)
+            .expect("inner proof 2 failed");
 
     // Setup outer circuit
     let circuit_outer_1 = OuterCircuit::<DefaultCycle>::new(
         (*fixture.vk_inner).clone(),
         x_inner_1.clone(),
-        proof_inner_1.clone(),
+        proof_inner_1a.clone(),
     );
 
     let (pk_outer, vk_outer) =
@@ -180,11 +191,15 @@ fn test_outer_circuit_proof_agnostic() {
     let pk_inner_clone = fixture.pk_inner.clone();
     let inner_proof_generator = move |statements: &[InnerScalar<DefaultCycle>]| {
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(99999);
-        let statement = statements
+        let input1 = statements
             .get(0)
             .copied()
             .unwrap_or(InnerScalar::<DefaultCycle>::zero());
-        let circuit = AddCircuit::with_public_input(statement);
+        let input2 = statements
+            .get(1)
+            .copied()
+            .unwrap_or(InnerScalar::<DefaultCycle>::zero());
+        let circuit = TwoInputCircuit::new(input1, input2);
         Groth16::<InnerE>::prove(&pk_inner_clone, circuit, &mut rng)
             .expect("inner proof generation failed")
     };
@@ -200,8 +215,14 @@ fn test_outer_circuit_proof_agnostic() {
     if let Ok((pvugc_vk, lean_pk)) = result {
         // === ARMING ===
         let rho = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let public_inputs_1 = vec![arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner_1[0])];
-        let public_inputs_2 = vec![arkworks_groth16::outer_compressed::fr_inner_to_outer(&x_inner_2[0])];
+        let public_inputs_1: Vec<OuterScalar<DefaultCycle>> = x_inner_1
+            .iter()
+            .map(arkworks_groth16::outer_compressed::fr_inner_to_outer)
+            .collect();
+        let public_inputs_2: Vec<OuterScalar<DefaultCycle>> = x_inner_2
+            .iter()
+            .map(arkworks_groth16::outer_compressed::fr_inner_to_outer)
+            .collect();
 
         // Arm for statement 1
         let bases_1 = build_column_bases_outer_for::<DefaultCycle>(&pvugc_vk, &vk_outer, &public_inputs_1);
@@ -215,7 +236,7 @@ fn test_outer_circuit_proof_agnostic() {
         let circuit_1a = OuterCircuit::<DefaultCycle>::new(
             (*fixture.vk_inner).clone(),
             x_inner_1.clone(),
-            proof_inner_1.clone(),
+            proof_inner_1a.clone(),
         );
         let r1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
         let s1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
@@ -230,7 +251,7 @@ fn test_outer_circuit_proof_agnostic() {
         let circuit_1b = OuterCircuit::<DefaultCycle>::new(
             (*fixture.vk_inner).clone(),
             x_inner_1.clone(),
-            proof_inner_1.clone(),
+            proof_inner_1b.clone(),
         );
         let r2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
         let s2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
