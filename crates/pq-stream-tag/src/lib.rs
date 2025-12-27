@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -169,7 +170,11 @@ pub fn decap_openfhe_with_basis_parallelism(
         ))
     };
 
-    let do_limb = |limb: usize| -> Result<Vec<bool>> {
+    // OpenFHE stores eval keys in a global map keyed by tag; inserting the same key twice in-process throws.
+    // Track which limb indices' eval keys we've loaded, so shared-basis mode doesn't crash.
+    let mut eval_keys_loaded_for_limb: HashSet<usize> = HashSet::new();
+
+    let mut do_limb = |limb: usize| -> Result<Vec<bool>> {
         let limb_idx = if m.basis_shared_across_limbs { 0 } else { limb };
         let limb_cfg = of
             .limbs
@@ -204,21 +209,23 @@ pub fn decap_openfhe_with_basis_parallelism(
         // Eval keys (ct×pt mult + SlotSum rotations).
         //
         // IMPORTANT: OpenFHE stores eval keys in a global map keyed by tag; inserting the same
-        // key twice in-process throws. So we must deserialize them exactly once per limb.
-        OpenFheBackend::deserialize_eval_mult_key(
-            shape_blob_dir
-                .join(&limb_cfg.eval_mult_key_path)
-                .to_string_lossy()
-                .as_ref(),
-            serial_mode,
-        )?;
-        OpenFheBackend::deserialize_eval_rot_key(
-            shape_blob_dir
-                .join(&limb_cfg.eval_rot_key_path)
-                .to_string_lossy()
-                .as_ref(),
-            serial_mode,
-        )?;
+        // key twice in-process throws. So we must deserialize them exactly once per limb index.
+        if eval_keys_loaded_for_limb.insert(limb_idx) {
+            OpenFheBackend::deserialize_eval_mult_key(
+                shape_blob_dir
+                    .join(&limb_cfg.eval_mult_key_path)
+                    .to_string_lossy()
+                    .as_ref(),
+                serial_mode,
+            )?;
+            OpenFheBackend::deserialize_eval_rot_key(
+                shape_blob_dir
+                    .join(&limb_cfg.eval_rot_key_path)
+                    .to_string_lossy()
+                    .as_ref(),
+                serial_mode,
+            )?;
+        }
 
         // Prepare Enc(0-vector) for basis accumulators.
         let zeros = vec![0i64; m.slot_count];
