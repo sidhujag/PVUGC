@@ -198,6 +198,11 @@ enum Cmd {
         /// This avoids shell loops when decapping against many armers.
         #[arg(long)]
         armer_artifact_dir: Option<PathBuf>,
+        /// Parallelize across CRT limbs (d). Default 1 is safest.
+        ///
+        /// Note: limb-parallelism only helps when d>1. For d=1 it has no effect.
+        #[arg(long, default_value_t = 1)]
+        limb_parallelism: usize,
     },
 
     /// Print the deterministic weights row w_i(x) implied by the shape manifest and statement hash.
@@ -918,7 +923,7 @@ fn main() -> Result<()> {
         }
 
         #[cfg(feature = "pq-openfhe")]
-        Cmd::DecapOpenfhe { shape_blob_dir, residual_file, armer_artifact, armer_artifact_dir } => {
+        Cmd::DecapOpenfhe { shape_blob_dir, residual_file, armer_artifact, armer_artifact_dir, limb_parallelism } => {
             // Load armer artifacts and convert to `pq_stream_tag` inputs (demo trust v0).
             let mut paths = armer_artifact.clone();
             if let Some(dir) = armer_artifact_dir.as_ref() {
@@ -954,7 +959,12 @@ fn main() -> Result<()> {
                 });
             }
 
-            pq_stream_tag::decap_openfhe(&shape_blob_dir, &residual_file, &armers_in)?;
+            pq_stream_tag::decap_openfhe_with_limb_parallelism(
+                &shape_blob_dir,
+                &residual_file,
+                &armers_in,
+                limb_parallelism,
+            )?;
         }
     }
 

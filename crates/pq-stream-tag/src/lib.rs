@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 
 use pq_basis_blob::{ShapeBlobManifestV0, WeightsKind};
+use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct PvrsHeaderV0 {
@@ -66,6 +67,20 @@ pub struct ArmerInputV0 {
 
 #[cfg(feature = "pq-openfhe")]
 pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[ArmerInputV0]) -> Result<()> {
+    decap_openfhe_with_limb_parallelism(shape_blob_dir, residual_file, armers, 1)
+}
+
+/// OpenFHE decap with optional limb-parallelism.
+///
+/// Parallelizing across limbs is safe because each limb uses independent OpenFHE contexts/keys/files.
+/// Note: for d=1 this does not help.
+#[cfg(feature = "pq-openfhe")]
+pub fn decap_openfhe_with_limb_parallelism(
+    shape_blob_dir: &Path,
+    residual_file: &Path,
+    armers: &[ArmerInputV0],
+    limb_parallelism: usize,
+) -> Result<()> {
     use pq_fhe_backend::FheBackend;
     use pq_fhe_openfhe::{decrypt_packed_with_len, CtChunkReader, OpenFheBackend};
 
@@ -97,11 +112,9 @@ pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[Arme
         );
     }
 
-    // Track AND across limbs (real gate wants all limbs to match).
-    let mut ok_all_limbs = vec![true; armers.len()];
+    anyhow::ensure!(limb_parallelism > 0, "limb_parallelism must be > 0");
 
-    // Stream blocks once per limb (v0 simple implementation).
-    for limb in 0..m.d_limbs {
+    let do_limb = |limb: usize| -> Result<Vec<bool>> {
         let limb_cfg = of
             .limbs
             .iter()
@@ -140,7 +153,8 @@ pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[Arme
             .collect::<Result<Vec<_>>>()?;
 
         // Stream PVRS blocks and chunked ciphertexts together.
-        let mut pvrs_f = fs::File::open(residual_file).with_context(|| format!("open {}", residual_file.display()))?;
+        let mut pvrs_f =
+            fs::File::open(residual_file).with_context(|| format!("open {}", residual_file.display()))?;
         let mut header = [0u8; 92];
         pvrs_f.read_exact(&mut header)?;
         let mut block_buf = vec![0u8; m.slot_count * 4];
@@ -185,8 +199,6 @@ pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[Arme
         }
 
         // SlotSum each basis accumulator once.
-        // SlotSum is linear, so for many armers it's cheaper to pre-sum the basis ciphertexts and
-        // then only do CombineWeights (adds) per armer.
         let mut ct_acc_basis_summed = Vec::with_capacity(m.s_basis);
         for mut ct in ct_acc_basis.into_iter() {
             let mut shift = 1i32;
@@ -199,6 +211,7 @@ pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[Arme
         }
 
         // For each armer: CombineWeights (binary) on summed basis -> +alpha -> decrypt+compare.
+        let mut ok = vec![false; armers.len()];
         for (ai, a) in armers.iter().enumerate() {
             anyhow::ensure!(a.alpha_limbs.len() == m.d_limbs, "alpha limbs mismatch");
             anyhow::ensure!(a.weights_row.len() == m.d_limbs, "weights_row limb mismatch");
@@ -215,23 +228,41 @@ pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[Arme
                 }
             }
 
-            // Add alpha across all slots.
             let pt_alpha =
                 OpenFheBackend::make_packed_plaintext(&ctx, &vec![alpha as i64; m.slot_count])?;
             let ct_tag = OpenFheBackend::eval_add_plain(&ctx, &ct_i, &pt_alpha)?;
 
-            // Fake gate: decrypt and compare slot0 to alpha.
             let dec = decrypt_packed_with_len(&ctx, &sk, &ct_tag, m.slot_count)?;
             let t0 = *dec.get(0).unwrap_or(&0);
-            // BFV packed decoding can return centered representatives (negative values).
-            // Normalize to [0, t) before comparing to alpha mod t.
             let t_i64 = pt_mod as i64;
             let mut t0_mod = t0 % t_i64;
             if t0_mod < 0 {
                 t0_mod += t_i64;
             }
-            let ok = t0_mod == (alpha as i64);
-            ok_all_limbs[ai] &= ok;
+            ok[ai] = t0_mod == (alpha as i64);
+        }
+
+        Ok(ok)
+    };
+
+    let limb_ok: Vec<Vec<bool>> = if m.d_limbs <= 1 || limb_parallelism == 1 {
+        let mut out = Vec::with_capacity(m.d_limbs);
+        for limb in 0..m.d_limbs {
+            out.push(do_limb(limb)?);
+        }
+        out
+    } else {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(limb_parallelism.min(m.d_limbs))
+            .build()
+            .context("build rayon threadpool for decap limb parallelism")?;
+        pool.install(|| (0..m.d_limbs).into_par_iter().map(do_limb).collect::<Result<Vec<_>>>())?
+    };
+
+    let mut ok_all_limbs = vec![true; armers.len()];
+    for limb in 0..m.d_limbs {
+        for ai in 0..armers.len() {
+            ok_all_limbs[ai] &= limb_ok[limb][ai];
         }
     }
 
