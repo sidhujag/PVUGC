@@ -14,7 +14,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use pq_basis_blob::{ShapeBlobManifestV0, WeightsKind};
-use rayon::prelude::*;
+
+fn basis_chunk_path_v0(
+    shape_blob_dir: &Path,
+    limb: usize,
+    j: usize,
+    start_block: usize,
+    end_block: usize,
+) -> std::path::PathBuf {
+    shape_blob_dir.join(format!(
+        "basis/l{limb}/j{j}/blocks_{start_block}_{end_block}.bin"
+    ))
+}
 
 #[derive(Clone, Debug)]
 pub struct PvrsHeaderV0 {
@@ -208,7 +219,7 @@ pub fn decap_openfhe_with_basis_parallelism(
                 // Open one ciphertext reader per basis j for this chunk.
                 let mut readers: Vec<CtChunkReader> = Vec::with_capacity(m.s_basis);
                 for j in 0..m.s_basis {
-                    let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, chunk_start, chunk_end);
+                    let ct_path = basis_chunk_path_v0(shape_blob_dir, limb, j, chunk_start, chunk_end);
                     let ct_path_s = ct_path.to_string_lossy().into_owned();
                     readers.push(CtChunkReader::open(&ct_path_s, serial_mode)?);
                 }
@@ -315,7 +326,7 @@ pub fn decap_openfhe_with_basis_parallelism(
                             while chunk_start < m.block_count {
                                 let chunk_end = (chunk_start + m.blocks_per_chunk).min(m.block_count);
                                 let chunk_len = chunk_end - chunk_start;
-                                let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, chunk_start, chunk_end);
+                                let ct_path = basis_chunk_path_v0(shape_blob_dir, limb, j, chunk_start, chunk_end);
                                 let mut reader = CtChunkReader::open(&ct_path.to_string_lossy(), serial_mode)?;
 
                                 for off in 0..chunk_len {
