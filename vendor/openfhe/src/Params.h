@@ -6,6 +6,8 @@
 #include "openfhe/pke/scheme/bgvrns/gen-cryptocontext-bgvrns-params.h"
 #include "openfhe/pke/scheme/ckksrns/gen-cryptocontext-ckksrns-params.h"
 
+#include <memory>
+
 namespace openfhe
 {
 

@@ -3,6 +3,7 @@
 #include "SerialMode.h"
 
 #include <fstream>
+#include <memory>
 #include <string>
 
 namespace openfhe
