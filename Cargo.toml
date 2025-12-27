@@ -5,6 +5,7 @@ members = [
     "crates/pq-fhe-openfhe",
     "crates/pq-basis-blob",
     "crates/pq-stream-tag",
+    "crates/pq-ccolo-wz17",
 ]
 
 [package]
@@ -73,6 +74,7 @@ pq-fhe-backend = { path = "crates/pq-fhe-backend" }
 pq-basis-blob = { path = "crates/pq-basis-blob" }
 pq-stream-tag = { path = "crates/pq-stream-tag" }
 pq-fhe-openfhe = { path = "crates/pq-fhe-openfhe", optional = true }
+pq-ccolo-wz17 = { path = "crates/pq-ccolo-wz17" }
 
 # SP1 SDK for zkVM proving (use syscoin/sp1 fork)
 sp1-sdk = { git = "https://github.com/syscoin/sp1", branch = "pq", features = ["native-gnark"] }

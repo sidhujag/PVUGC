@@ -97,7 +97,7 @@ pub struct ArmerInputV0 {
 
 #[cfg(feature = "pq-openfhe")]
 pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[ArmerInputV0]) -> Result<()> {
-    decap_openfhe_with_basis_parallelism(shape_blob_dir, residual_file, armers, 1)
+    decap_openfhe_with_basis_parallelism(shape_blob_dir, residual_file, armers, 1, None)
 }
 
 /// OpenFHE decap with **one** parallelism knob.
@@ -110,9 +110,12 @@ pub fn decap_openfhe_with_basis_parallelism(
     residual_file: &Path,
     armers: &[ArmerInputV0],
     basis_parallelism: usize,
+    emit_lwe_out_dir: Option<&Path>,
 ) -> Result<()> {
     use pq_fhe_backend::FheBackend;
-    use pq_fhe_openfhe::{decrypt_packed_with_len, CtChunkReader, CtChunkWriter, OpenFheBackend};
+    use pq_fhe_openfhe::{
+        decrypt_packed_with_len, extract_lwe_coeff0_from_ciphertext_tower, CtChunkReader, CtChunkWriter, OpenFheBackend,
+    };
 
     // Load manifest
     let manifest_path = shape_blob_dir.join("manifest.json");
@@ -281,8 +284,8 @@ pub fn decap_openfhe_with_basis_parallelism(
             // Copy strings for thread moves.
             let cc_path = shape_blob_dir.join(&limb_cfg.crypto_context_path).to_string_lossy().into_owned();
             let pk_path = shape_blob_dir.join(&limb_cfg.public_key_path).to_string_lossy().into_owned();
-            let em_path = shape_blob_dir.join(&limb_cfg.eval_mult_key_path).to_string_lossy().into_owned();
-            let er_path = shape_blob_dir.join(&limb_cfg.eval_rot_key_path).to_string_lossy().into_owned();
+            let _em_path = shape_blob_dir.join(&limb_cfg.eval_mult_key_path).to_string_lossy().into_owned();
+            let _er_path = shape_blob_dir.join(&limb_cfg.eval_rot_key_path).to_string_lossy().into_owned();
 
             // Work partition: contiguous chunks.
             let mut parts: Vec<Vec<usize>> = vec![Vec::new(); n_threads];
@@ -383,7 +386,7 @@ pub fn decap_openfhe_with_basis_parallelism(
             out
         };
 
-        // For each armer: CombineWeights (binary) on summed basis -> +alpha -> decrypt+compare.
+        // For each armer: CombineWeights (binary) on summed basis -> (optional bridge dump) -> +alpha -> decrypt+compare.
         let mut ok = vec![false; armers.len()];
         for (ai, a) in armers.iter().enumerate() {
             anyhow::ensure!(a.alpha_limbs.len() == m.d_limbs, "alpha limbs mismatch");
@@ -399,6 +402,14 @@ pub fn decap_openfhe_with_basis_parallelism(
                 if w == 1 {
                     ct_i = OpenFheBackend::eval_add(&ctx, &ct_i, &ct_acc_basis_summed[j])?;
                 }
+            }
+
+            // Option B bridge: dump LWE boundary sample for this limb/armer (before adding alpha).
+            if let Some(dir) = emit_lwe_out_dir {
+                fs::create_dir_all(dir).ok();
+                let sample = extract_lwe_coeff0_from_ciphertext_tower(&ct_i, 0)?;
+                let p = dir.join(format!("armer{}_limb{}.lwe0", a.armer_id, limb));
+                sample.write_to_file(&p)?;
             }
 
             let pt_alpha =

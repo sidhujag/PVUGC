@@ -1,6 +1,8 @@
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
+use pq_ccolo_wz17::Wz17GateArtifactV1;
+
 /// Raw statement bytes that the tag binds to.
 ///
 /// For Track-A, this should be a deterministic encoding of (shape_id, vk digest / program id,
@@ -94,6 +96,35 @@ pub struct LockArtifactV0 {
     ///
     /// Production will keep alpha inside the gate (CCO/LO).
     pub alpha_clear: Option<AlphaCrt>,
+}
+
+/// v1 lock artifact descriptor (intended for the **real** CCO/LO gate path).
+///
+/// Unlike v0, this artifact is intended to keep `alpha` and `sigma` *inside* the gate object.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockArtifactV1 {
+    /// Human-readable id for traceability.
+    pub lock_id: LockId,
+
+    /// Domain separation for the relation/shape.
+    pub shape_id: ShapeId,
+
+    /// Which armer this lock corresponds to (N-of-N).
+    pub armer_id: ArmerId,
+
+    /// Statement binding hash.
+    pub statement_hash: StatementHash32,
+
+    /// CRT moduli used for the tag limbs (len = d).
+    pub moduli: Vec<u64>,
+
+    /// Public commitment to the released share (for auditing / accountability).
+    ///
+    /// Matches GPT‑Pro plan nomenclature: `c_i = H(sigma_i)`.
+    pub sigma_commitment: [u8; 32],
+
+    /// Opaque Wichs–Zirdelis style compute-and-compare gate.
+    pub gate: Wz17GateArtifactV1,
 }
 
 

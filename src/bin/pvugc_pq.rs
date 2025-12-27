@@ -218,6 +218,41 @@ enum Cmd {
         /// Parallelize the **basis accumulation** across basis index `j` (this is the dominant ct×pt work).
         #[arg(long, default_value_t = 1)]
         basis_parallelism: usize,
+
+        /// If set, emit the **LWE boundary samples** (Option B bridge) for each (armer, limb)
+        /// *before* adding alpha and decrypting (i.e., the ciphertext whose decryption is the tag limb).
+        ///
+        /// Writes `armer{ID}_limb{L}.lwe0` files into this directory.
+        #[arg(long)]
+        emit_lwe_out_dir: Option<PathBuf>,
+    },
+
+    /// Sanity-check: rotation-based SlotSum produces a constant polynomial (coef[0] == sum, others 0),
+    /// and the ciphertext tower coefficient extraction shim works (forces COEFFICIENT / inverse NTT).
+    #[cfg(feature = "pq-openfhe")]
+    OpenfheSanitySlotSum {
+        /// Packed slot count (power-of-two).
+        #[arg(long, default_value_t = 4096)]
+        slot_count: usize,
+        /// BFV plaintext modulus t (must fit in i64 for packed encoding).
+        #[arg(long, default_value_t = 65537)]
+        plaintext_modulus: u64,
+    },
+
+    /// Must-pass sanity test for the RLWE->LWE bridge: extract (a,b), compute phase, and BFV-decode via rounding.
+    ///
+    /// This validates the negacyclic mapping and the BFV scaling/rounding behavior at the bridge boundary.
+    #[cfg(feature = "pq-openfhe")]
+    OpenfheBridgeSanity {
+        /// Packed slot count (must match the batching convention: slot_count == ring_dim/2).
+        #[arg(long, default_value_t = 4096)]
+        slot_count: usize,
+        /// BFV plaintext modulus t.
+        #[arg(long, default_value_t = 65537)]
+        plaintext_modulus: u64,
+        /// Which RNS tower (prime index) to extract from.
+        #[arg(long, default_value_t = 0)]
+        tower_index: u32,
     },
 
     /// Print the deterministic weights row w_i(x) implied by the shape manifest and statement hash.
@@ -497,6 +532,7 @@ fn main() -> Result<()> {
                 weights_kind: if binary_weights { WeightsKind::Binary01 } else { WeightsKind::Full },
                 ciphertext_encoding_version: 0,
                 openfhe: None,
+                bridge: None,
             };
             fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
             // Create placeholder basis directory structure (future ciphertext chunks live here).
@@ -990,6 +1026,7 @@ fn main() -> Result<()> {
             armer_artifact,
             armer_artifact_dir,
             basis_parallelism,
+            emit_lwe_out_dir,
         } => {
             // Load armer artifacts and convert to `pq_stream_tag` inputs (demo trust v0).
             let mut paths = armer_artifact.clone();
@@ -1031,7 +1068,22 @@ fn main() -> Result<()> {
                 &residual_file,
                 &armers_in,
                 basis_parallelism,
+                emit_lwe_out_dir.as_deref(),
             )?;
+        }
+
+        #[cfg(feature = "pq-openfhe")]
+        Cmd::OpenfheSanitySlotSum { slot_count, plaintext_modulus } => {
+            pq_fhe_openfhe::sanity_openfhe_slot_sum_constant_poly(slot_count, plaintext_modulus)?;
+        }
+
+        #[cfg(feature = "pq-openfhe")]
+        Cmd::OpenfheBridgeSanity {
+            slot_count,
+            plaintext_modulus,
+            tower_index,
+        } => {
+            pq_fhe_openfhe::sanity_openfhe_bridge_decode(slot_count, plaintext_modulus, tower_index)?;
         }
     }
 

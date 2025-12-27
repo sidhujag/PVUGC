@@ -14,8 +14,8 @@ mod weights;
 mod blob;
 
 pub use types::{
-    Alpha256, AlphaCrt, ArmerId, LockArtifactV0, LockId, ShapeId, StatementBytes, StatementHash32,
-    Tag256, TagCrt,
+    Alpha256, AlphaCrt, ArmerId, LockArtifactV0, LockArtifactV1, LockId, ShapeId, StatementBytes,
+    StatementHash32, Tag256, TagCrt,
 };
 pub use weights::{derive_weights_matrix, derive_weights_matrix_with_kind, WeightsKind, WeightsMatrix};
 pub use blob::{rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0};

@@ -9,6 +9,7 @@ fn main()
         .file("src/DecryptResult.cc")
         .file("src/EncodingParams.cc")
         .file("src/EvalKey.cc")
+        .file("src/ExtractLwe.cc")
         .file("src/KeyPair.cc")
         .file("src/LWEPrivateKey.cc")
         .file("src/Params.cc")
@@ -57,6 +58,8 @@ fn main()
     println!("cargo::rerun-if-changed=src/EncodingParams.cc");
     println!("cargo::rerun-if-changed=src/EvalKey.h");
     println!("cargo::rerun-if-changed=src/EvalKey.cc");
+    println!("cargo::rerun-if-changed=src/ExtractLwe.h");
+    println!("cargo::rerun-if-changed=src/ExtractLwe.cc");
     println!("cargo::rerun-if-changed=src/KeyPair.h");
     println!("cargo::rerun-if-changed=src/KeyPair.cc");
     println!("cargo::rerun-if-changed=src/LWEPrivateKey.h");

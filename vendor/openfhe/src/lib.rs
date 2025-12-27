@@ -155,6 +155,7 @@ pub mod ffi
         im: f64,
     }
 
+
     unsafe extern "C++"
     {
         // includes
@@ -175,6 +176,7 @@ pub mod ffi
         include!("openfhe/src/SchemeBase.h");
         include!("openfhe/src/SequenceContainers.h");
         include!("openfhe/src/SerialDeserial.h");
+        include!("openfhe/src/ExtractLwe.h");
 
         // enums
         type COMPRESSION_LEVEL;
@@ -245,6 +247,25 @@ pub mod ffi
 
         fn Next(self: Pin<&mut CiphertextStreamReaderDCRTPoly>) -> UniquePtr<CiphertextDCRTPoly>;
         fn Append(self: Pin<&mut CiphertextStreamWriterDCRTPoly>, ciphertext: &CiphertextDCRTPoly) -> bool;
+    }
+
+    // BFV/BGV -> (tower coefficient) extraction shim for bridge work.
+    unsafe extern "C++" {
+        fn DCRTPolyCiphertextElementNumTowers(ciphertext: &CiphertextDCRTPoly, elementIndex: u32) -> u32;
+
+        fn DCRTPolyExtractCiphertextElementTowerCoeffs(
+            ciphertext: &CiphertextDCRTPoly,
+            elementIndex: u32,
+            towerIndex: u32,
+        ) -> Vec<u64>;
+    }
+
+    // Debug-only: extract RLWE secret key coefficients (one tower), for local sanity checks.
+    unsafe extern "C++" {
+        fn DCRTPolyExtractPrivateKeyTowerCoeffs(
+            privateKey: &PrivateKeyDCRTPoly,
+            towerIndex: u32,
+        ) -> Vec<u64>;
     }
 
     // CryptoContextDCRTPoly

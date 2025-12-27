@@ -38,6 +38,24 @@ pub struct OpenFheLimbFilesV0 {
     pub eval_rot_key_path: String,
 }
 
+/// Gate-bridge manifest (v0): parameters + path for the stream->gate LWE key switching key.
+///
+/// This is Option B2 plumbing: it does not define the gate construction; only the stable boundary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BridgeManifestV0 {
+    pub version: u32,
+    /// Which OpenFHE tower (RNS prime) we use when extracting the LWE sample.
+    pub tower_index: u32,
+    /// Output (gate) LWE dimension.
+    pub gate_dim: usize,
+    /// Keyswitch decomposition base log2 (B = 2^base_log).
+    pub base_log: usize,
+    /// Keyswitch decomposition level count.
+    pub level_count: usize,
+    /// Path to the serialized key-switch key (format TBD; intended to be TFHE-compatible bytes).
+    pub ksk_path: String,
+}
+
 /// On-disk shape blob manifest (v0).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShapeBlobManifestV0 {
@@ -56,6 +74,9 @@ pub struct ShapeBlobManifestV0 {
     pub ciphertext_encoding_version: u32,
     #[serde(default)]
     pub openfhe: Option<OpenFheManifestV0>,
+    /// Optional: stream->gate bridge config (Option B2).
+    #[serde(default)]
+    pub bridge: Option<BridgeManifestV0>,
 }
 
 impl ShapeBlobManifestV0 {

@@ -1020,6 +1020,7 @@ dependencies = [
  "k256",
  "once_cell",
  "pq-basis-blob",
+ "pq-ccolo-wz17",
  "pq-fhe-backend",
  "pq-fhe-openfhe",
  "pq-stream-tag",
@@ -4680,6 +4681,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pq-ccolo-wz17"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pq-fhe-backend"
 version = "0.1.0"
 dependencies = [
@@ -4696,7 +4705,7 @@ dependencies = [
  "pq-basis-blob",
  "pq-fhe-backend",
  "rand_core 0.6.4",
- "rayon",
+ "serde",
  "serde_json",
 ]
 
@@ -4710,7 +4719,6 @@ dependencies = [
  "pq-fhe-backend",
  "pq-fhe-openfhe",
  "rand_core 0.6.4",
- "rayon",
  "serde",
  "serde_json",
 ]
