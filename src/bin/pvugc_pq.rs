@@ -10,6 +10,7 @@ use arkworks_groth16::pq_we::{
     derive_weights_matrix_with_kind, rotations_powers_of_two, AlphaCrt, ArmerId, LockArtifactV0,
     LockId, ShapeBlobManifestV0, ShapeId, StatementHash32, TagCrt, WeightsKind,
 };
+use pq_ccolo_wz17::{read_lwe0, GateInputV0, GateMetaV0};
 use pq_stream_tag::ArmerInputV0;
 
 // OpenFHE types are used only inside `pq-fhe-openfhe` / `pq-stream-tag` crates (GPT-Pro separation).
@@ -276,6 +277,33 @@ enum Cmd {
         tower_index: u32,
     },
 
+    /// Bundle emitted `.lwe0` samples into one `GateInputV0` JSON file (per armer).
+    ///
+    /// This is a convenience tool to hand a stable “bridge output” object to the upcoming gate implementation.
+    BundleGateInput {
+        /// Shape manifest (to get d_limbs, shape_id, and statement binding).
+        #[arg(long)]
+        shape_manifest: PathBuf,
+        /// Statement hash hex (32 bytes) from SP1 `derive_shrink_statement`.
+        #[arg(long)]
+        statement_hash_hex: String,
+        /// BFV plaintext modulus used by the evaluator (e.g. 65537).
+        #[arg(long, default_value_t = 65537)]
+        t_bfv: u64,
+        /// Gate limb modulus (byte limbs plan: 256).
+        #[arg(long, default_value_t = 256)]
+        t_gate: u64,
+        /// Directory containing `armer{ID}_limb{L}.lwe0` files (from `decap-openfhe --emit-lwe-out-dir`).
+        #[arg(long)]
+        lwe_dir: PathBuf,
+        /// Armer id to bundle.
+        #[arg(long)]
+        armer_id: u32,
+        /// Output JSON file path.
+        #[arg(long)]
+        out: PathBuf,
+    },
+
     /// Print the deterministic weights row w_i(x) implied by the shape manifest and statement hash.
     ///
     /// This is a debugging/repro tool to validate CombineWeights later (OpenFHE integration) without
@@ -452,6 +480,10 @@ fn read_text(path: &PathBuf) -> Result<String> {
     Ok(String::from_utf8_lossy(&b).to_string())
 }
 
+fn parse_hex_32_from_hex(name: &str, s: &str) -> Result<[u8; 32]> {
+    parse_hex_32(name, s.trim())
+}
+
 #[derive(Debug, Clone)]
 struct PvrsHeaderV0 {
     slot_count: u32,
@@ -547,6 +579,51 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.cmd {
+        Cmd::BundleGateInput {
+            shape_manifest,
+            statement_hash_hex,
+            t_bfv,
+            t_gate,
+            lwe_dir,
+            armer_id,
+            out,
+        } => {
+            let manifest_bytes = fs::read(&shape_manifest)
+                .with_context(|| format!("read {}", shape_manifest.display()))?;
+            let m: ShapeBlobManifestV0 =
+                serde_json::from_slice(&manifest_bytes).context("parse shape manifest")?;
+            anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
+
+            let sh = parse_hex_32_from_hex("--statement-hash-hex", &statement_hash_hex)?;
+            let meta = GateMetaV0 {
+                t_bfv,
+                t_gate,
+                d_limbs: m.d_limbs,
+                statement_hash_hex: hex::encode(sh),
+                shape_id: m.shape_id.clone(),
+            };
+
+            let mut samples = Vec::with_capacity(m.d_limbs);
+            for limb in 0..m.d_limbs {
+                let p = lwe_dir.join(format!("armer{}_limb{}.lwe0", armer_id, limb));
+                let b = fs::read(&p).with_context(|| format!("read {}", p.display()))?;
+                let s = read_lwe0(&b).map_err(|_| anyhow!("failed to parse lwe0: {}", p.display()))?;
+                samples.push(s);
+            }
+
+            anyhow::ensure!(
+                samples.len() == meta.d_limbs,
+                "wrong sample count (got {}, want {})",
+                samples.len(),
+                meta.d_limbs
+            );
+
+            let gi = GateInputV0 { meta, samples };
+            let bytes = serde_json::to_vec_pretty(&gi).context("serialize GateInputV0")?;
+            fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
+            println!("wrote {}", out.display());
+        }
+
         Cmd::SetupShape {
             out_dir,
             shape_id,

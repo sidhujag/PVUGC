@@ -47,6 +47,24 @@ pub struct LweSampleU64 {
     pub b: u64,
 }
 
+/// Reduce a BFV/BGVRNS ciphertext down to a single RNS tower in-place.
+///
+/// This is required for the Track-A "single-tower bridge" semantics:
+/// BFV decoding is defined relative to the *current ciphertext modulus* Q. If a ciphertext still has
+/// multiple towers (Q = Π q_i), then extracting a sample from one tower and decoding against q_i is
+/// not generally correct. After modulus reduction to one tower, Q == q0 and per-tower decoding is meaningful.
+pub fn modreduce_to_one_tower_in_place(ctx: &OpenFheCtx, ct: &mut OpenFheCt) -> Result<()> {
+    let ct_ref = ct.ct.as_ref().ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
+    let mut towers = openfhe_ffi::DCRTPolyCiphertextElementNumTowers(ct_ref, 0);
+    anyhow::ensure!(towers >= 1, "invalid ciphertext tower count {towers}");
+    while towers > 1 {
+        ctx.cc.ModReduceInPlace(ct.ct.pin_mut());
+        let ct_ref = ct.ct.as_ref().ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
+        towers = openfhe_ffi::DCRTPolyCiphertextElementNumTowers(ct_ref, 0);
+    }
+    Ok(())
+}
+
 /// Parameters describing the *bridge* boundary between OpenFHE BFV/BGV and the gate LWE domain.
 ///
 /// This is an interface-level struct; the actual KSK generation/evaluation will live in the TFHE crate.

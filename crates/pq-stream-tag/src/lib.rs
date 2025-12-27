@@ -110,8 +110,8 @@ pub fn decap_openfhe_with_basis_parallelism(
 ) -> Result<()> {
     use pq_fhe_backend::FheBackend;
     use pq_fhe_openfhe::{
-        decrypt_packed_with_len, extract_lwe_coeff0_from_ciphertext_tower, CtChunkReader,
-        CtChunkWriter, OpenFheBackend,
+        decrypt_packed_with_len, extract_lwe_coeff0_from_ciphertext_tower, modreduce_to_one_tower_in_place,
+        CtChunkReader, CtChunkWriter, OpenFheBackend,
     };
 
     // Load manifest
@@ -452,7 +452,28 @@ pub fn decap_openfhe_with_basis_parallelism(
             // Option B bridge: dump LWE boundary sample for this limb/armer (before adding alpha).
             if let Some(dir) = emit_lwe_out_dir {
                 fs::create_dir_all(dir).ok();
-                let sample = extract_lwe_coeff0_from_ciphertext_tower(&ct_i, 0)?;
+                // Align with the single-tower bridge semantics: reduce ciphertext modulus to one tower
+                // before extracting coeff-0 as an LWE sample.
+                //
+                // `OpenFheCt` is backed by a C++ UniquePtr and is not `Clone`, so we round-trip it
+                // through a one-element ciphertext stream to avoid mutating `ct_i` (which is still
+                // needed for the v0 fake gate path).
+                let tmp_dir = std::env::temp_dir().join("pvugc_pq_emit_lwe_tmp");
+                fs::create_dir_all(&tmp_dir).ok();
+                let tmp_path = tmp_dir.join(format!("emit_lwe_armer{}_limb{}.bin", a.armer_id, limb));
+                let tmp_path_s = tmp_path.to_string_lossy().into_owned();
+                {
+                    let mut w = CtChunkWriter::create(&tmp_path_s, serial_mode)?;
+                    w.append(&ct_i.ct)?;
+                }
+                let mut r = CtChunkReader::open(&tmp_path_s, serial_mode)?;
+                let mut ct_tmp = r
+                    .next()?
+                    .ok_or_else(|| anyhow!("temp ct file had no ciphertext: {tmp_path_s}"))?;
+                let _ = fs::remove_file(&tmp_path);
+
+                modreduce_to_one_tower_in_place(&ctx, &mut ct_tmp)?;
+                let sample = extract_lwe_coeff0_from_ciphertext_tower(&ct_tmp, 0)?;
                 let p = dir.join(format!("armer{}_limb{}.lwe0", a.armer_id, limb));
                 sample.write_to_file(&p)?;
             }
