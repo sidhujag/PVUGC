@@ -177,23 +177,24 @@ pub fn decap_openfhe_with_basis_parallelism(
             shape_blob_dir.join(&limb_cfg.private_key_path).to_string_lossy().as_ref(),
             serial_mode,
         )?;
-        if basis_parallelism <= 1 {
-            // Sequential path needs eval keys (ct×pt mult + SlotSum rotations).
-            OpenFheBackend::deserialize_eval_mult_key(
-                shape_blob_dir
-                    .join(&limb_cfg.eval_mult_key_path)
-                    .to_string_lossy()
-                    .as_ref(),
-                serial_mode,
-            )?;
-            OpenFheBackend::deserialize_eval_rot_key(
-                shape_blob_dir
-                    .join(&limb_cfg.eval_rot_key_path)
-                    .to_string_lossy()
-                    .as_ref(),
-                serial_mode,
-            )?;
-        }
+        // Eval keys (ct×pt mult + SlotSum rotations).
+        //
+        // IMPORTANT: OpenFHE stores eval keys in a global map keyed by tag; inserting the same
+        // key twice in-process throws. So we must deserialize them exactly once per limb.
+        OpenFheBackend::deserialize_eval_mult_key(
+            shape_blob_dir
+                .join(&limb_cfg.eval_mult_key_path)
+                .to_string_lossy()
+                .as_ref(),
+            serial_mode,
+        )?;
+        OpenFheBackend::deserialize_eval_rot_key(
+            shape_blob_dir
+                .join(&limb_cfg.eval_rot_key_path)
+                .to_string_lossy()
+                .as_ref(),
+            serial_mode,
+        )?;
 
         // Prepare Enc(0-vector) for basis accumulators.
         let zeros = vec![0i64; m.slot_count];
@@ -276,7 +277,6 @@ pub fn decap_openfhe_with_basis_parallelism(
             fs::create_dir_all(&tmp_dir).ok();
 
             let out_paths: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; m.s_basis]));
-            let key_deser_lock = Arc::new(Mutex::new(()));
 
             // Copy strings for thread moves.
             let cc_path = shape_blob_dir.join(&limb_cfg.crypto_context_path).to_string_lossy().into_owned();
@@ -294,25 +294,14 @@ pub fn decap_openfhe_with_basis_parallelism(
                 let mut handles = Vec::with_capacity(n_threads);
                 for (ti, js) in parts.into_iter().enumerate() {
                     let out_paths = Arc::clone(&out_paths);
-                    let key_deser_lock = Arc::clone(&key_deser_lock);
                     let pvrs_blocks_u32 = Arc::clone(pvrs_blocks_u32.as_ref().expect("pvrs_blocks_u32 must exist"));
                     let tmp_dir = tmp_dir.clone();
                     let cc_path = cc_path.clone();
                     let pk_path = pk_path.clone();
-                    let em_path = em_path.clone();
-                    let er_path = er_path.clone();
 
                     let h = scope.spawn(move || -> Result<()> {
                         let ctx = OpenFheBackend::deserialize_crypto_context(&cc_path, serial_mode)?;
                         let pk = OpenFheBackend::deserialize_public_key(&pk_path, serial_mode)?;
-
-                        // Deserialize eval keys under a lock (conservative: some OpenFHE builds
-                        // behave poorly under concurrent key deserialization).
-                        {
-                            let _g = key_deser_lock.lock().unwrap();
-                            OpenFheBackend::deserialize_eval_mult_key(&em_path, serial_mode)?;
-                            OpenFheBackend::deserialize_eval_rot_key(&er_path, serial_mode)?;
-                        }
 
                         let zeros = vec![0i64; m.slot_count];
                         let pt_zero = OpenFheBackend::make_packed_plaintext(&ctx, &zeros)?;
