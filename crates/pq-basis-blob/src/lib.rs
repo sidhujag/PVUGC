@@ -71,6 +71,18 @@ pub struct ShapeBlobManifestV0 {
     pub blocks_per_chunk: usize,
     pub required_rotations: Vec<i32>,
     pub weights_kind: WeightsKind,
+    /// If true, all limbs reuse the same basis ciphertext files (limb 0 paths).
+    ///
+    /// This is a blob-size optimization. Limb separation must then come from per-limb
+    /// weights domain separation (or a different limb-derivation mechanism).
+    #[serde(default)]
+    pub basis_shared_across_limbs: bool,
+    /// If true, derive weights with an explicit limb domain separator.
+    ///
+    /// This is required when `moduli` contains duplicates (e.g., 16 limbs all mod 65537),
+    /// otherwise all limbs would use the same weights and become identical under a shared basis.
+    #[serde(default)]
+    pub weights_domain_sep_per_limb: bool,
     pub ciphertext_encoding_version: u32,
     #[serde(default)]
     pub openfhe: Option<OpenFheManifestV0>,
@@ -81,8 +93,17 @@ pub struct ShapeBlobManifestV0 {
 
 impl ShapeBlobManifestV0 {
     /// File naming convention (v0): one ciphertext per file (blocks_per_chunk == 1).
-    pub fn basis_chunk_rel_path(&self, limb: usize, j: usize, start_block: usize, end_block: usize) -> PathBuf {
-        PathBuf::from(format!("basis/l{limb}/j{j}/blocks_{start_block}_{end_block}.bin"))
+    pub fn basis_chunk_rel_path(
+        &self,
+        limb: usize,
+        j: usize,
+        start_block: usize,
+        end_block: usize,
+    ) -> PathBuf {
+        let limb = if self.basis_shared_across_limbs { 0 } else { limb };
+        PathBuf::from(format!(
+            "basis/l{limb}/j{j}/blocks_{start_block}_{end_block}.bin"
+        ))
     }
 
     pub fn basis_chunk_path(
@@ -96,4 +117,3 @@ impl ShapeBlobManifestV0 {
         shape_blob_dir.join(self.basis_chunk_rel_path(limb, j, start_block, end_block))
     }
 }
-

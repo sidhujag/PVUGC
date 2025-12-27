@@ -3,7 +3,10 @@ use openfhe::ffi as openfhe_ffi;
 use pq_fhe_backend::FheBackend;
 
 use openfhe::cxx::{self, let_cxx_string, CxxVector};
-use pq_basis_blob::{rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0, WeightsKind};
+use pq_basis_blob::{
+    rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0,
+    WeightsKind,
+};
 use rand_core::{OsRng, RngCore};
 use std::fs;
 use std::io::Write;
@@ -113,8 +116,14 @@ impl LweSampleU64 {
 ///
 /// NOTE: BFV plaintext decoding includes scaling/rounding (Δ≈q/t) across the *full* CRT basis; this
 /// function is purely the RLWE sample extraction over a single tower modulus.
-pub fn extract_lwe_coeff0_from_ciphertext_tower(ct: &OpenFheCt, tower_index: u32) -> Result<LweSampleU64> {
-    let ct_ref = ct.ct.as_ref().ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
+pub fn extract_lwe_coeff0_from_ciphertext_tower(
+    ct: &OpenFheCt,
+    tower_index: u32,
+) -> Result<LweSampleU64> {
+    let ct_ref = ct
+        .ct
+        .as_ref()
+        .ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
     let c0 = openfhe_ffi::DCRTPolyExtractCiphertextElementTowerCoeffs(ct_ref, 0, tower_index);
     let c1 = openfhe_ffi::DCRTPolyExtractCiphertextElementTowerCoeffs(ct_ref, 1, tower_index);
     anyhow::ensure!(c0.len() >= 2, "c0 extraction returned too few values");
@@ -212,7 +221,10 @@ impl OpenFheBackend {
         }
     }
 
-    pub fn deserialize_crypto_context(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<OpenFheCtx> {
+    pub fn deserialize_crypto_context(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<OpenFheCtx> {
         let mut cc = openfhe_ffi::DCRTPolyGenNullCryptoContext();
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializeCryptoContextFromFile(&p, cc.pin_mut(), serial_mode) {
@@ -221,7 +233,10 @@ impl OpenFheBackend {
         Ok(OpenFheCtx { cc })
     }
 
-    pub fn deserialize_public_key(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<OpenFhePk> {
+    pub fn deserialize_public_key(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<OpenFhePk> {
         let mut pk = openfhe_ffi::DCRTPolyGenNullPublicKey();
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializePublicKeyFromFile(&p, pk.pin_mut(), serial_mode) {
@@ -230,7 +245,10 @@ impl OpenFheBackend {
         Ok(OpenFhePk { pk })
     }
 
-    pub fn deserialize_private_key(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<OpenFheSk> {
+    pub fn deserialize_private_key(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<OpenFheSk> {
         let mut sk = openfhe_ffi::DCRTPolyGenNullPrivateKey();
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializePrivateKeyFromFile(&p, sk.pin_mut(), serial_mode) {
@@ -239,7 +257,10 @@ impl OpenFheBackend {
         Ok(OpenFheSk { sk })
     }
 
-    pub fn deserialize_eval_mult_key(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<()> {
+    pub fn deserialize_eval_mult_key(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<()> {
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializeEvalMultKeyFromFile(&p, serial_mode) {
             return Err(anyhow!("deserialize eval mult key failed: {path}"));
@@ -247,7 +268,10 @@ impl OpenFheBackend {
         Ok(())
     }
 
-    pub fn deserialize_eval_rot_key(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<()> {
+    pub fn deserialize_eval_rot_key(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<()> {
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializeEvalAutomorphismKeyFromFile(&p, serial_mode) {
             return Err(anyhow!("deserialize eval rot key failed: {path}"));
@@ -255,7 +279,10 @@ impl OpenFheBackend {
         Ok(())
     }
 
-    pub fn deserialize_ciphertext(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<OpenFheCt> {
+    pub fn deserialize_ciphertext(
+        path: &str,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<OpenFheCt> {
         let mut ct = openfhe_ffi::DCRTPolyGenNullCiphertext();
         let_cxx_string!(p = path);
         if !openfhe_ffi::DCRTPolyDeserializeCiphertextFromFile(&p, ct.pin_mut(), serial_mode) {
@@ -293,37 +320,61 @@ impl FheBackend for OpenFheBackend {
         Ok(OpenFhePt { pt })
     }
 
-    fn encrypt(ctx: &Self::Context, pk: &Self::PublicKey, pt: &Self::Plaintext) -> Result<Self::Ciphertext> {
+    fn encrypt(
+        ctx: &Self::Context,
+        pk: &Self::PublicKey,
+        pt: &Self::Plaintext,
+    ) -> Result<Self::Ciphertext> {
         Ok(OpenFheCt {
             ct: ctx.cc.EncryptByPublicKey(&pk.pk, &pt.pt),
         })
     }
 
-    fn eval_mult_plain(ctx: &Self::Context, ct: &Self::Ciphertext, pt: &Self::Plaintext) -> Result<Self::Ciphertext> {
+    fn eval_mult_plain(
+        ctx: &Self::Context,
+        ct: &Self::Ciphertext,
+        pt: &Self::Plaintext,
+    ) -> Result<Self::Ciphertext> {
         Ok(OpenFheCt {
             ct: ctx.cc.EvalMultByCiphertextAndPlaintext(&ct.ct, &pt.pt),
         })
     }
 
-    fn eval_add(ctx: &Self::Context, a: &Self::Ciphertext, b: &Self::Ciphertext) -> Result<Self::Ciphertext> {
+    fn eval_add(
+        ctx: &Self::Context,
+        a: &Self::Ciphertext,
+        b: &Self::Ciphertext,
+    ) -> Result<Self::Ciphertext> {
         Ok(OpenFheCt {
             ct: ctx.cc.EvalAddByCiphertexts(&a.ct, &b.ct),
         })
     }
 
-    fn eval_add_plain(ctx: &Self::Context, a: &Self::Ciphertext, pt: &Self::Plaintext) -> Result<Self::Ciphertext> {
+    fn eval_add_plain(
+        ctx: &Self::Context,
+        a: &Self::Ciphertext,
+        pt: &Self::Plaintext,
+    ) -> Result<Self::Ciphertext> {
         Ok(OpenFheCt {
             ct: ctx.cc.EvalAddByCiphertextAndPlaintext(&a.ct, &pt.pt),
         })
     }
 
-    fn eval_rotate(ctx: &Self::Context, ct: &Self::Ciphertext, shift: i32) -> Result<Self::Ciphertext> {
+    fn eval_rotate(
+        ctx: &Self::Context,
+        ct: &Self::Ciphertext,
+        shift: i32,
+    ) -> Result<Self::Ciphertext> {
         Ok(OpenFheCt {
             ct: ctx.cc.EvalRotate(&ct.ct, shift),
         })
     }
 
-    fn decrypt(ctx: &Self::Context, sk: &Self::PrivateKey, ct: &Self::Ciphertext) -> Result<Vec<i64>> {
+    fn decrypt(
+        ctx: &Self::Context,
+        sk: &Self::PrivateKey,
+        ct: &Self::Ciphertext,
+    ) -> Result<Vec<i64>> {
         let mut pt_out = openfhe_ffi::GenNullPlainText();
         ctx.cc
             .DecryptByPrivateKeyAndCiphertext(&sk.sk, &ct.ct, pt_out.pin_mut());
@@ -337,7 +388,12 @@ impl FheBackend for OpenFheBackend {
 }
 
 /// Dev helper: decrypt and force the plaintext packed length (needed before GetPackedValue()).
-pub fn decrypt_packed_with_len(ctx: &OpenFheCtx, sk: &OpenFheSk, ct: &OpenFheCt, len: usize) -> Result<Vec<i64>> {
+pub fn decrypt_packed_with_len(
+    ctx: &OpenFheCtx,
+    sk: &OpenFheSk,
+    ct: &OpenFheCt,
+    len: usize,
+) -> Result<Vec<i64>> {
     let mut pt_out = openfhe_ffi::GenNullPlainText();
     ctx.cc
         .DecryptByPrivateKeyAndCiphertext(&sk.sk, &ct.ct, pt_out.pin_mut());
@@ -358,8 +414,14 @@ pub fn decrypt_packed_with_len(ctx: &OpenFheCtx, sk: &OpenFheSk, ct: &OpenFheCt,
 /// - first few coefficients of ct element 0 / tower 0 after forcing COEFFICIENT format
 ///
 /// This is a correctness-only diagnostic tool; not part of the production protocol.
-pub fn sanity_openfhe_slot_sum_constant_poly(slot_count: usize, plaintext_modulus: u64) -> Result<()> {
-    anyhow::ensure!(slot_count.is_power_of_two(), "slot_count must be power-of-two for simple SlotSum");
+pub fn sanity_openfhe_slot_sum_constant_poly(
+    slot_count: usize,
+    plaintext_modulus: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        slot_count.is_power_of_two(),
+        "slot_count must be power-of-two for simple SlotSum"
+    );
     anyhow::ensure!(slot_count >= 2, "slot_count must be >= 2");
 
     // Build a minimal BFVRNS context (in-memory).
@@ -396,11 +458,19 @@ pub fn sanity_openfhe_slot_sum_constant_poly(slot_count: usize, plaintext_modulu
     for r in rotations_powers_of_two(slot_count) {
         index_list.pin_mut().push(r);
     }
-    cc.EvalRotateKeyGen(&kp.GetPrivateKey(), &index_list, &openfhe_ffi::DCRTPolyGenNullPublicKey());
+    cc.EvalRotateKeyGen(
+        &kp.GetPrivateKey(),
+        &index_list,
+        &openfhe_ffi::DCRTPolyGenNullPublicKey(),
+    );
 
     let ctx = OpenFheCtx { cc };
-    let pk = OpenFhePk { pk: kp.GetPublicKey() };
-    let sk = OpenFheSk { sk: kp.GetPrivateKey() };
+    let pk = OpenFhePk {
+        pk: kp.GetPublicKey(),
+    };
+    let sk = OpenFheSk {
+        sk: kp.GetPrivateKey(),
+    };
 
     // Encrypt a simple known vector: [1,2,3,...,slot_count]
     let mut v = Vec::with_capacity(slot_count);
@@ -443,9 +513,15 @@ pub fn sanity_openfhe_slot_sum_constant_poly(slot_count: usize, plaintext_modulu
     anyhow::ensure!(elem0_t0.len() >= 2, "expected [q, coeffs..] from shim");
     let q = elem0_t0[0];
     let n = elem0_t0.len() - 1;
-    anyhow::ensure!(n as u32 == ring_dim, "shim coeff len mismatch: got {n}, want ring_dim {ring_dim}");
+    anyhow::ensure!(
+        n as u32 == ring_dim,
+        "shim coeff len mismatch: got {n}, want ring_dim {ring_dim}"
+    );
     eprintln!("openfhe_sanity: t={plaintext_modulus} slot_count={slot_count} ring_dim={ring_dim} tower_q={q}");
-    eprintln!("openfhe_sanity: ct.c0[tower0].coeff[0..8]={:?}", &elem0_t0[1..1 + core::cmp::min(8, n)]);
+    eprintln!(
+        "openfhe_sanity: ct.c0[tower0].coeff[0..8]={:?}",
+        &elem0_t0[1..1 + core::cmp::min(8, n)]
+    );
 
     // Debug-only: extract the secret-key polynomial and validate the coefficient-0 RLWE decryption relation.
     //
@@ -503,8 +579,15 @@ pub fn sanity_openfhe_slot_sum_constant_poly(slot_count: usize, plaintext_modulu
 /// - ciphertext coefficient extraction is in COEFFICIENT form (inverse NTT was applied)
 /// - the negacyclic mapping for (a,b) is consistent with OpenFHE's RLWE convention
 /// - BFV scaling/rounding is handled consistently at the bridge boundary (at least per-tower)
-pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, tower_index: u32) -> Result<()> {
-    anyhow::ensure!(slot_count.is_power_of_two(), "slot_count must be power-of-two for simple SlotSum");
+pub fn sanity_openfhe_bridge_decode(
+    slot_count: usize,
+    plaintext_modulus: u64,
+    tower_index: u32,
+) -> Result<()> {
+    anyhow::ensure!(
+        slot_count.is_power_of_two(),
+        "slot_count must be power-of-two for simple SlotSum"
+    );
     anyhow::ensure!(slot_count >= 2, "slot_count must be >= 2");
 
     // Build a minimal BFVRNS context (in-memory), matching `sanity_openfhe_slot_sum_constant_poly`.
@@ -536,11 +619,19 @@ pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, t
     for r in rotations_powers_of_two(slot_count) {
         index_list.pin_mut().push(r);
     }
-    cc.EvalRotateKeyGen(&kp.GetPrivateKey(), &index_list, &openfhe_ffi::DCRTPolyGenNullPublicKey());
+    cc.EvalRotateKeyGen(
+        &kp.GetPrivateKey(),
+        &index_list,
+        &openfhe_ffi::DCRTPolyGenNullPublicKey(),
+    );
 
     let ctx = OpenFheCtx { cc };
-    let pk = OpenFhePk { pk: kp.GetPublicKey() };
-    let sk = OpenFheSk { sk: kp.GetPrivateKey() };
+    let pk = OpenFhePk {
+        pk: kp.GetPublicKey(),
+    };
+    let sk = OpenFheSk {
+        sk: kp.GetPrivateKey(),
+    };
 
     // Encrypt a known vector [1,2,3,...,slot_count] so SlotSum target is deterministic.
     let mut v = Vec::with_capacity(slot_count);
@@ -576,7 +667,10 @@ pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, t
 
     // Reduce modulus until only one tower remains (Q == q0).
     loop {
-        let ct_ref = ct.ct.as_ref().ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
+        let ct_ref = ct
+            .ct
+            .as_ref()
+            .ok_or_else(|| anyhow!("null OpenFHE ciphertext"))?;
         let towers = openfhe_ffi::DCRTPolyCiphertextElementNumTowers(ct_ref, 0);
         anyhow::ensure!(towers >= 1, "invalid ciphertext tower count {towers}");
         if towers == 1 {
@@ -608,10 +702,23 @@ pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, t
 
     // Extract secret key coefficients for this tower (debug-only shim; required for this sanity test).
     let sk_t = openfhe_ffi::DCRTPolyExtractPrivateKeyTowerCoeffs(&sk.sk, tower_index);
-    anyhow::ensure!(sk_t.len() >= 2, "sk coeff extraction returned too few values");
-    anyhow::ensure!(sk_t[0] == lwe.q, "sk modulus mismatch (sk_q={}, lwe_q={})", sk_t[0], lwe.q);
+    anyhow::ensure!(
+        sk_t.len() >= 2,
+        "sk coeff extraction returned too few values"
+    );
+    anyhow::ensure!(
+        sk_t[0] == lwe.q,
+        "sk modulus mismatch (sk_q={}, lwe_q={})",
+        sk_t[0],
+        lwe.q
+    );
     let s_coeffs = &sk_t[1..];
-    anyhow::ensure!(s_coeffs.len() == lwe.a.len(), "sk coeff len mismatch (got {}, want {})", s_coeffs.len(), lwe.a.len());
+    anyhow::ensure!(
+        s_coeffs.len() == lwe.a.len(),
+        "sk coeff len mismatch (got {}, want {})",
+        s_coeffs.len(),
+        lwe.a.len()
+    );
 
     // phase = b + <a, s> (mod q)
     let qq = lwe.q as u128;
@@ -638,6 +745,8 @@ pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, t
         (num - half_q) / q
     };
     let m_rec_mod_t = ((m_rec_i128 % t_i128) + t_i128) % t_i128;
+    let m_rec_byte = (m_rec_mod_t as u64) & 0xff;
+    let expected_byte = (sum_expected_mod_t as u64) & 0xff;
 
     anyhow::ensure!(
         m_rec_mod_t == sum_expected_mod_t,
@@ -645,8 +754,8 @@ pub fn sanity_openfhe_bridge_decode(slot_count: usize, plaintext_modulus: u64, t
     );
 
     eprintln!(
-        "openfhe_sanity_bridge: OK (tower={tower_index}) q={} t={} expected={} phase_centered={} m_rec={}",
-        lwe.q, plaintext_modulus, sum_expected_mod_t, phase_centered, m_rec_mod_t
+        "openfhe_sanity_bridge: OK (tower={tower_index}) q={} t={} expected={} (byte={:02x}) phase_centered={} m_rec={} (byte={:02x})",
+        lwe.q, plaintext_modulus, sum_expected_mod_t, expected_byte, phase_centered, m_rec_mod_t, m_rec_byte
     );
     Ok(())
 }
@@ -667,6 +776,10 @@ pub struct SetupShapeBlobArgs {
     pub block_count: usize,
     pub blocks_per_chunk: usize,
     pub weights_kind: WeightsKind,
+    /// If true, reuse a single basis (and OpenFHE key material) across all limbs.
+    pub basis_shared_across_limbs: bool,
+    /// If true, derive weights with an explicit limb domain separator.
+    pub weights_domain_sep_per_limb: bool,
     pub multiplicative_depth: u32,
     pub serial_mode: String,
     /// Parallelism for basis ciphertext generation across `j`.
@@ -680,41 +793,61 @@ pub struct SetupShapeBlobArgs {
 ///
 /// This reads `manifest.json` for parameters and uses the already-written OpenFHE artifacts in
 /// `openfhe/l{limb}/`.
-pub fn openfhe_generate_basis_worker(shape_blob_dir: &PathBuf, limb: usize, j_start: usize, j_end: usize) -> Result<()> {
+pub fn openfhe_generate_basis_worker(
+    shape_blob_dir: &PathBuf,
+    limb: usize,
+    j_start: usize,
+    j_end: usize,
+) -> Result<()> {
     anyhow::ensure!(j_start <= j_end, "invalid j range");
 
     let manifest_path = shape_blob_dir.join("manifest.json");
     let manifest_bytes =
         fs::read(&manifest_path).with_context(|| format!("read {}", manifest_path.display()))?;
-    let m: ShapeBlobManifestV0 = serde_json::from_slice(&manifest_bytes).context("parse manifest.json")?;
+    let m: ShapeBlobManifestV0 =
+        serde_json::from_slice(&manifest_bytes).context("parse manifest.json")?;
     anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
+
+    if m.basis_shared_across_limbs && limb != 0 {
+        // Shared basis mode: only limb 0 has distinct basis material on disk.
+        // Higher limbs are mapped to limb 0 by `ShapeBlobManifestV0::basis_chunk_path`.
+        return Ok(());
+    }
     let of = m
         .openfhe
         .clone()
         .ok_or_else(|| anyhow!("manifest missing openfhe section"))?;
     let serial_mode_enum = OpenFheBackend::parse_serial_mode(&of.serial_mode)?;
 
+    let limb_idx = if m.basis_shared_across_limbs { 0 } else { limb };
     let limb_cfg = of
         .limbs
         .iter()
-        .find(|x| x.limb == limb)
-        .ok_or_else(|| anyhow!("missing openfhe limb {limb}"))?
+        .find(|x| x.limb == limb_idx)
+        .ok_or_else(|| anyhow!("missing openfhe limb {limb_idx}"))?
         .clone();
     let pt_mod = limb_cfg.plaintext_modulus;
 
     // Deserialize the OpenFHE context + public key for this limb (process-local).
     let ctx = OpenFheBackend::deserialize_crypto_context(
-        shape_blob_dir.join(&limb_cfg.crypto_context_path).to_string_lossy().as_ref(),
+        shape_blob_dir
+            .join(&limb_cfg.crypto_context_path)
+            .to_string_lossy()
+            .as_ref(),
         serial_mode_enum,
     )?;
     let pk = OpenFheBackend::deserialize_public_key(
-        shape_blob_dir.join(&limb_cfg.public_key_path).to_string_lossy().as_ref(),
+        shape_blob_dir
+            .join(&limb_cfg.public_key_path)
+            .to_string_lossy()
+            .as_ref(),
         serial_mode_enum,
     )?;
 
-    // Ensure basis directories exist.
+    // Ensure basis directories exist (shared-basis mode writes only under l0).
+    let basis_limb = if m.basis_shared_across_limbs { 0 } else { limb };
     for j in j_start..j_end {
-        fs::create_dir_all(shape_blob_dir.join(format!("basis/l{limb}/j{j}"))).ok();
+        fs::create_dir_all(shape_blob_dir.join(format!("basis/l{basis_limb}/j{j}"))).ok();
     }
 
     let mut rng = OsRng;
@@ -733,9 +866,9 @@ pub fn openfhe_generate_basis_worker(shape_blob_dir: &PathBuf, limb: usize, j_st
                 }
                 let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
                 let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
-                writer
-                    .append(&ct)
-                    .with_context(|| format!("append basis ciphertext failed: {}", ct_path.display()))?;
+                writer.append(&ct).with_context(|| {
+                    format!("append basis ciphertext failed: {}", ct_path.display())
+                })?;
             }
             drop(writer);
             start = end;
@@ -748,22 +881,41 @@ pub fn openfhe_generate_basis_worker(shape_blob_dir: &PathBuf, limb: usize, j_st
 /// Keys-only OpenFHE setup: writes `manifest.json` + OpenFHE artifacts, but does **not** generate basis ciphertexts.
 pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<()> {
     anyhow::ensure!(args.blocks_per_chunk > 0, "blocks_per_chunk must be > 0");
-    anyhow::ensure!(args.moduli.len() == args.d_limbs, "moduli.len must equal d_limbs");
+    anyhow::ensure!(
+        args.moduli.len() == args.d_limbs,
+        "moduli.len must equal d_limbs"
+    );
     let serial_mode_enum = OpenFheBackend::parse_serial_mode(&args.serial_mode)?;
 
     fs::create_dir_all(&args.out_dir)?;
     fs::create_dir_all(args.out_dir.join("basis")).ok();
     fs::create_dir_all(args.out_dir.join("openfhe")).ok();
 
-    let mut limb_files: Vec<OpenFheLimbFilesV0> = Vec::with_capacity(args.d_limbs);
+    let mut limb_files: Vec<OpenFheLimbFilesV0> = Vec::new();
 
-    for (limb, &pt_mod) in args.moduli.iter().enumerate() {
+    if args.basis_shared_across_limbs {
+        // Shared basis + shared OpenFHE keys require identical plaintext modulus across limbs.
+        anyhow::ensure!(
+            args.moduli.iter().all(|&x| x == args.moduli[0]),
+            "basis_shared_across_limbs requires all moduli identical"
+        );
+    }
+
+    let limbs_to_build: Vec<(usize, u64)> = if args.basis_shared_across_limbs {
+        vec![(0usize, args.moduli[0])]
+    } else {
+        args.moduli.iter().copied().enumerate().collect()
+    };
+
+    for (limb, pt_mod) in limbs_to_build.into_iter() {
         let limb_dir = args.out_dir.join(format!("openfhe/l{limb}"));
         fs::create_dir_all(&limb_dir).ok();
 
         let mut cc_params = openfhe_ffi::GenParamsBFVRNS();
         cc_params.pin_mut().SetPlaintextModulus(pt_mod);
-        cc_params.pin_mut().SetMultiplicativeDepth(args.multiplicative_depth);
+        cc_params
+            .pin_mut()
+            .SetMultiplicativeDepth(args.multiplicative_depth);
         cc_params.pin_mut().SetBatchSize(args.slot_count as u32);
         let ring_dim = (args.slot_count as u32).next_power_of_two().max(8192);
         cc_params.pin_mut().SetRingDim(ring_dim);
@@ -784,7 +936,11 @@ pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<(
         for r in rotations_powers_of_two(args.slot_count) {
             index_list.pin_mut().push(r);
         }
-        cc.EvalRotateKeyGen(&kp.GetPrivateKey(), &index_list, &openfhe_ffi::DCRTPolyGenNullPublicKey());
+        cc.EvalRotateKeyGen(
+            &kp.GetPrivateKey(),
+            &index_list,
+            &openfhe_ffi::DCRTPolyGenNullPublicKey(),
+        );
 
         let cc_path = limb_dir.join("crypto_context.bin");
         let pk_path = limb_dir.join("public_key.bin");
@@ -809,11 +965,19 @@ pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<(
             "serialize crypto context failed"
         );
         anyhow::ensure!(
-            openfhe_ffi::DCRTPolySerializePublicKeyToFile(&pk_s, &kp.GetPublicKey(), serial_mode_enum),
+            openfhe_ffi::DCRTPolySerializePublicKeyToFile(
+                &pk_s,
+                &kp.GetPublicKey(),
+                serial_mode_enum
+            ),
             "serialize public key failed"
         );
         anyhow::ensure!(
-            openfhe_ffi::DCRTPolySerializePrivateKeyToFile(&sk_s, &kp.GetPrivateKey(), serial_mode_enum),
+            openfhe_ffi::DCRTPolySerializePrivateKeyToFile(
+                &sk_s,
+                &kp.GetPrivateKey(),
+                serial_mode_enum
+            ),
             "serialize private key failed"
         );
         anyhow::ensure!(
@@ -825,8 +989,10 @@ pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<(
             "serialize eval rot key failed"
         );
 
+        // Ensure basis directories exist (shared-basis mode writes only under l0).
+        let basis_limb = if args.basis_shared_across_limbs { 0 } else { limb };
         for j in 0..args.s_basis {
-            fs::create_dir_all(args.out_dir.join(format!("basis/l{limb}/j{j}"))).ok();
+            fs::create_dir_all(args.out_dir.join(format!("basis/l{basis_limb}/j{j}"))).ok();
         }
 
         limb_files.push(OpenFheLimbFilesV0 {
@@ -853,6 +1019,8 @@ pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<(
         blocks_per_chunk: args.blocks_per_chunk,
         required_rotations: rotations_powers_of_two(args.slot_count),
         weights_kind: args.weights_kind,
+        basis_shared_across_limbs: args.basis_shared_across_limbs,
+        weights_domain_sep_per_limb: args.weights_domain_sep_per_limb,
         ciphertext_encoding_version: 0,
         openfhe: Some(OpenFheManifestV0 {
             version: 0,
@@ -866,20 +1034,30 @@ pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<(
 
     let manifest_path = args.out_dir.join("manifest.json");
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-    fs::write(&manifest_path, manifest_bytes).with_context(|| format!("write {}", manifest_path.display()))?;
+    fs::write(&manifest_path, manifest_bytes)
+        .with_context(|| format!("write {}", manifest_path.display()))?;
 
     Ok(())
 }
 
 pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
     anyhow::ensure!(args.blocks_per_chunk > 0, "blocks_per_chunk must be > 0");
-    anyhow::ensure!(args.moduli.len() == args.d_limbs, "moduli.len must equal d_limbs");
-    anyhow::ensure!(args.basis_parallelism == 1, "threaded OpenFHE setup is disabled; use pvugc_pq multiprocess when basis_parallelism>1");
+    anyhow::ensure!(
+        args.moduli.len() == args.d_limbs,
+        "moduli.len must equal d_limbs"
+    );
+    anyhow::ensure!(
+        args.basis_parallelism == 1,
+        "threaded OpenFHE setup is disabled; use pvugc_pq multiprocess when basis_parallelism>1"
+    );
     setup_shape_blob_openfhe_keys_only(&args)?;
     // Sequential basis generation inside this process.
-    for limb in 0..args.d_limbs {
-        openfhe_generate_basis_worker(&args.out_dir, limb, 0, args.s_basis)?;
+    if args.basis_shared_across_limbs {
+        openfhe_generate_basis_worker(&args.out_dir, 0, 0, args.s_basis)?;
+    } else {
+        for limb in 0..args.d_limbs {
+            openfhe_generate_basis_worker(&args.out_dir, limb, 0, args.s_basis)?;
+        }
     }
     Ok(())
 }
-

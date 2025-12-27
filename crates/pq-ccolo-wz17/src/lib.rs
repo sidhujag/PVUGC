@@ -33,7 +33,9 @@ pub enum Wz17Error {
 /// Decapsulate a key share from a ciphertext-tag input.
 ///
 /// This API will evolve once we commit to the concrete Wichs–Zirdelis instantiation.
-pub fn decap_v1(_gate: &Wz17GateArtifactV1, _tag_ciphertext_bytes: &[u8]) -> Result<Option<Vec<u8>>, Wz17Error> {
+pub fn decap_v1(
+    _gate: &Wz17GateArtifactV1,
+    _tag_ciphertext_bytes: &[u8],
+) -> Result<Option<Vec<u8>>, Wz17Error> {
     Err(Wz17Error::NotImplemented)
 }
-
