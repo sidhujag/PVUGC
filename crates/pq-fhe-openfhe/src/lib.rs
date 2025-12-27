@@ -6,6 +6,7 @@ use openfhe::cxx::{self, let_cxx_string, CxxVector};
 use pq_basis_blob::{rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0, WeightsKind};
 use rand_core::{OsRng, RngCore};
 use rayon::prelude::*;
+use std::sync::Arc;
 use std::fs;
 use std::path::PathBuf;
 
@@ -347,10 +348,19 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         }
 
         // Parallelize across basis index j: each j writes disjoint files.
-        // Note: disk bandwidth can bottleneck; tune RAYON_NUM_THREADS on the server.
-        (0..args.s_basis)
-            .into_par_iter()
-            .try_for_each(|j| -> Result<()> {
+        //
+        // IMPORTANT: OpenFHE C++ objects are wrapped in `cxx::UniquePtr` and are not `Sync`,
+        // so we must NOT share `cc`/`kp` across threads. Instead, we serialize them once above,
+        // then each worker thread deserializes its own local `CryptoContext` + `PublicKey` and
+        // uses those to encrypt. This keeps key material identical but avoids sharing pointers.
+        let cc_path_s = Arc::new(cc_s_owned.clone());
+        let pk_path_s = Arc::new(pk_s_owned.clone());
+        let serial_mode_enum2 = serial_mode_enum;
+
+        (0..args.s_basis).into_par_iter().try_for_each(|j| -> Result<()> {
+            let ctx = OpenFheBackend::deserialize_crypto_context(&cc_path_s, serial_mode_enum2)?;
+            let pk = OpenFheBackend::deserialize_public_key(&pk_path_s, serial_mode_enum2)?;
+
                 let mut start = 0usize;
                 let mut rng = OsRng;
                 while start < args.block_count {
@@ -364,8 +374,8 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
                         for _ in 0..args.slot_count {
                             vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
                         }
-                        let pt = cc.MakePackedPlaintext(&vec_i64, 1, 0);
-                        let ct = cc.EncryptByPublicKey(&kp.GetPublicKey(), &pt);
+                        let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
+                        let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
                         writer.append(&ct).with_context(|| {
                             format!("append basis ciphertext failed: {}", ct_path.display())
                         })?;
