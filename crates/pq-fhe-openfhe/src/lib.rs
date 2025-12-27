@@ -36,10 +36,25 @@ pub struct CtChunkReader {
     r: cxx::UniquePtr<openfhe_ffi::CiphertextStreamReaderDCRTPoly>,
 }
 
+fn ct_stream_buffer_bytes_from_env() -> usize {
+    // Opt-in: use iostream default buffer unless explicitly set.
+    // Value is MiB (so it's convenient to tune on servers).
+    let mib = std::env::var("PVUGC_OPENFHE_CT_STREAM_BUF_MIB")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    mib.saturating_mul(1024 * 1024)
+}
+
 impl CtChunkReader {
     pub fn open(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<Self> {
         let_cxx_string!(p = path);
-        let r = openfhe_ffi::DCRTPolyNewCiphertextStreamReader(&p, serial_mode);
+        let buf = ct_stream_buffer_bytes_from_env();
+        let r = if buf == 0 {
+            openfhe_ffi::DCRTPolyNewCiphertextStreamReader(&p, serial_mode)
+        } else {
+            openfhe_ffi::DCRTPolyNewCiphertextStreamReaderWithBuffer(&p, serial_mode, buf)
+        };
         if r.is_null() {
             return Err(anyhow!("failed to open ciphertext stream reader: {path}"));
         }
@@ -62,7 +77,12 @@ pub struct CtChunkWriter {
 impl CtChunkWriter {
     pub fn create(path: &str, serial_mode: openfhe_ffi::SerialMode) -> Result<Self> {
         let_cxx_string!(p = path);
-        let w = openfhe_ffi::DCRTPolyNewCiphertextStreamWriter(&p, serial_mode, true);
+        let buf = ct_stream_buffer_bytes_from_env();
+        let w = if buf == 0 {
+            openfhe_ffi::DCRTPolyNewCiphertextStreamWriter(&p, serial_mode, true)
+        } else {
+            openfhe_ffi::DCRTPolyNewCiphertextStreamWriterWithBuffer(&p, serial_mode, true, buf)
+        };
         if w.is_null() {
             return Err(anyhow!("failed to create ciphertext stream writer: {path}"));
         }

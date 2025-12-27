@@ -1090,6 +1090,17 @@ pub mod ffi
                                              ciphertext: &CiphertextDCRTPoly,
                                              serialMode: SerialMode) -> bool;
 
+        // Chunked ciphertext stream helpers (buffered variants)
+        fn DCRTPolyNewCiphertextStreamReaderWithBuffer(path: &CxxString,
+                                                       serialMode: SerialMode,
+                                                       bufferBytes: usize)
+                                                       -> UniquePtr<CiphertextStreamReaderDCRTPoly>;
+        fn DCRTPolyNewCiphertextStreamWriterWithBuffer(path: &CxxString,
+                                                       serialMode: SerialMode,
+                                                       truncate: bool,
+                                                       bufferBytes: usize)
+                                                       -> UniquePtr<CiphertextStreamWriterDCRTPoly>;
+
         // CryptoContextDCRTPoly
         fn DCRTPolyDeserializeCryptoContextFromFile(ccLocation: &CxxString,
                                                     cryptoContext: Pin<&mut CryptoContextDCRTPoly>,

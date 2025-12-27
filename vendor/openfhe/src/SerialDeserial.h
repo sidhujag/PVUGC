@@ -5,6 +5,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace openfhe
 {
@@ -33,20 +34,30 @@ class CiphertextStreamWriterDCRTPoly;
     const std::string& path, const SerialMode serialMode);
 [[nodiscard]] std::unique_ptr<CiphertextStreamWriterDCRTPoly> DCRTPolyNewCiphertextStreamWriter(
     const std::string& path, const SerialMode serialMode, bool truncate);
+// Same, but allow overriding the underlying std::fstream buffer size (in bytes).
+// If bufferBytes == 0, uses the iostream default.
+[[nodiscard]] std::unique_ptr<CiphertextStreamReaderDCRTPoly> DCRTPolyNewCiphertextStreamReaderWithBuffer(
+    const std::string& path, const SerialMode serialMode, size_t bufferBytes);
+[[nodiscard]] std::unique_ptr<CiphertextStreamWriterDCRTPoly> DCRTPolyNewCiphertextStreamWriterWithBuffer(
+    const std::string& path, const SerialMode serialMode, bool truncate, size_t bufferBytes);
 
 class CiphertextStreamReaderDCRTPoly final {
     std::ifstream m_in;
     SerialMode m_mode;
+    std::vector<char> m_buf;
 public:
     CiphertextStreamReaderDCRTPoly(const std::string& path, SerialMode mode);
+    CiphertextStreamReaderDCRTPoly(const std::string& path, SerialMode mode, size_t bufferBytes);
     [[nodiscard]] std::unique_ptr<CiphertextDCRTPoly> Next();
 };
 
 class CiphertextStreamWriterDCRTPoly final {
     std::ofstream m_out;
     SerialMode m_mode;
+    std::vector<char> m_buf;
 public:
     CiphertextStreamWriterDCRTPoly(const std::string& path, SerialMode mode, bool truncate);
+    CiphertextStreamWriterDCRTPoly(const std::string& path, SerialMode mode, bool truncate, size_t bufferBytes);
     [[nodiscard]] bool Append(const CiphertextDCRTPoly& ciphertext);
 };
 

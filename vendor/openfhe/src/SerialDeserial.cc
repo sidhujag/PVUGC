@@ -88,9 +88,31 @@ std::unique_ptr<CiphertextStreamWriterDCRTPoly> DCRTPolyNewCiphertextStreamWrite
     return std::make_unique<CiphertextStreamWriterDCRTPoly>(path, serialMode, truncate);
 }
 
+std::unique_ptr<CiphertextStreamReaderDCRTPoly> DCRTPolyNewCiphertextStreamReaderWithBuffer(
+    const std::string& path, const SerialMode serialMode, const size_t bufferBytes)
+{
+    return std::make_unique<CiphertextStreamReaderDCRTPoly>(path, serialMode, bufferBytes);
+}
+
+std::unique_ptr<CiphertextStreamWriterDCRTPoly> DCRTPolyNewCiphertextStreamWriterWithBuffer(
+    const std::string& path, const SerialMode serialMode, const bool truncate, const size_t bufferBytes)
+{
+    return std::make_unique<CiphertextStreamWriterDCRTPoly>(path, serialMode, truncate, bufferBytes);
+}
+
 CiphertextStreamReaderDCRTPoly::CiphertextStreamReaderDCRTPoly(const std::string& path, const SerialMode mode)
     : m_in(path, std::ios::binary), m_mode(mode)
 { }
+
+CiphertextStreamReaderDCRTPoly::CiphertextStreamReaderDCRTPoly(
+    const std::string& path, const SerialMode mode, const size_t bufferBytes)
+    : m_in(path, std::ios::binary), m_mode(mode)
+{
+    if (bufferBytes > 0 && m_in.rdbuf() != nullptr) {
+        m_buf.resize(bufferBytes);
+        m_in.rdbuf()->pubsetbuf(m_buf.data(), static_cast<std::streamsize>(m_buf.size()));
+    }
+}
 
 std::unique_ptr<CiphertextDCRTPoly> CiphertextStreamReaderDCRTPoly::Next()
 {
@@ -121,6 +143,16 @@ std::unique_ptr<CiphertextDCRTPoly> CiphertextStreamReaderDCRTPoly::Next()
 CiphertextStreamWriterDCRTPoly::CiphertextStreamWriterDCRTPoly(const std::string& path, const SerialMode mode, const bool truncate)
     : m_out(path, std::ios::binary | (truncate ? std::ios::trunc : std::ios::app)), m_mode(mode)
 { }
+
+CiphertextStreamWriterDCRTPoly::CiphertextStreamWriterDCRTPoly(
+    const std::string& path, const SerialMode mode, const bool truncate, const size_t bufferBytes)
+    : m_out(path, std::ios::binary | (truncate ? std::ios::trunc : std::ios::app)), m_mode(mode)
+{
+    if (bufferBytes > 0 && m_out.rdbuf() != nullptr) {
+        m_buf.resize(bufferBytes);
+        m_out.rdbuf()->pubsetbuf(m_buf.data(), static_cast<std::streamsize>(m_buf.size()));
+    }
+}
 
 bool CiphertextStreamWriterDCRTPoly::Append(const CiphertextDCRTPoly& ciphertext)
 {
