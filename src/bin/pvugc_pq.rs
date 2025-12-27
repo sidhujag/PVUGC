@@ -112,6 +112,12 @@ enum Cmd {
         /// OpenFHE serialization mode: "BINARY" or "JSON".
         #[arg(long, default_value = "BINARY")]
         serial_mode: String,
+        /// Parallelism for basis ciphertext generation across `j` during setup.
+        ///
+        /// Default 1 is safest. Increase cautiously; some OpenFHE builds can segfault under high
+        /// concurrency.
+        #[arg(long, default_value_t = 1)]
+        basis_parallelism: usize,
     },
 
     /// Arm a statement for one armer (v0: stores alpha + sigma in clear for correctness testing).
@@ -877,6 +883,7 @@ fn main() -> Result<()> {
             binary_weights,
             multiplicative_depth,
             serial_mode,
+            basis_parallelism,
         } => {
             let moduli = if let Some(csv) = moduli_csv {
                 parse_csv_u64(&csv)?
@@ -906,6 +913,7 @@ fn main() -> Result<()> {
                 weights_kind: if binary_weights { WeightsKind::Binary01 } else { WeightsKind::Full },
                 multiplicative_depth,
                 serial_mode,
+                basis_parallelism,
             })?;
         }
 

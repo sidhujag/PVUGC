@@ -230,11 +230,17 @@ pub struct SetupShapeBlobArgs {
     pub weights_kind: WeightsKind,
     pub multiplicative_depth: u32,
     pub serial_mode: String,
+    /// Parallelism for basis ciphertext generation across `j`.
+    ///
+    /// IMPORTANT: Some OpenFHE builds appear not to be fully thread-safe for (de)serialization +
+    /// encryption in parallel. Default is 1 (safe). Increase cautiously (e.g. 8/16) on servers.
+    pub basis_parallelism: usize,
 }
 
 pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
     anyhow::ensure!(args.blocks_per_chunk > 0, "blocks_per_chunk must be > 0");
     anyhow::ensure!(args.moduli.len() == args.d_limbs, "moduli.len must equal d_limbs");
+    anyhow::ensure!(args.basis_parallelism > 0, "basis_parallelism must be > 0");
     let serial_mode_enum = OpenFheBackend::parse_serial_mode(&args.serial_mode)?;
 
     fs::create_dir_all(&args.out_dir)?;
@@ -348,43 +354,54 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
             fs::create_dir_all(args.out_dir.join(format!("basis/l{limb}/j{j}"))).ok();
         }
 
-        // Parallelize across basis index j: each j writes disjoint files.
+        // Basis generation across j.
         //
-        // IMPORTANT: OpenFHE C++ objects are wrapped in `cxx::UniquePtr` and are not `Sync`,
-        // so we must NOT share `cc`/`kp` across threads. Instead, we serialize them once above,
-        // then each worker thread deserializes its own local `CryptoContext` + `PublicKey` and
-        // uses those to encrypt. This keeps key material identical but avoids sharing pointers.
+        // Default: sequential (safe). Optional: parallel across `j` (faster on large servers),
+        // but some OpenFHE builds may segfault under heavy concurrency. Use with care.
         let cc_path_s = Arc::new(cc_s_owned.clone());
         let pk_path_s = Arc::new(pk_s_owned.clone());
         let serial_mode_enum2 = serial_mode_enum;
 
-        (0..args.s_basis).into_par_iter().try_for_each(|j| -> Result<()> {
+        let gen_one_j = |j: usize| -> Result<()> {
+            // Thread-local OpenFHE objects (do not share pointers across threads).
             let ctx = OpenFheBackend::deserialize_crypto_context(&cc_path_s, serial_mode_enum2)?;
             let pk = OpenFheBackend::deserialize_public_key(&pk_path_s, serial_mode_enum2)?;
 
-                let mut start = 0usize;
-                let mut rng = OsRng;
-                while start < args.block_count {
-                    let end = (start + args.blocks_per_chunk).min(args.block_count);
-                    let ct_path = shape_stub.basis_chunk_path(&args.out_dir, limb, j, start, end);
-                    let ct_path_s = ct_path.to_string_lossy().into_owned();
-                    let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
+            let mut start = 0usize;
+            let mut rng = OsRng;
+            while start < args.block_count {
+                let end = (start + args.blocks_per_chunk).min(args.block_count);
+                let ct_path = shape_stub.basis_chunk_path(&args.out_dir, limb, j, start, end);
+                let ct_path_s = ct_path.to_string_lossy().into_owned();
+                let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
 
-                    for _b in start..end {
-                        let mut vec_i64 = CxxVector::<i64>::new();
-                        for _ in 0..args.slot_count {
-                            vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
-                        }
-                        let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
-                        let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
-                        writer.append(&ct).with_context(|| {
-                            format!("append basis ciphertext failed: {}", ct_path.display())
-                        })?;
+                for _b in start..end {
+                    let mut vec_i64 = CxxVector::<i64>::new();
+                    for _ in 0..args.slot_count {
+                        vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
                     }
-                    start = end;
+                    let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
+                    let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
+                    writer.append(&ct).with_context(|| {
+                        format!("append basis ciphertext failed: {}", ct_path.display())
+                    })?;
                 }
-                Ok(())
-            })?;
+                start = end;
+            }
+            Ok(())
+        };
+
+        if args.basis_parallelism == 1 {
+            for j in 0..args.s_basis {
+                gen_one_j(j)?;
+            }
+        } else {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(args.basis_parallelism)
+                .build()
+                .context("build rayon threadpool for basis generation")?;
+            pool.install(|| (0..args.s_basis).into_par_iter().try_for_each(gen_one_j))?;
+        }
 
         limb_files.push(OpenFheLimbFilesV0 {
             limb,
