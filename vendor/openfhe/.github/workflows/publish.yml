@@ -1,0 +1,55 @@
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      change_type:
+        description: Change type
+        type: choice
+        options:
+        - major
+        - minor
+        - patch
+        default: patch
+
+jobs:
+  publish:
+    name: publish
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    environment: FAIR_MATH_PUBLISHER
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.FAIR_MATH_PUBLISHER_ID }}
+          private-key: ${{ secrets.FAIR_MATH_PUBLISHER_PRIVATE_KEY }}
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-gnu
+
+      - name: Changing version in Cargo.toml
+        run: |
+          chmod +x ${GITHUB_WORKSPACE}/.github/change_version.sh
+          bash ${GITHUB_WORKSPACE}/.github/change_version.sh
+        env:
+          CHANGE_TYPE: ${{ inputs.change_type }}
+
+      - name: Pushing Cargo.toml changes to master
+        run: |
+          git config --local user.name 'github-actions'
+          git config --local user.email 'github-actions@github.com'
+          git commit -am "Automated version change in Cargo.toml [skip actions]"
+          git push origin master
+
+      - run: cargo publish --no-verify --token ${CRATES_TOKEN}
+        env:
+          CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
