@@ -137,6 +137,18 @@ impl OpenFheBackend {
         }
         Ok(OpenFheCt { ct })
     }
+
+    pub fn serialize_ciphertext_to_file(
+        path: &str,
+        ct: &OpenFheCt,
+        serial_mode: openfhe_ffi::SerialMode,
+    ) -> Result<()> {
+        let_cxx_string!(p = path);
+        if !openfhe_ffi::DCRTPolySerializeCiphertextToFile(&p, &ct.ct, serial_mode) {
+            return Err(anyhow!("serialize ciphertext failed: {path}"));
+        }
+        Ok(())
+    }
 }
 
 impl FheBackend for OpenFheBackend {

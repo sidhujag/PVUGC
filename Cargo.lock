@@ -4710,6 +4710,7 @@ dependencies = [
  "pq-fhe-backend",
  "pq-fhe-openfhe",
  "rand_core 0.6.4",
+ "rayon",
  "serde",
  "serde_json",
 ]

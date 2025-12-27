@@ -10,6 +10,8 @@ use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use pq_basis_blob::{ShapeBlobManifestV0, WeightsKind};
 use rayon::prelude::*;
@@ -54,6 +56,23 @@ pub fn parse_pvrs_header_v0(path: &Path) -> Result<PvrsHeaderV0> {
     })
 }
 
+/// Read PVRS v0 blocks into memory as raw u32 words (little-endian).
+///
+/// Layout: header (92 bytes), then `block_count` blocks, each `slot_count` u32's.
+fn read_pvrs_blocks_u32(path: &Path, slot_count: usize, block_count: usize) -> Result<Vec<u32>> {
+    let mut f = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut header = [0u8; 92];
+    f.read_exact(&mut header).with_context(|| format!("read pvrs header {}", path.display()))?;
+    let mut buf = vec![0u8; slot_count * block_count * 4];
+    f.read_exact(&mut buf).with_context(|| format!("read pvrs blocks {}", path.display()))?;
+    let mut out = vec![0u32; slot_count * block_count];
+    for i in 0..out.len() {
+        let off = i * 4;
+        out[i] = u32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+    }
+    Ok(out)
+}
+
 /// Minimal v0 input derived from armer artifacts (demo trust).
 #[derive(Clone, Debug)]
 pub struct ArmerInputV0 {
@@ -67,13 +86,13 @@ pub struct ArmerInputV0 {
 
 #[cfg(feature = "pq-openfhe")]
 pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[ArmerInputV0]) -> Result<()> {
-    decap_openfhe_with_limb_parallelism(shape_blob_dir, residual_file, armers, 1)
+    decap_openfhe_with_parallelism(shape_blob_dir, residual_file, armers, 1, 1)
 }
 
-/// OpenFHE decap with optional limb-parallelism.
+/// OpenFHE decap with a single parallelism knob (kept for backwards-compat with the CLI flag name).
 ///
-/// Parallelizing across limbs is safe because each limb uses independent OpenFHE contexts/keys/files.
-/// Note: for d=1 this does not help.
+/// NOTE: Despite the parameter name, we currently interpret this as **basis-parallelism** across
+/// basis index `j` (capped at `s_basis`). This is the effective speedup even when `d_limbs = 1`.
 #[cfg(feature = "pq-openfhe")]
 pub fn decap_openfhe_with_limb_parallelism(
     shape_blob_dir: &Path,
@@ -81,8 +100,27 @@ pub fn decap_openfhe_with_limb_parallelism(
     armers: &[ArmerInputV0],
     limb_parallelism: usize,
 ) -> Result<()> {
+    decap_openfhe_with_parallelism(shape_blob_dir, residual_file, armers, 1, limb_parallelism)
+}
+
+/// OpenFHE decap with parallelism controls.
+///
+/// - `limb_parallelism`: parallelize across CRT limbs `d` (safe, capped at `d`).
+/// - `basis_parallelism`: parallelize the expensive basis accumulation across `j` (safe, capped at `s`).
+///
+/// Notes:
+/// - We do NOT nest limb-parallelism and basis-parallelism (to avoid oversubscription).
+/// - When `basis_parallelism > 1`, limbs are processed sequentially and basis accumulation runs in parallel.
+#[cfg(feature = "pq-openfhe")]
+pub fn decap_openfhe_with_parallelism(
+    shape_blob_dir: &Path,
+    residual_file: &Path,
+    armers: &[ArmerInputV0],
+    limb_parallelism: usize,
+    basis_parallelism: usize,
+) -> Result<()> {
     use pq_fhe_backend::FheBackend;
-    use pq_fhe_openfhe::{decrypt_packed_with_len, CtChunkReader, OpenFheBackend};
+    use pq_fhe_openfhe::{decrypt_packed_with_len, CtChunkReader, CtChunkWriter, OpenFheBackend};
 
     // Load manifest
     let manifest_path = shape_blob_dir.join("manifest.json");
@@ -113,6 +151,14 @@ pub fn decap_openfhe_with_limb_parallelism(
     }
 
     anyhow::ensure!(limb_parallelism > 0, "limb_parallelism must be > 0");
+    anyhow::ensure!(basis_parallelism > 0, "basis_parallelism must be > 0");
+
+    // Read PVRS blocks once (shared by all limbs).
+    let pvrs_blocks_u32 = Arc::new(read_pvrs_blocks_u32(
+        residual_file,
+        m.slot_count,
+        m.block_count,
+    )?);
 
     let do_limb = |limb: usize| -> Result<Vec<bool>> {
         let limb_cfg = of
@@ -148,67 +194,201 @@ pub fn decap_openfhe_with_limb_parallelism(
         // Prepare Enc(0-vector) for basis accumulators.
         let zeros = vec![0i64; m.slot_count];
         let pt_zero = OpenFheBackend::make_packed_plaintext(&ctx, &zeros)?;
-        let mut ct_acc_basis: Vec<_> = (0..m.s_basis)
-            .map(|_| OpenFheBackend::encrypt(&ctx, &pk, &pt_zero))
-            .collect::<Result<Vec<_>>>()?;
+        let ct_acc_basis_summed = if basis_parallelism <= 1 {
+            // Sequential basis-first evaluation (simple, streaming).
+            let mut ct_acc_basis: Vec<_> = (0..m.s_basis)
+                .map(|_| OpenFheBackend::encrypt(&ctx, &pk, &pt_zero))
+                .collect::<Result<Vec<_>>>()?;
 
-        // Stream PVRS blocks and chunked ciphertexts together.
-        let mut pvrs_f =
-            fs::File::open(residual_file).with_context(|| format!("open {}", residual_file.display()))?;
-        let mut header = [0u8; 92];
-        pvrs_f.read_exact(&mut header)?;
-        let mut block_buf = vec![0u8; m.slot_count * 4];
+            // Stream PVRS blocks and chunked ciphertexts together.
+            let mut pvrs_f = fs::File::open(residual_file)
+                .with_context(|| format!("open {}", residual_file.display()))?;
+            let mut header = [0u8; 92];
+            pvrs_f.read_exact(&mut header)?;
+            let mut block_buf = vec![0u8; m.slot_count * 4];
 
-        let mut chunk_start = 0usize;
-        while chunk_start < m.block_count {
-            let chunk_end = (chunk_start + m.blocks_per_chunk).min(m.block_count);
-            let chunk_len = chunk_end - chunk_start;
+            let mut chunk_start = 0usize;
+            while chunk_start < m.block_count {
+                let chunk_end = (chunk_start + m.blocks_per_chunk).min(m.block_count);
+                let chunk_len = chunk_end - chunk_start;
 
-            // Open one ciphertext reader per basis j for this chunk.
-            let mut readers: Vec<CtChunkReader> = Vec::with_capacity(m.s_basis);
-            for j in 0..m.s_basis {
-                let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, chunk_start, chunk_end);
-                let ct_path_s = ct_path.to_string_lossy().into_owned();
-                readers.push(CtChunkReader::open(&ct_path_s, serial_mode)?);
-            }
-
-            for off in 0..chunk_len {
-                let b = chunk_start + off;
-                pvrs_f
-                    .read_exact(&mut block_buf)
-                    .with_context(|| format!("read pvrs block {b}"))?;
-                let mut r_vals = Vec::with_capacity(m.slot_count);
-                for s in 0..m.slot_count {
-                    let offb = s * 4;
-                    let w = u32::from_le_bytes(block_buf[offb..offb + 4].try_into().unwrap());
-                    r_vals.push(((w as u64) % pt_mod) as i64);
-                }
-                let pt_r = OpenFheBackend::make_packed_plaintext(&ctx, &r_vals)?;
-
-                // EvalTagBasis using chunk readers (one ciphertext per (j,b)).
+                // Open one ciphertext reader per basis j for this chunk.
+                let mut readers: Vec<CtChunkReader> = Vec::with_capacity(m.s_basis);
                 for j in 0..m.s_basis {
-                    let ct_k = readers[j]
-                        .next()?
-                        .ok_or_else(|| anyhow!("unexpected EOF in ct chunk (limb={limb}, j={j}, b={b})"))?;
-                    let ct_mul = OpenFheBackend::eval_mult_plain(&ctx, &ct_k, &pt_r)?;
-                    ct_acc_basis[j] = OpenFheBackend::eval_add(&ctx, &ct_acc_basis[j], &ct_mul)?;
+                    let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, chunk_start, chunk_end);
+                    let ct_path_s = ct_path.to_string_lossy().into_owned();
+                    readers.push(CtChunkReader::open(&ct_path_s, serial_mode)?);
                 }
+
+                for off in 0..chunk_len {
+                    let b = chunk_start + off;
+                    pvrs_f
+                        .read_exact(&mut block_buf)
+                        .with_context(|| format!("read pvrs block {b}"))?;
+                    let mut r_vals = Vec::with_capacity(m.slot_count);
+                    for s in 0..m.slot_count {
+                        let offb = s * 4;
+                        let w = u32::from_le_bytes(block_buf[offb..offb + 4].try_into().unwrap());
+                        r_vals.push(((w as u64) % pt_mod) as i64);
+                    }
+                    let pt_r = OpenFheBackend::make_packed_plaintext(&ctx, &r_vals)?;
+
+                    // EvalTagBasis using chunk readers (one ciphertext per (j,b)).
+                    for j in 0..m.s_basis {
+                        let ct_k = readers[j]
+                            .next()?
+                            .ok_or_else(|| anyhow!("unexpected EOF in ct chunk (limb={limb}, j={j}, b={b})"))?;
+                        let ct_mul = OpenFheBackend::eval_mult_plain(&ctx, &ct_k, &pt_r)?;
+                        ct_acc_basis[j] = OpenFheBackend::eval_add(&ctx, &ct_acc_basis[j], &ct_mul)?;
+                    }
+                }
+
+                chunk_start = chunk_end;
             }
 
-            chunk_start = chunk_end;
-        }
-
-        // SlotSum each basis accumulator once.
-        let mut ct_acc_basis_summed = Vec::with_capacity(m.s_basis);
-        for mut ct in ct_acc_basis.into_iter() {
-            let mut shift = 1i32;
-            while (shift as usize) < m.slot_count {
-                let rot = OpenFheBackend::eval_rotate(&ctx, &ct, shift)?;
-                ct = OpenFheBackend::eval_add(&ctx, &ct, &rot)?;
-                shift <<= 1;
+            // SlotSum each basis accumulator once.
+            let mut out = Vec::with_capacity(m.s_basis);
+            for mut ct in ct_acc_basis.into_iter() {
+                let mut shift = 1i32;
+                while (shift as usize) < m.slot_count {
+                    let rot = OpenFheBackend::eval_rotate(&ctx, &ct, shift)?;
+                    ct = OpenFheBackend::eval_add(&ctx, &ct, &rot)?;
+                    shift <<= 1;
+                }
+                out.push(ct);
             }
-            ct_acc_basis_summed.push(ct);
-        }
+            out
+        } else {
+            // Basis-parallel evaluation: split basis indices `j` across threads.
+            //
+            // Each thread keeps its own OpenFHE ctx/keys (no pointer sharing) and writes each
+            // resulting ctAcc_basis_summed[j] to a temp file as a single-element ciphertext stream.
+            // The main thread reads them back and does CombineWeights + fake gate.
+            //
+            // This is designed to light up many cores (dominant ct×pt multiplies) while avoiding
+            // OpenFHE thread-safety pitfalls around shared C++ pointers.
+            let n_threads = basis_parallelism.min(m.s_basis).max(1);
+            let tmp_dir = std::env::temp_dir().join("pvugc_pq_decap_tmp");
+            fs::create_dir_all(&tmp_dir).ok();
+
+            let out_paths: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(vec![None; m.s_basis]));
+            let key_deser_lock = Arc::new(Mutex::new(()));
+
+            // Copy strings for thread moves.
+            let cc_path = shape_blob_dir.join(&limb_cfg.crypto_context_path).to_string_lossy().into_owned();
+            let pk_path = shape_blob_dir.join(&limb_cfg.public_key_path).to_string_lossy().into_owned();
+            let em_path = shape_blob_dir.join(&limb_cfg.eval_mult_key_path).to_string_lossy().into_owned();
+            let er_path = shape_blob_dir.join(&limb_cfg.eval_rot_key_path).to_string_lossy().into_owned();
+
+            // Work partition: contiguous chunks.
+            let mut parts: Vec<Vec<usize>> = vec![Vec::new(); n_threads];
+            for j in 0..m.s_basis {
+                parts[j % n_threads].push(j);
+            }
+
+            thread::scope(|scope| -> Result<()> {
+                let mut handles = Vec::with_capacity(n_threads);
+                for (ti, js) in parts.into_iter().enumerate() {
+                    let out_paths = Arc::clone(&out_paths);
+                    let key_deser_lock = Arc::clone(&key_deser_lock);
+                    let pvrs_blocks_u32 = Arc::clone(&pvrs_blocks_u32);
+                    let tmp_dir = tmp_dir.clone();
+                    let cc_path = cc_path.clone();
+                    let pk_path = pk_path.clone();
+                    let em_path = em_path.clone();
+                    let er_path = er_path.clone();
+
+                    let h = scope.spawn(move || -> Result<()> {
+                        let ctx = OpenFheBackend::deserialize_crypto_context(&cc_path, serial_mode)?;
+                        let pk = OpenFheBackend::deserialize_public_key(&pk_path, serial_mode)?;
+
+                        // Deserialize eval keys under a lock (conservative: some OpenFHE builds
+                        // behave poorly under concurrent key deserialization).
+                        {
+                            let _g = key_deser_lock.lock().unwrap();
+                            OpenFheBackend::deserialize_eval_mult_key(&em_path, serial_mode)?;
+                            OpenFheBackend::deserialize_eval_rot_key(&er_path, serial_mode)?;
+                        }
+
+                        let zeros = vec![0i64; m.slot_count];
+                        let pt_zero = OpenFheBackend::make_packed_plaintext(&ctx, &zeros)?;
+                        let mut r_vals = vec![0i64; m.slot_count];
+
+                        for &j in &js {
+                            let mut ct_acc = OpenFheBackend::encrypt(&ctx, &pk, &pt_zero)?;
+
+                            // Read ctK[j,b,limb] in strict order (chunked), and multiply by PVRS residuals.
+                            let mut chunk_start = 0usize;
+                            while chunk_start < m.block_count {
+                                let chunk_end = (chunk_start + m.blocks_per_chunk).min(m.block_count);
+                                let chunk_len = chunk_end - chunk_start;
+                                let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, chunk_start, chunk_end);
+                                let mut reader = CtChunkReader::open(&ct_path.to_string_lossy(), serial_mode)?;
+
+                                for off in 0..chunk_len {
+                                    let b = chunk_start + off;
+                                    let base = b * m.slot_count;
+                                    for s in 0..m.slot_count {
+                                        let w = pvrs_blocks_u32[base + s];
+                                        r_vals[s] = ((w as u64) % pt_mod) as i64;
+                                    }
+                                    let pt_r = OpenFheBackend::make_packed_plaintext(&ctx, &r_vals)?;
+                                    let ct_k = reader
+                                        .next()?
+                                        .ok_or_else(|| anyhow!("unexpected EOF in ct chunk (limb={limb}, j={j}, b={b})"))?;
+                                    let ct_mul = OpenFheBackend::eval_mult_plain(&ctx, &ct_k, &pt_r)?;
+                                    ct_acc = OpenFheBackend::eval_add(&ctx, &ct_acc, &ct_mul)?;
+                                }
+
+                                chunk_start = chunk_end;
+                            }
+
+                            // SlotSum.
+                            let mut shift = 1i32;
+                            while (shift as usize) < m.slot_count {
+                                let rot = OpenFheBackend::eval_rotate(&ctx, &ct_acc, shift)?;
+                                ct_acc = OpenFheBackend::eval_add(&ctx, &ct_acc, &rot)?;
+                                shift <<= 1;
+                            }
+
+                            // Write to temp as a single-element ciphertext stream.
+                            let nonce = (ti as u64) ^ ((j as u64) << 32);
+                            let out_path = tmp_dir.join(format!("l{limb}_j{j}_n{nonce}.bin"));
+                            let out_path_s = out_path.to_string_lossy().into_owned();
+                            let mut w = CtChunkWriter::create(&out_path_s, serial_mode)?;
+                            w.append(&ct_acc.ct)?;
+
+                            out_paths.lock().unwrap()[j] = Some(out_path_s);
+                        }
+
+                        Ok(())
+                    });
+                    handles.push(h);
+                }
+
+                for h in handles {
+                    h.join().expect("basis-parallel thread panicked")?;
+                }
+                Ok(())
+            })
+            .context("basis-parallel worker scope")?;
+
+            // Read back ciphertexts into this limb's main thread.
+            let mut out = Vec::with_capacity(m.s_basis);
+            let mut paths = out_paths.lock().unwrap();
+            for j in 0..m.s_basis {
+                let p = paths[j]
+                    .take()
+                    .ok_or_else(|| anyhow!("missing temp basis accumulator for limb={limb} j={j}"))?;
+                let mut r = CtChunkReader::open(&p, serial_mode)?;
+                let ct = r
+                    .next()?
+                    .ok_or_else(|| anyhow!("temp ct file had no ciphertext: {p}"))?;
+                let _ = fs::remove_file(&p);
+                out.push(ct);
+            }
+            out
+        };
 
         // For each armer: CombineWeights (binary) on summed basis -> +alpha -> decrypt+compare.
         let mut ok = vec![false; armers.len()];
@@ -245,7 +425,8 @@ pub fn decap_openfhe_with_limb_parallelism(
         Ok(ok)
     };
 
-    let limb_ok: Vec<Vec<bool>> = if m.d_limbs <= 1 || limb_parallelism == 1 {
+    // Avoid nesting: if basis_parallelism > 1, run limbs sequentially and use all threads per limb.
+    let limb_ok: Vec<Vec<bool>> = if basis_parallelism > 1 || m.d_limbs <= 1 || limb_parallelism == 1 {
         let mut out = Vec::with_capacity(m.d_limbs);
         for limb in 0..m.d_limbs {
             out.push(do_limb(limb)?);

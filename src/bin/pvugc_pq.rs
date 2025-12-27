@@ -198,9 +198,9 @@ enum Cmd {
         /// This avoids shell loops when decapping against many armers.
         #[arg(long)]
         armer_artifact_dir: Option<PathBuf>,
-        /// Parallelize across CRT limbs (d). Default 1 is safest.
+        /// Parallelize the **basis accumulation** across basis index `j` (this is the dominant ct×pt work).
         ///
-        /// Note: limb-parallelism only helps when d>1. For d=1 it has no effect.
+        /// Note: the flag name is historical (kept to avoid breaking scripts); this is effective even when d=1.
         #[arg(long, default_value_t = 1)]
         limb_parallelism: usize,
     },
@@ -923,7 +923,13 @@ fn main() -> Result<()> {
         }
 
         #[cfg(feature = "pq-openfhe")]
-        Cmd::DecapOpenfhe { shape_blob_dir, residual_file, armer_artifact, armer_artifact_dir, limb_parallelism } => {
+        Cmd::DecapOpenfhe {
+            shape_blob_dir,
+            residual_file,
+            armer_artifact,
+            armer_artifact_dir,
+            limb_parallelism,
+        } => {
             // Load armer artifacts and convert to `pq_stream_tag` inputs (demo trust v0).
             let mut paths = armer_artifact.clone();
             if let Some(dir) = armer_artifact_dir.as_ref() {
@@ -959,10 +965,12 @@ fn main() -> Result<()> {
                 });
             }
 
-            pq_stream_tag::decap_openfhe_with_limb_parallelism(
+            // Backwards-compat: treat `--limb-parallelism` as basis-parallelism (effective even for d=1).
+            pq_stream_tag::decap_openfhe_with_parallelism(
                 &shape_blob_dir,
                 &residual_file,
                 &armers_in,
+                1,
                 limb_parallelism,
             )?;
         }
