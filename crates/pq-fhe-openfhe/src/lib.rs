@@ -293,11 +293,12 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         let em_s_owned = em_path.to_string_lossy().into_owned();
         let er_s_owned = er_path.to_string_lossy().into_owned();
 
-        let_cxx_string!(cc_s = cc_s_owned);
-        let_cxx_string!(pk_s = pk_s_owned);
-        let_cxx_string!(sk_s = sk_s_owned);
-        let_cxx_string!(em_s = em_s_owned);
-        let_cxx_string!(er_s = er_s_owned);
+        // Use &str to avoid moving the owned `String` values (we reuse them later for parallel setup).
+        let_cxx_string!(cc_s = cc_s_owned.as_str());
+        let_cxx_string!(pk_s = pk_s_owned.as_str());
+        let_cxx_string!(sk_s = sk_s_owned.as_str());
+        let_cxx_string!(em_s = em_s_owned.as_str());
+        let_cxx_string!(er_s = er_s_owned.as_str());
 
         anyhow::ensure!(
             openfhe_ffi::DCRTPolySerializeCryptoContextToFile(&cc_s, &cc, serial_mode_enum),
