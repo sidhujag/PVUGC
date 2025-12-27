@@ -15,7 +15,11 @@ use pq_stream_tag::ArmerInputV0;
 // OpenFHE types are used only inside `pq-fhe-openfhe` / `pq-stream-tag` crates (GPT-Pro separation).
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "PVUGC PQ streaming (v0 skeleton, GPT-Pro aligned)")]
+#[command(
+    author,
+    version,
+    about = "PVUGC PQ streaming (v0 skeleton, GPT-Pro aligned)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -63,6 +67,12 @@ enum Cmd {
         /// Prefer binary weights w∈{0,1} for CombineWeights (ciphertext adds only).
         #[arg(long, default_value_t = false)]
         binary_weights: bool,
+        /// If set, reuse a single basis across all limbs (limb 0 files on disk).
+        #[arg(long, default_value_t = false)]
+        basis_shared_across_limbs: bool,
+        /// If set, derive weights with an explicit limb domain separator.
+        #[arg(long, default_value_t = false)]
+        weights_domain_sep_per_limb: bool,
     },
 
     /// Create a per-shape OpenFHE-backed blob (v0): keys + basis ciphertexts (ctK[j,b,ℓ]).
@@ -118,6 +128,17 @@ enum Cmd {
         /// concurrency.
         #[arg(long, default_value_t = 1)]
         basis_parallelism: usize,
+        /// If set, reuse a single basis (and OpenFHE limb key material) across all limbs.
+        ///
+        /// This is intended for the "many byte limbs" plan where all limb moduli are identical,
+        /// and limb separation comes from per-limb weights domain separation.
+        #[arg(long, default_value_t = false)]
+        basis_shared_across_limbs: bool,
+        /// If set, derive weights with an explicit limb domain separator.
+        ///
+        /// Required when `moduli` contains duplicates (e.g. 16 limbs all mod 65537).
+        #[arg(long, default_value_t = false)]
+        weights_domain_sep_per_limb: bool,
     },
 
     /// Internal worker: generate OpenFHE basis ciphertexts for a limb and j-range.
@@ -378,9 +399,20 @@ fn parse_hex_32(name: &str, s: &str) -> Result<[u8; 32]> {
 fn parse_csv_u64(s: &str) -> Result<Vec<u64>> {
     let mut out = Vec::new();
     for part in s.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()) {
-        out.push(part.parse::<u64>().with_context(|| format!("parse u64 '{part}'"))?);
+        out.push(
+            part.parse::<u64>()
+                .with_context(|| format!("parse u64 '{part}'"))?,
+        );
     }
     Ok(out)
+}
+
+fn weights_domain_sep_for_limb(manifest: &ShapeBlobManifestV0, limb: usize) -> Vec<u8> {
+    if manifest.weights_domain_sep_per_limb {
+        format!("pvugc.weights.v0.limb{limb}").into_bytes()
+    } else {
+        b"pvugc.weights.v0".to_vec()
+    }
 }
 
 fn default_moduli_4() -> Vec<u64> {
@@ -442,7 +474,13 @@ fn parse_pvrs_header_v0(path: &PathBuf) -> Result<PvrsHeaderV0> {
     statement_hash.copy_from_slice(&b[28..60]);
     let mut shape_id_hash = [0u8; 32];
     shape_id_hash.copy_from_slice(&b[60..92]);
-    Ok(PvrsHeaderV0 { slot_count, block_count, residuals_emitted, statement_hash, shape_id_hash })
+    Ok(PvrsHeaderV0 {
+        slot_count,
+        block_count,
+        residuals_emitted,
+        statement_hash,
+        shape_id_hash,
+    })
 }
 
 fn sha256_32(data: &[u8]) -> [u8; 32] {
@@ -453,7 +491,12 @@ fn sha256_32(data: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(feature = "pq-openfhe")]
-fn coeff_u64_for_demo(statement_hash: &[u8; 32], block_idx: u64, slot_idx: u32, modulus: u64) -> u64 {
+fn coeff_u64_for_demo(
+    statement_hash: &[u8; 32],
+    block_idx: u64,
+    slot_idx: u32,
+    modulus: u64,
+) -> u64 {
     // Deterministic per-(statement, block, slot) coefficient. Security isn't the goal here;
     // we just want a large-domain dot-product fingerprint.
     let mut h = Sha256::new();
@@ -475,7 +518,9 @@ fn parse_statement_hash_from_sp1_out(text: &str) -> Result<[u8; 32]> {
             return parse_hex_32("statement_hash", rest.trim());
         }
     }
-    Err(anyhow!("could not find `statement_hash:` line in SP1 output"))
+    Err(anyhow!(
+        "could not find `statement_hash:` line in SP1 output"
+    ))
 }
 
 fn parse_tag_limbs_from_sp1_out(text: &str) -> Result<Vec<String>> {
@@ -486,11 +531,16 @@ fn parse_tag_limbs_from_sp1_out(text: &str) -> Result<Vec<String>> {
         if let Some(rest) = l.strip_prefix("tag.tag_256 (4x64 mod primes):") {
             let toks: Vec<&str> = rest.split_whitespace().collect();
             if toks.len() >= 4 {
-                return Ok(toks[toks.len() - 4..].iter().map(|s| s.to_string()).collect());
+                return Ok(toks[toks.len() - 4..]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect());
             }
         }
     }
-    Err(anyhow!("could not find `tag.tag_256 (4x64 mod primes):` line in SP1 output"))
+    Err(anyhow!(
+        "could not find `tag.tag_256 (4x64 mod primes):` line in SP1 output"
+    ))
 }
 
 fn main() -> Result<()> {
@@ -509,6 +559,8 @@ fn main() -> Result<()> {
             block_count,
             blocks_per_chunk,
             binary_weights,
+            basis_shared_across_limbs,
+            weights_domain_sep_per_limb,
         } => {
             let moduli = if let Some(csv) = moduli_csv {
                 parse_csv_u64(&csv)?
@@ -529,15 +581,27 @@ fn main() -> Result<()> {
                 block_count,
                 blocks_per_chunk,
                 required_rotations: rotations_powers_of_two(slot_count),
-                weights_kind: if binary_weights { WeightsKind::Binary01 } else { WeightsKind::Full },
+                weights_kind: if binary_weights {
+                    WeightsKind::Binary01
+                } else {
+                    WeightsKind::Full
+                },
+                basis_shared_across_limbs,
+                weights_domain_sep_per_limb,
                 ciphertext_encoding_version: 0,
                 openfhe: None,
                 bridge: None,
             };
-            fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+            fs::create_dir_all(&out_dir)
+                .with_context(|| format!("create {}", out_dir.display()))?;
             // Create placeholder basis directory structure (future ciphertext chunks live here).
             fs::create_dir_all(out_dir.join("basis")).ok();
-            for l in 0..m.d_limbs {
+            let limbs_to_build: Vec<usize> = if m.basis_shared_across_limbs {
+                vec![0]
+            } else {
+                (0..m.d_limbs).collect()
+            };
+            for l in limbs_to_build {
                 for j in 0..m.s_basis {
                     let p = out_dir.join(format!("basis/l{l}/j{j}"));
                     fs::create_dir_all(&p).ok();
@@ -545,17 +609,30 @@ fn main() -> Result<()> {
             }
             let manifest_path = out_dir.join("manifest.json");
             let bytes = serde_json::to_vec_pretty(&m).context("serialize manifest")?;
-            fs::write(&manifest_path, bytes).with_context(|| format!("write {}", manifest_path.display()))?;
+            fs::write(&manifest_path, bytes)
+                .with_context(|| format!("write {}", manifest_path.display()))?;
             println!("wrote {}", manifest_path.display());
         }
 
-        Cmd::Arm { shape_manifest, out, statement_hash_hex, statement_from_sp1_out, armer_id, epoch } => {
-            let manifest_bytes =
-                fs::read(&shape_manifest).with_context(|| format!("read {}", shape_manifest.display()))?;
+        Cmd::Arm {
+            shape_manifest,
+            out,
+            statement_hash_hex,
+            statement_from_sp1_out,
+            armer_id,
+            epoch,
+        } => {
+            let manifest_bytes = fs::read(&shape_manifest)
+                .with_context(|| format!("read {}", shape_manifest.display()))?;
             let m: ShapeBlobManifestV0 =
                 serde_json::from_slice(&manifest_bytes).context("parse shape manifest")?;
             anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
-            anyhow::ensure!(m.epoch == epoch, "epoch mismatch (manifest {}, arg {})", m.epoch, epoch);
+            anyhow::ensure!(
+                m.epoch == epoch,
+                "epoch mismatch (manifest {}, arg {})",
+                m.epoch,
+                epoch
+            );
 
             let sh = if let Some(hex) = statement_hash_hex.as_deref() {
                 parse_hex_32("--statement-hash-hex", hex)?
@@ -563,15 +640,18 @@ fn main() -> Result<()> {
                 let t = read_text(p)?;
                 parse_statement_hash_from_sp1_out(&t)?
             } else {
-                return Err(anyhow!("need either --statement-hash-hex or --statement-from-sp1-out"));
+                return Err(anyhow!(
+                    "need either --statement-hash-hex or --statement-from-sp1-out"
+                ));
             };
             let statement_hash = StatementHash32(sh);
 
             // Derive W(x) row for each limb modulus; store only this armer's row i.
             let mut weights_row: Vec<Vec<u64>> = Vec::with_capacity(m.d_limbs);
-            for &p in &m.moduli {
+            for (limb, &p) in m.moduli.iter().enumerate() {
+                let ds = weights_domain_sep_for_limb(&m, limb);
                 let wm = derive_weights_matrix_with_kind(
-                    b"pvugc.weights.v0",
+                    ds.as_slice(),
                     &ShapeId(m.shape_id.clone()),
                     &statement_hash,
                     epoch,
@@ -604,12 +684,20 @@ fn main() -> Result<()> {
             }
 
             let lock = LockArtifactV0 {
-                lock_id: LockId(format!("lock_v0:{}:{}:{}", m.shape_id, hex::encode(sh), armer_id)),
+                lock_id: LockId(format!(
+                    "lock_v0:{}:{}:{}",
+                    m.shape_id,
+                    hex::encode(sh),
+                    armer_id
+                )),
                 shape_id: ShapeId(m.shape_id.clone()),
                 armer_id: ArmerId(armer_id),
                 statement_hash,
                 moduli: m.moduli.clone(),
-                alpha_clear: Some(AlphaCrt { moduli: m.moduli.clone(), limbs: alpha_limbs.clone() }),
+                alpha_clear: Some(AlphaCrt {
+                    moduli: m.moduli.clone(),
+                    limbs: alpha_limbs.clone(),
+                }),
             };
 
             let artifact = ArmerArtifactV0 {
@@ -645,14 +733,22 @@ fn main() -> Result<()> {
             armer_id_end,
             epoch,
         } => {
-            anyhow::ensure!(armer_id_end > armer_id_start, "need armer_id_end > armer_id_start");
+            anyhow::ensure!(
+                armer_id_end > armer_id_start,
+                "need armer_id_end > armer_id_start"
+            );
 
-            let manifest_bytes =
-                fs::read(&shape_manifest).with_context(|| format!("read {}", shape_manifest.display()))?;
+            let manifest_bytes = fs::read(&shape_manifest)
+                .with_context(|| format!("read {}", shape_manifest.display()))?;
             let m: ShapeBlobManifestV0 =
                 serde_json::from_slice(&manifest_bytes).context("parse shape manifest")?;
             anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
-            anyhow::ensure!(m.epoch == epoch, "epoch mismatch (manifest {}, arg {})", m.epoch, epoch);
+            anyhow::ensure!(
+                m.epoch == epoch,
+                "epoch mismatch (manifest {}, arg {})",
+                m.epoch,
+                epoch
+            );
 
             let sh = if let Some(hex) = statement_hash_hex.as_deref() {
                 parse_hex_32("--statement-hash-hex", hex)?
@@ -660,11 +756,14 @@ fn main() -> Result<()> {
                 let t = read_text(p)?;
                 parse_statement_hash_from_sp1_out(&t)?
             } else {
-                return Err(anyhow!("need either --statement-hash-hex or --statement-from-sp1-out"));
+                return Err(anyhow!(
+                    "need either --statement-hash-hex or --statement-from-sp1-out"
+                ));
             };
             let statement_hash = StatementHash32(sh);
 
-            fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+            fs::create_dir_all(&out_dir)
+                .with_context(|| format!("create {}", out_dir.display()))?;
 
             // Parallelize across armer_id (independent output files).
             // Note: derive_weights_matrix_with_kind is deterministic and pure; safe to call in parallel.
@@ -674,9 +773,10 @@ fn main() -> Result<()> {
                     let out = out_dir.join(format!("armer_{armer_id}.json"));
 
                     let mut weights_row: Vec<Vec<u64>> = Vec::with_capacity(m.d_limbs);
-                    for &p in &m.moduli {
+                    for (limb, &p) in m.moduli.iter().enumerate() {
+                        let ds = weights_domain_sep_for_limb(&m, limb);
                         let wm = derive_weights_matrix_with_kind(
-                            b"pvugc.weights.v0",
+                            ds.as_slice(),
                             &ShapeId(m.shape_id.clone()),
                             &statement_hash,
                             epoch,
@@ -719,7 +819,10 @@ fn main() -> Result<()> {
                         armer_id: ArmerId(armer_id),
                         statement_hash: StatementHash32(sh),
                         moduli: m.moduli.clone(),
-                        alpha_clear: Some(AlphaCrt { moduli: m.moduli.clone(), limbs: alpha_limbs }),
+                        alpha_clear: Some(AlphaCrt {
+                            moduli: m.moduli.clone(),
+                            limbs: alpha_limbs,
+                        }),
                     };
 
                     let artifact = ArmerArtifactV0 {
@@ -731,21 +834,34 @@ fn main() -> Result<()> {
                         weights_kind: m.weights_kind,
                     };
 
-                    let bytes = serde_json::to_vec_pretty(&artifact).context("serialize armer artifact")?;
+                    let bytes =
+                        serde_json::to_vec_pretty(&artifact).context("serialize armer artifact")?;
                     fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
                     Ok(())
                 })?;
 
             for armer_id in armer_id_start..armer_id_end {
-                println!("wrote {}", out_dir.join(format!("armer_{armer_id}.json")).display());
+                println!(
+                    "wrote {}",
+                    out_dir.join(format!("armer_{armer_id}.json")).display()
+                );
             }
         }
 
-        Cmd::Decap { armer_artifact, tag_limb_hex, tag_from_sp1_out } => {
-            let art_bytes =
-                fs::read(&armer_artifact).with_context(|| format!("read {}", armer_artifact.display()))?;
-            let a: ArmerArtifactV0 = serde_json::from_slice(&art_bytes).context("parse armer artifact")?;
-            anyhow::ensure!(a.version == 0, "unsupported armer artifact version {}", a.version);
+        Cmd::Decap {
+            armer_artifact,
+            tag_limb_hex,
+            tag_from_sp1_out,
+        } => {
+            let art_bytes = fs::read(&armer_artifact)
+                .with_context(|| format!("read {}", armer_artifact.display()))?;
+            let a: ArmerArtifactV0 =
+                serde_json::from_slice(&art_bytes).context("parse armer artifact")?;
+            anyhow::ensure!(
+                a.version == 0,
+                "unsupported armer artifact version {}",
+                a.version
+            );
 
             let moduli = a.lock.moduli.clone();
             let tag_limb_hex = if let Some(p) = tag_from_sp1_out.as_ref() {
@@ -754,14 +870,21 @@ fn main() -> Result<()> {
             } else {
                 tag_limb_hex
             };
-            anyhow::ensure!(tag_limb_hex.len() == moduli.len(), "need exactly d={} tag limbs", moduli.len());
+            anyhow::ensure!(
+                tag_limb_hex.len() == moduli.len(),
+                "need exactly d={} tag limbs",
+                moduli.len()
+            );
             let mut limbs = Vec::with_capacity(moduli.len());
             for (i, s) in tag_limb_hex.iter().enumerate() {
                 let v = parse_hex_u64_fixed("--tag-limb-hex", s)?;
                 limbs.push(v % moduli[i]);
             }
 
-            let tag = TagCrt { moduli: moduli.clone(), limbs: limbs.clone() };
+            let tag = TagCrt {
+                moduli: moduli.clone(),
+                limbs: limbs.clone(),
+            };
             let alpha = a
                 .lock
                 .alpha_clear
@@ -787,12 +910,17 @@ fn main() -> Result<()> {
             epoch,
             json,
         } => {
-            let manifest_bytes =
-                fs::read(&shape_manifest).with_context(|| format!("read {}", shape_manifest.display()))?;
+            let manifest_bytes = fs::read(&shape_manifest)
+                .with_context(|| format!("read {}", shape_manifest.display()))?;
             let m: ShapeBlobManifestV0 =
                 serde_json::from_slice(&manifest_bytes).context("parse shape manifest")?;
             anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
-            anyhow::ensure!(m.epoch == epoch, "epoch mismatch (manifest {}, arg {})", m.epoch, epoch);
+            anyhow::ensure!(
+                m.epoch == epoch,
+                "epoch mismatch (manifest {}, arg {})",
+                m.epoch,
+                epoch
+            );
 
             let sh = if let Some(hex) = statement_hash_hex.as_deref() {
                 parse_hex_32("--statement-hash-hex", hex)?
@@ -800,14 +928,17 @@ fn main() -> Result<()> {
                 let t = read_text(p)?;
                 parse_statement_hash_from_sp1_out(&t)?
             } else {
-                return Err(anyhow!("need either --statement-hash-hex or --statement-from-sp1-out"));
+                return Err(anyhow!(
+                    "need either --statement-hash-hex or --statement-from-sp1-out"
+                ));
             };
             let statement_hash = StatementHash32(sh);
 
             let mut weights_row: Vec<Vec<u64>> = Vec::with_capacity(m.d_limbs);
-            for &p in &m.moduli {
+            for (limb, &p) in m.moduli.iter().enumerate() {
+                let ds = weights_domain_sep_for_limb(&m, limb);
                 let wm = derive_weights_matrix_with_kind(
-                    b"pvugc.weights.v0",
+                    ds.as_slice(),
                     &ShapeId(m.shape_id.clone()),
                     &statement_hash,
                     epoch,
@@ -836,7 +967,8 @@ fn main() -> Result<()> {
                     moduli: m.moduli.clone(),
                     weights_row,
                 };
-                let bytes = serde_json::to_vec_pretty(&out).context("serialize weights-row json")?;
+                let bytes =
+                    serde_json::to_vec_pretty(&out).context("serialize weights-row json")?;
                 println!("{}", String::from_utf8_lossy(&bytes));
             } else {
                 println!("shape_id: {}", m.shape_id);
@@ -845,13 +977,20 @@ fn main() -> Result<()> {
                 println!("epoch: {}", epoch);
                 println!("weights_kind: {:?}", m.weights_kind);
                 for (l, (p, row)) in m.moduli.iter().zip(weights_row.iter()).enumerate() {
-                    let row_hex = row.iter().map(|x| format!("{:016x}", x)).collect::<Vec<_>>().join(" ");
+                    let row_hex = row
+                        .iter()
+                        .map(|x| format!("{:016x}", x))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     println!("w_row_l{l} (p={}): {}", p, row_hex);
                 }
             }
         }
 
-        Cmd::ResidualInfo { residual_file, shape_manifest } => {
+        Cmd::ResidualInfo {
+            residual_file,
+            shape_manifest,
+        } => {
             let h = parse_pvrs_header_v0(&residual_file)?;
             println!("pvrs.slot_count: {}", h.slot_count);
             println!("pvrs.block_count: {}", h.block_count);
@@ -860,8 +999,10 @@ fn main() -> Result<()> {
             println!("pvrs.shape_id_hash: {}", hex::encode(h.shape_id_hash));
 
             if let Some(manifest_path) = shape_manifest.as_ref() {
-                let mb = fs::read(manifest_path).with_context(|| format!("read {}", manifest_path.display()))?;
-                let m: ShapeBlobManifestV0 = serde_json::from_slice(&mb).context("parse shape manifest")?;
+                let mb = fs::read(manifest_path)
+                    .with_context(|| format!("read {}", manifest_path.display()))?;
+                let m: ShapeBlobManifestV0 =
+                    serde_json::from_slice(&mb).context("parse shape manifest")?;
                 anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
                 let expect_shape_hash = sha256_32(m.shape_id.as_bytes());
 
@@ -890,16 +1031,29 @@ fn main() -> Result<()> {
             }
         }
 
-        Cmd::CorruptPvrsOne { in_pvrs, out_pvrs, block_idx, slot_idx, xor_mask } => {
-            let mut b = fs::read(&in_pvrs).with_context(|| format!("read {}", in_pvrs.display()))?;
+        Cmd::CorruptPvrsOne {
+            in_pvrs,
+            out_pvrs,
+            block_idx,
+            slot_idx,
+            xor_mask,
+        } => {
+            let mut b =
+                fs::read(&in_pvrs).with_context(|| format!("read {}", in_pvrs.display()))?;
             anyhow::ensure!(b.len() >= 92, "PVRS file too small (need >= 92 bytes)");
             anyhow::ensure!(&b[0..4] == b"PVRS", "bad PVRS magic");
             let version = u32::from_le_bytes(b[4..8].try_into().unwrap());
             anyhow::ensure!(version == 0, "unsupported PVRS version {}", version);
             let slot_count = u32::from_le_bytes(b[8..12].try_into().unwrap());
             let block_count = u64::from_le_bytes(b[12..20].try_into().unwrap());
-            anyhow::ensure!(slot_idx < slot_count, "slot_idx out of range (slot_count={slot_count})");
-            anyhow::ensure!(block_idx < block_count, "block_idx out of range (block_count={block_count})");
+            anyhow::ensure!(
+                slot_idx < slot_count,
+                "slot_idx out of range (slot_count={slot_count})"
+            );
+            anyhow::ensure!(
+                block_idx < block_count,
+                "block_idx out of range (block_count={block_count})"
+            );
 
             let header = 92usize;
             let block_bytes = (slot_count as usize) * 4;
@@ -940,6 +1094,8 @@ fn main() -> Result<()> {
             multiplicative_depth,
             serial_mode,
             basis_parallelism,
+            basis_shared_across_limbs,
+            weights_domain_sep_per_limb,
         } => {
             let moduli = if let Some(csv) = moduli_csv {
                 parse_csv_u64(&csv)?
@@ -965,7 +1121,13 @@ fn main() -> Result<()> {
                 slot_count,
                 block_count,
                 blocks_per_chunk,
-                weights_kind: if binary_weights { WeightsKind::Binary01 } else { WeightsKind::Full },
+                weights_kind: if binary_weights {
+                    WeightsKind::Binary01
+                } else {
+                    WeightsKind::Full
+                },
+                basis_shared_across_limbs,
+                weights_domain_sep_per_limb,
                 multiplicative_depth,
                 serial_mode,
                 basis_parallelism,
@@ -978,8 +1140,14 @@ fn main() -> Result<()> {
                 // Multi-process basis generation (reliable; avoids OpenFHE thread-safety issues).
                 pq_fhe_openfhe::setup_shape_blob_openfhe_keys_only(&args)?;
 
-                let exe = std::env::current_exe().context("current_exe for OpenFHE basis workers")?;
-                for limb in 0..d_limbs {
+                let exe =
+                    std::env::current_exe().context("current_exe for OpenFHE basis workers")?;
+                let limbs_to_build: Vec<usize> = if basis_shared_across_limbs {
+                    vec![0]
+                } else {
+                    (0..d_limbs).collect()
+                };
+                for limb in limbs_to_build {
                     let workers = basis_parallelism.min(s_basis).max(1);
                     let chunk = (s_basis + workers - 1) / workers;
                     let mut children = Vec::new();
@@ -1008,14 +1176,22 @@ fn main() -> Result<()> {
 
                     for mut c in children {
                         let st = c.wait().context("wait openfhe-basis-worker")?;
-                        anyhow::ensure!(st.success(), "openfhe-basis-worker failed with status {st}");
+                        anyhow::ensure!(
+                            st.success(),
+                            "openfhe-basis-worker failed with status {st}"
+                        );
                     }
                 }
             }
         }
 
         #[cfg(feature = "pq-openfhe")]
-        Cmd::OpenfheBasisWorker { shape_blob_dir, limb, j_start, j_end } => {
+        Cmd::OpenfheBasisWorker {
+            shape_blob_dir,
+            limb,
+            j_start,
+            j_end,
+        } => {
             pq_fhe_openfhe::openfhe_generate_basis_worker(&shape_blob_dir, limb, j_start, j_end)?;
         }
 
@@ -1040,12 +1216,16 @@ fn main() -> Result<()> {
                 extra.sort();
                 paths.extend(extra);
             }
-            anyhow::ensure!(!paths.is_empty(), "need at least one armer artifact (paths empty)");
+            anyhow::ensure!(
+                !paths.is_empty(),
+                "need at least one armer artifact (paths empty)"
+            );
 
             let mut armers_in: Vec<ArmerInputV0> = Vec::new();
             for p in &paths {
                 let b = fs::read(p).with_context(|| format!("read {}", p.display()))?;
-                let a: ArmerArtifactV0 = serde_json::from_slice(&b).context("parse armer artifact")?;
+                let a: ArmerArtifactV0 =
+                    serde_json::from_slice(&b).context("parse armer artifact")?;
                 let alpha = a
                     .lock
                     .alpha_clear
@@ -1073,7 +1253,10 @@ fn main() -> Result<()> {
         }
 
         #[cfg(feature = "pq-openfhe")]
-        Cmd::OpenfheSanitySlotSum { slot_count, plaintext_modulus } => {
+        Cmd::OpenfheSanitySlotSum {
+            slot_count,
+            plaintext_modulus,
+        } => {
             pq_fhe_openfhe::sanity_openfhe_slot_sum_constant_poly(slot_count, plaintext_modulus)?;
         }
 
@@ -1083,11 +1266,13 @@ fn main() -> Result<()> {
             plaintext_modulus,
             tower_index,
         } => {
-            pq_fhe_openfhe::sanity_openfhe_bridge_decode(slot_count, plaintext_modulus, tower_index)?;
+            pq_fhe_openfhe::sanity_openfhe_bridge_decode(
+                slot_count,
+                plaintext_modulus,
+                tower_index,
+            )?;
         }
     }
 
     Ok(())
 }
-
-
