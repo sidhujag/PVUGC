@@ -4696,6 +4696,7 @@ dependencies = [
  "pq-basis-blob",
  "pq-fhe-backend",
  "rand_core 0.6.4",
+ "rayon",
  "serde_json",
 ]
 

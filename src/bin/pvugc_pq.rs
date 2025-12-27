@@ -3,6 +3,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use rand_core::OsRng;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use arkworks_groth16::pq_we::{
@@ -187,6 +188,10 @@ enum Cmd {
         /// Armer artifacts (repeat). v0: uses alpha_clear + sigma_i_clear from these artifacts.
         #[arg(long, num_args = 1..)]
         armer_artifact: Vec<PathBuf>,
+        /// Alternatively, load *all* `*.json` armer artifacts from a directory (non-recursive).
+        /// This avoids shell loops when decapping against many armers.
+        #[arg(long)]
+        armer_artifact_dir: Option<PathBuf>,
     },
 
     /// Print the deterministic weights row w_i(x) implied by the shape manifest and statement hash.
@@ -599,64 +604,78 @@ fn main() -> Result<()> {
 
             fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
 
-            for armer_id in armer_id_start..armer_id_end {
-                let out = out_dir.join(format!("armer_{armer_id}.json"));
-                // Reuse the same logic as `arm` (inline for simplicity).
+            // Parallelize across armer_id (independent output files).
+            // Note: derive_weights_matrix_with_kind is deterministic and pure; safe to call in parallel.
+            (armer_id_start..armer_id_end)
+                .into_par_iter()
+                .try_for_each(|armer_id| -> Result<()> {
+                    let out = out_dir.join(format!("armer_{armer_id}.json"));
 
-                let mut weights_row: Vec<Vec<u64>> = Vec::with_capacity(m.d_limbs);
-                for &p in &m.moduli {
-                    let wm = derive_weights_matrix_with_kind(
-                        b"pvugc.weights.v0",
-                        &ShapeId(m.shape_id.clone()),
-                        &statement_hash,
-                        epoch,
-                        m.n_armers,
-                        m.s_basis,
-                        p,
-                        m.weights_kind,
-                    )?;
-                    let i = armer_id as usize;
-                    anyhow::ensure!(i < wm.n_armers, "armer_id out of range");
-                    let mut row = Vec::with_capacity(wm.s_basis);
-                    for j in 0..wm.s_basis {
-                        row.push(wm.get(i, j));
+                    let mut weights_row: Vec<Vec<u64>> = Vec::with_capacity(m.d_limbs);
+                    for &p in &m.moduli {
+                        let wm = derive_weights_matrix_with_kind(
+                            b"pvugc.weights.v0",
+                            &ShapeId(m.shape_id.clone()),
+                            &statement_hash,
+                            epoch,
+                            m.n_armers,
+                            m.s_basis,
+                            p,
+                            m.weights_kind,
+                        )?;
+                        let i = armer_id as usize;
+                        anyhow::ensure!(i < wm.n_armers, "armer_id out of range");
+                        let mut row = Vec::with_capacity(wm.s_basis);
+                        for j in 0..wm.s_basis {
+                            row.push(wm.get(i, j));
+                        }
+                        weights_row.push(row);
                     }
-                    weights_row.push(row);
-                }
 
-                let mut sigma_i_clear = [0u8; 32];
-                rand_core::RngCore::fill_bytes(&mut OsRng, &mut sigma_i_clear);
-                let mut hasher = Sha256::new();
-                hasher.update(&sigma_i_clear);
-                let c_i: [u8; 32] = hasher.finalize().into();
+                    // Thread-local randomness (dev v0).
+                    let mut rng = OsRng;
+                    let mut sigma_i_clear = [0u8; 32];
+                    rand_core::RngCore::fill_bytes(&mut rng, &mut sigma_i_clear);
+                    let mut hasher = Sha256::new();
+                    hasher.update(&sigma_i_clear);
+                    let c_i: [u8; 32] = hasher.finalize().into();
 
-                let mut alpha_limbs = Vec::with_capacity(m.d_limbs);
-                for &p in &m.moduli {
-                    let r = rand_core::RngCore::next_u64(&mut OsRng) % p;
-                    alpha_limbs.push(r);
-                }
+                    let mut alpha_limbs = Vec::with_capacity(m.d_limbs);
+                    for &p in &m.moduli {
+                        let r = rand_core::RngCore::next_u64(&mut rng) % p;
+                        alpha_limbs.push(r);
+                    }
 
-                let lock = LockArtifactV0 {
-                    lock_id: LockId(format!("lock_v0:{}:{}:{}", m.shape_id, hex::encode(sh), armer_id)),
-                    shape_id: ShapeId(m.shape_id.clone()),
-                    armer_id: ArmerId(armer_id),
-                    statement_hash: StatementHash32(sh),
-                    moduli: m.moduli.clone(),
-                    alpha_clear: Some(AlphaCrt { moduli: m.moduli.clone(), limbs: alpha_limbs.clone() }),
-                };
+                    let lock = LockArtifactV0 {
+                        lock_id: LockId(format!(
+                            "lock_v0:{}:{}:{}",
+                            m.shape_id,
+                            hex::encode(sh),
+                            armer_id
+                        )),
+                        shape_id: ShapeId(m.shape_id.clone()),
+                        armer_id: ArmerId(armer_id),
+                        statement_hash: StatementHash32(sh),
+                        moduli: m.moduli.clone(),
+                        alpha_clear: Some(AlphaCrt { moduli: m.moduli.clone(), limbs: alpha_limbs }),
+                    };
 
-                let artifact = ArmerArtifactV0 {
-                    version: 0,
-                    lock,
-                    c_i_sha256: c_i,
-                    sigma_i_clear,
-                    weights_row,
-                    weights_kind: m.weights_kind,
-                };
+                    let artifact = ArmerArtifactV0 {
+                        version: 0,
+                        lock,
+                        c_i_sha256: c_i,
+                        sigma_i_clear,
+                        weights_row,
+                        weights_kind: m.weights_kind,
+                    };
 
-                let bytes = serde_json::to_vec_pretty(&artifact).context("serialize armer artifact")?;
-                fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
-                println!("wrote {}", out.display());
+                    let bytes = serde_json::to_vec_pretty(&artifact).context("serialize armer artifact")?;
+                    fs::write(&out, bytes).with_context(|| format!("write {}", out.display()))?;
+                    Ok(())
+                })?;
+
+            for armer_id in armer_id_start..armer_id_end {
+                println!("wrote {}", out_dir.join(format!("armer_{armer_id}.json")).display());
             }
         }
 
@@ -891,10 +910,23 @@ fn main() -> Result<()> {
         }
 
         #[cfg(feature = "pq-openfhe")]
-        Cmd::DecapOpenfhe { shape_blob_dir, residual_file, armer_artifact } => {
+        Cmd::DecapOpenfhe { shape_blob_dir, residual_file, armer_artifact, armer_artifact_dir } => {
             // Load armer artifacts and convert to `pq_stream_tag` inputs (demo trust v0).
+            let mut paths = armer_artifact.clone();
+            if let Some(dir) = armer_artifact_dir.as_ref() {
+                let mut extra = fs::read_dir(dir)
+                    .with_context(|| format!("read_dir {}", dir.display()))?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+                    .collect::<Vec<_>>();
+                extra.sort();
+                paths.extend(extra);
+            }
+            anyhow::ensure!(!paths.is_empty(), "need at least one armer artifact (paths empty)");
+
             let mut armers_in: Vec<ArmerInputV0> = Vec::new();
-            for p in &armer_artifact {
+            for p in &paths {
                 let b = fs::read(p).with_context(|| format!("read {}", p.display()))?;
                 let a: ArmerArtifactV0 = serde_json::from_slice(&b).context("parse armer artifact")?;
                 let alpha = a

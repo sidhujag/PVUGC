@@ -5,6 +5,7 @@ use pq_fhe_backend::FheBackend;
 use openfhe::cxx::{self, let_cxx_string, CxxVector};
 use pq_basis_blob::{rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0, WeightsKind};
 use rand_core::{OsRng, RngCore};
+use rayon::prelude::*;
 use std::fs;
 use std::path::PathBuf;
 
@@ -340,27 +341,39 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
             openfhe: None,
         };
 
+        // Create directories first (avoid parallel mkdir races).
         for j in 0..args.s_basis {
             fs::create_dir_all(args.out_dir.join(format!("basis/l{limb}/j{j}"))).ok();
-            let mut start = 0usize;
-            while start < args.block_count {
-                let end = (start + args.blocks_per_chunk).min(args.block_count);
-                let ct_path = shape_stub.basis_chunk_path(&args.out_dir, limb, j, start, end);
-                let ct_path_s = ct_path.to_string_lossy().into_owned();
-                let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
-
-                for _b in start..end {
-                    let mut vec_i64 = CxxVector::<i64>::new();
-                    for _ in 0..args.slot_count {
-                        vec_i64.pin_mut().push((OsRng.next_u64() % pt_mod) as i64);
-                    }
-                    let pt = cc.MakePackedPlaintext(&vec_i64, 1, 0);
-                    let ct = cc.EncryptByPublicKey(&kp.GetPublicKey(), &pt);
-                    writer.append(&ct).with_context(|| format!("append basis ciphertext failed: {}", ct_path.display()))?;
-                }
-                start = end;
-            }
         }
+
+        // Parallelize across basis index j: each j writes disjoint files.
+        // Note: disk bandwidth can bottleneck; tune RAYON_NUM_THREADS on the server.
+        (0..args.s_basis)
+            .into_par_iter()
+            .try_for_each(|j| -> Result<()> {
+                let mut start = 0usize;
+                let mut rng = OsRng;
+                while start < args.block_count {
+                    let end = (start + args.blocks_per_chunk).min(args.block_count);
+                    let ct_path = shape_stub.basis_chunk_path(&args.out_dir, limb, j, start, end);
+                    let ct_path_s = ct_path.to_string_lossy().into_owned();
+                    let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
+
+                    for _b in start..end {
+                        let mut vec_i64 = CxxVector::<i64>::new();
+                        for _ in 0..args.slot_count {
+                            vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
+                        }
+                        let pt = cc.MakePackedPlaintext(&vec_i64, 1, 0);
+                        let ct = cc.EncryptByPublicKey(&kp.GetPublicKey(), &pt);
+                        writer.append(&ct).with_context(|| {
+                            format!("append basis ciphertext failed: {}", ct_path.display())
+                        })?;
+                    }
+                    start = end;
+                }
+                Ok(())
+            })?;
 
         limb_files.push(OpenFheLimbFilesV0 {
             limb,
