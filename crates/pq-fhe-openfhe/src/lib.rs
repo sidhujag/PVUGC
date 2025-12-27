@@ -5,8 +5,6 @@ use pq_fhe_backend::FheBackend;
 use openfhe::cxx::{self, let_cxx_string, CxxVector};
 use pq_basis_blob::{rotations_powers_of_two, OpenFheLimbFilesV0, OpenFheManifestV0, ShapeBlobManifestV0, WeightsKind};
 use rand_core::{OsRng, RngCore};
-use rayon::prelude::*;
-use std::sync::Arc;
 use std::fs;
 use std::path::PathBuf;
 
@@ -269,10 +267,79 @@ pub struct SetupShapeBlobArgs {
     pub basis_parallelism: usize,
 }
 
-pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
+/// Multi-process worker: generate basis ciphertexts for a limb and a basis-index range `[j_start, j_end)`.
+///
+/// This reads `manifest.json` for parameters and uses the already-written OpenFHE artifacts in
+/// `openfhe/l{limb}/`.
+pub fn openfhe_generate_basis_worker(shape_blob_dir: &PathBuf, limb: usize, j_start: usize, j_end: usize) -> Result<()> {
+    anyhow::ensure!(j_start <= j_end, "invalid j range");
+
+    let manifest_path = shape_blob_dir.join("manifest.json");
+    let manifest_bytes =
+        fs::read(&manifest_path).with_context(|| format!("read {}", manifest_path.display()))?;
+    let m: ShapeBlobManifestV0 = serde_json::from_slice(&manifest_bytes).context("parse manifest.json")?;
+    anyhow::ensure!(m.version == 0, "unsupported manifest version {}", m.version);
+    let of = m
+        .openfhe
+        .clone()
+        .ok_or_else(|| anyhow!("manifest missing openfhe section"))?;
+    let serial_mode_enum = OpenFheBackend::parse_serial_mode(&of.serial_mode)?;
+
+    let limb_cfg = of
+        .limbs
+        .iter()
+        .find(|x| x.limb == limb)
+        .ok_or_else(|| anyhow!("missing openfhe limb {limb}"))?
+        .clone();
+    let pt_mod = limb_cfg.plaintext_modulus;
+
+    // Deserialize the OpenFHE context + public key for this limb (process-local).
+    let ctx = OpenFheBackend::deserialize_crypto_context(
+        shape_blob_dir.join(&limb_cfg.crypto_context_path).to_string_lossy().as_ref(),
+        serial_mode_enum,
+    )?;
+    let pk = OpenFheBackend::deserialize_public_key(
+        shape_blob_dir.join(&limb_cfg.public_key_path).to_string_lossy().as_ref(),
+        serial_mode_enum,
+    )?;
+
+    // Ensure basis directories exist.
+    for j in j_start..j_end {
+        fs::create_dir_all(shape_blob_dir.join(format!("basis/l{limb}/j{j}"))).ok();
+    }
+
+    let mut rng = OsRng;
+    for j in j_start..j_end {
+        let mut start = 0usize;
+        while start < m.block_count {
+            let end = (start + m.blocks_per_chunk).min(m.block_count);
+            let ct_path = m.basis_chunk_path(shape_blob_dir, limb, j, start, end);
+            let ct_path_s = ct_path.to_string_lossy().into_owned();
+            let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
+
+            for _b in start..end {
+                let mut vec_i64 = CxxVector::<i64>::new();
+                for _ in 0..m.slot_count {
+                    vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
+                }
+                let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
+                let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
+                writer
+                    .append(&ct)
+                    .with_context(|| format!("append basis ciphertext failed: {}", ct_path.display()))?;
+            }
+            drop(writer);
+            start = end;
+        }
+    }
+
+    Ok(())
+}
+
+/// Keys-only OpenFHE setup: writes `manifest.json` + OpenFHE artifacts, but does **not** generate basis ciphertexts.
+pub fn setup_shape_blob_openfhe_keys_only(args: &SetupShapeBlobArgs) -> Result<()> {
     anyhow::ensure!(args.blocks_per_chunk > 0, "blocks_per_chunk must be > 0");
     anyhow::ensure!(args.moduli.len() == args.d_limbs, "moduli.len must equal d_limbs");
-    anyhow::ensure!(args.basis_parallelism > 0, "basis_parallelism must be > 0");
     let serial_mode_enum = OpenFheBackend::parse_serial_mode(&args.serial_mode)?;
 
     fs::create_dir_all(&args.out_dir)?;
@@ -288,15 +355,9 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         let mut cc_params = openfhe_ffi::GenParamsBFVRNS();
         cc_params.pin_mut().SetPlaintextModulus(pt_mod);
         cc_params.pin_mut().SetMultiplicativeDepth(args.multiplicative_depth);
-        // Ensure packing + modulus sizing are compatible with our chosen plaintext modulus.
-        // Without this, OpenFHE can pick CRT moduli smaller than `pt_mod`, causing Encode() to fail.
         cc_params.pin_mut().SetBatchSize(args.slot_count as u32);
-        // OpenFHE security checks may require a minimum ring dimension (e.g. 8192 for 128-bit).
-        // We only need batch_size = slot_count; ring_dim can be larger.
         let ring_dim = (args.slot_count as u32).next_power_of_two().max(8192);
         cc_params.pin_mut().SetRingDim(ring_dim);
-        // Ensure BFVRNS picks CRT moduli comfortably above the plaintext modulus.
-        // (BFVRNS in some OpenFHE builds does not support SetFirstModSize().)
         cc_params.pin_mut().SetScalingModSize(60);
         cc_params
             .pin_mut()
@@ -310,7 +371,6 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         let kp = cc.KeyGen();
         cc.EvalMultKeyGen(&kp.GetPrivateKey());
 
-        // Rotation keys: powers of two for SlotSum.
         let mut index_list = CxxVector::<i32>::new();
         for r in rotations_powers_of_two(args.slot_count) {
             index_list.pin_mut().push(r);
@@ -323,15 +383,12 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         let em_path = limb_dir.join("eval_mult_key.bin");
         let er_path = limb_dir.join("eval_rot_key.bin");
 
-        // `let_cxx_string!` expects something like `String` or `&str` (AsRef<[u8]>).
-        // `to_string_lossy()` returns `Cow<str>` which doesn't implement AsRef<[u8]>.
         let cc_s_owned = cc_path.to_string_lossy().into_owned();
         let pk_s_owned = pk_path.to_string_lossy().into_owned();
         let sk_s_owned = sk_path.to_string_lossy().into_owned();
         let em_s_owned = em_path.to_string_lossy().into_owned();
         let er_s_owned = er_path.to_string_lossy().into_owned();
 
-        // Use &str to avoid moving the owned `String` values (we reuse them later for parallel setup).
         let_cxx_string!(cc_s = cc_s_owned.as_str());
         let_cxx_string!(pk_s = pk_s_owned.as_str());
         let_cxx_string!(sk_s = sk_s_owned.as_str());
@@ -359,80 +416,8 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
             "serialize eval rot key failed"
         );
 
-        // Basis ciphertexts ctK[j,b,ℓ] = Enc_pk( random vec in Z_t^B ) (v0).
-        //
-        // Stored in chunk files: basis/l{limb}/j{j}/blocks_{start}_{end}.bin
-        // Each chunk file is a concatenation of serialized Ciphertext objects (same SerialMode),
-        // so decap can read strictly streaming.
-        let shape_stub = ShapeBlobManifestV0 {
-            version: 0,
-            shape_id: args.shape_id.clone(),
-            n_armers: args.n_armers,
-            s_basis: args.s_basis,
-            d_limbs: args.d_limbs,
-            moduli: args.moduli.clone(),
-            epoch: args.epoch,
-            slot_count: args.slot_count,
-            block_count: args.block_count,
-            blocks_per_chunk: args.blocks_per_chunk,
-            required_rotations: rotations_powers_of_two(args.slot_count),
-            weights_kind: args.weights_kind,
-            ciphertext_encoding_version: 0,
-            openfhe: None,
-        };
-
-        // Create directories first (avoid parallel mkdir races).
         for j in 0..args.s_basis {
             fs::create_dir_all(args.out_dir.join(format!("basis/l{limb}/j{j}"))).ok();
-        }
-
-        // Basis generation across j.
-        //
-        // Default: sequential (safe). Optional: parallel across `j` (faster on large servers),
-        // but some OpenFHE builds may segfault under heavy concurrency. Use with care.
-        let cc_path_s = Arc::new(cc_s_owned.clone());
-        let pk_path_s = Arc::new(pk_s_owned.clone());
-        let serial_mode_enum2 = serial_mode_enum;
-
-        let gen_one_j = |j: usize| -> Result<()> {
-            // Thread-local OpenFHE objects (do not share pointers across threads).
-            let ctx = OpenFheBackend::deserialize_crypto_context(&cc_path_s, serial_mode_enum2)?;
-            let pk = OpenFheBackend::deserialize_public_key(&pk_path_s, serial_mode_enum2)?;
-
-            let mut start = 0usize;
-            let mut rng = OsRng;
-            while start < args.block_count {
-                let end = (start + args.blocks_per_chunk).min(args.block_count);
-                let ct_path = shape_stub.basis_chunk_path(&args.out_dir, limb, j, start, end);
-                let ct_path_s = ct_path.to_string_lossy().into_owned();
-                let mut writer = CtChunkWriter::create(&ct_path_s, serial_mode_enum)?;
-
-                for _b in start..end {
-                    let mut vec_i64 = CxxVector::<i64>::new();
-                    for _ in 0..args.slot_count {
-                        vec_i64.pin_mut().push((rng.next_u64() % pt_mod) as i64);
-                    }
-                    let pt = ctx.cc.MakePackedPlaintext(&vec_i64, 1, 0);
-                    let ct = ctx.cc.EncryptByPublicKey(&pk.pk, &pt);
-                    writer.append(&ct).with_context(|| {
-                        format!("append basis ciphertext failed: {}", ct_path.display())
-                    })?;
-                }
-                start = end;
-            }
-            Ok(())
-        };
-
-        if args.basis_parallelism == 1 {
-            for j in 0..args.s_basis {
-                gen_one_j(j)?;
-            }
-        } else {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(args.basis_parallelism)
-                .build()
-                .context("build rayon threadpool for basis generation")?;
-            pool.install(|| (0..args.s_basis).into_par_iter().try_for_each(gen_one_j))?;
         }
 
         limb_files.push(OpenFheLimbFilesV0 {
@@ -448,11 +433,11 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
 
     let manifest = ShapeBlobManifestV0 {
         version: 0,
-        shape_id: args.shape_id,
+        shape_id: args.shape_id.clone(),
         n_armers: args.n_armers,
         s_basis: args.s_basis,
         d_limbs: args.d_limbs,
-        moduli: args.moduli,
+        moduli: args.moduli.clone(),
         epoch: args.epoch,
         slot_count: args.slot_count,
         block_count: args.block_count,
@@ -469,8 +454,22 @@ pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
         }),
     };
 
-    let bytes = serde_json::to_vec_pretty(&manifest)?;
-    fs::write(args.out_dir.join("manifest.json"), bytes)?;
+    let manifest_path = args.out_dir.join("manifest.json");
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    fs::write(&manifest_path, manifest_bytes).with_context(|| format!("write {}", manifest_path.display()))?;
+
+    Ok(())
+}
+
+pub fn setup_shape_blob_openfhe(args: SetupShapeBlobArgs) -> Result<()> {
+    anyhow::ensure!(args.blocks_per_chunk > 0, "blocks_per_chunk must be > 0");
+    anyhow::ensure!(args.moduli.len() == args.d_limbs, "moduli.len must equal d_limbs");
+    anyhow::ensure!(args.basis_parallelism == 1, "threaded OpenFHE setup is disabled; use pvugc_pq multiprocess when basis_parallelism>1");
+    setup_shape_blob_openfhe_keys_only(&args)?;
+    // Sequential basis generation inside this process.
+    for limb in 0..args.d_limbs {
+        openfhe_generate_basis_worker(&args.out_dir, limb, 0, args.s_basis)?;
+    }
     Ok(())
 }
 

@@ -120,6 +120,23 @@ enum Cmd {
         basis_parallelism: usize,
     },
 
+    /// Internal worker: generate OpenFHE basis ciphertexts for a limb and j-range.
+    ///
+    /// This is used by `setup-shape-openfhe` to do **multi-process** basis generation when
+    /// `--basis-parallelism > 1`.
+    #[cfg(feature = "pq-openfhe")]
+    #[command(hide = true)]
+    OpenfheBasisWorker {
+        #[arg(long)]
+        shape_blob_dir: PathBuf,
+        #[arg(long)]
+        limb: usize,
+        #[arg(long)]
+        j_start: usize,
+        #[arg(long)]
+        j_end: usize,
+    },
+
     /// Arm a statement for one armer (v0: stores alpha + sigma in clear for correctness testing).
     Arm {
         #[arg(long)]
@@ -901,9 +918,8 @@ fn main() -> Result<()> {
                     "moduli[{i}] too large for OpenFHE packed i64 API (need <= i64::MAX)"
                 );
             }
-            // GPT-Pro separation: all OpenFHE setup is in the backend crate.
-            pq_fhe_openfhe::setup_shape_blob_openfhe(pq_fhe_openfhe::SetupShapeBlobArgs {
-                out_dir,
+            let args = pq_fhe_openfhe::SetupShapeBlobArgs {
+                out_dir: out_dir.clone(),
                 shape_id,
                 n_armers,
                 s_basis,
@@ -917,7 +933,54 @@ fn main() -> Result<()> {
                 multiplicative_depth,
                 serial_mode,
                 basis_parallelism,
-            })?;
+            };
+
+            if basis_parallelism <= 1 {
+                // Single-process (sequential) setup.
+                pq_fhe_openfhe::setup_shape_blob_openfhe(args)?;
+            } else {
+                // Multi-process basis generation (reliable; avoids OpenFHE thread-safety issues).
+                pq_fhe_openfhe::setup_shape_blob_openfhe_keys_only(&args)?;
+
+                let exe = std::env::current_exe().context("current_exe for OpenFHE basis workers")?;
+                for limb in 0..d_limbs {
+                    let workers = basis_parallelism.min(s_basis).max(1);
+                    let chunk = (s_basis + workers - 1) / workers;
+                    let mut children = Vec::new();
+
+                    for w in 0..workers {
+                        let j_start = w * chunk;
+                        let j_end = ((w + 1) * chunk).min(s_basis);
+                        if j_start >= j_end {
+                            continue;
+                        }
+
+                        let mut cmd = std::process::Command::new(&exe);
+                        cmd.arg("openfhe-basis-worker")
+                            .arg("--shape-blob-dir")
+                            .arg(out_dir.as_os_str())
+                            .arg("--limb")
+                            .arg(limb.to_string())
+                            .arg("--j-start")
+                            .arg(j_start.to_string())
+                            .arg("--j-end")
+                            .arg(j_end.to_string());
+                        cmd.stdout(std::process::Stdio::inherit());
+                        cmd.stderr(std::process::Stdio::inherit());
+                        children.push(cmd.spawn().context("spawn openfhe-basis-worker")?);
+                    }
+
+                    for mut c in children {
+                        let st = c.wait().context("wait openfhe-basis-worker")?;
+                        anyhow::ensure!(st.success(), "openfhe-basis-worker failed with status {st}");
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "pq-openfhe")]
+        Cmd::OpenfheBasisWorker { shape_blob_dir, limb, j_start, j_end } => {
+            pq_fhe_openfhe::openfhe_generate_basis_worker(&shape_blob_dir, limb, j_start, j_end)?;
         }
 
         #[cfg(feature = "pq-openfhe")]
