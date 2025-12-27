@@ -199,10 +199,8 @@ enum Cmd {
         #[arg(long)]
         armer_artifact_dir: Option<PathBuf>,
         /// Parallelize the **basis accumulation** across basis index `j` (this is the dominant ct×pt work).
-        ///
-        /// Note: the flag name is historical (kept to avoid breaking scripts); this is effective even when d=1.
         #[arg(long, default_value_t = 1)]
-        limb_parallelism: usize,
+        basis_parallelism: usize,
     },
 
     /// Print the deterministic weights row w_i(x) implied by the shape manifest and statement hash.
@@ -928,7 +926,7 @@ fn main() -> Result<()> {
             residual_file,
             armer_artifact,
             armer_artifact_dir,
-            limb_parallelism,
+            basis_parallelism,
         } => {
             // Load armer artifacts and convert to `pq_stream_tag` inputs (demo trust v0).
             let mut paths = armer_artifact.clone();
@@ -965,13 +963,11 @@ fn main() -> Result<()> {
                 });
             }
 
-            // Backwards-compat: treat `--limb-parallelism` as basis-parallelism (effective even for d=1).
-            pq_stream_tag::decap_openfhe_with_parallelism(
+            pq_stream_tag::decap_openfhe_with_basis_parallelism(
                 &shape_blob_dir,
                 &residual_file,
                 &armers_in,
-                1,
-                limb_parallelism,
+                basis_parallelism,
             )?;
         }
     }

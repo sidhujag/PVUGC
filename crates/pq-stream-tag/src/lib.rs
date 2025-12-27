@@ -86,37 +86,18 @@ pub struct ArmerInputV0 {
 
 #[cfg(feature = "pq-openfhe")]
 pub fn decap_openfhe(shape_blob_dir: &Path, residual_file: &Path, armers: &[ArmerInputV0]) -> Result<()> {
-    decap_openfhe_with_parallelism(shape_blob_dir, residual_file, armers, 1, 1)
+    decap_openfhe_with_basis_parallelism(shape_blob_dir, residual_file, armers, 1)
 }
 
-/// OpenFHE decap with a single parallelism knob (kept for backwards-compat with the CLI flag name).
+/// OpenFHE decap with **one** parallelism knob.
 ///
-/// NOTE: Despite the parameter name, we currently interpret this as **basis-parallelism** across
-/// basis index `j` (capped at `s_basis`). This is the effective speedup even when `d_limbs = 1`.
+/// `basis_parallelism` parallelizes the dominant ct×pt work across basis index `j` (capped at `s_basis`).
+/// Limbs are always processed sequentially (simple + avoids oversubscription).
 #[cfg(feature = "pq-openfhe")]
-pub fn decap_openfhe_with_limb_parallelism(
+pub fn decap_openfhe_with_basis_parallelism(
     shape_blob_dir: &Path,
     residual_file: &Path,
     armers: &[ArmerInputV0],
-    limb_parallelism: usize,
-) -> Result<()> {
-    decap_openfhe_with_parallelism(shape_blob_dir, residual_file, armers, 1, limb_parallelism)
-}
-
-/// OpenFHE decap with parallelism controls.
-///
-/// - `limb_parallelism`: parallelize across CRT limbs `d` (safe, capped at `d`).
-/// - `basis_parallelism`: parallelize the expensive basis accumulation across `j` (safe, capped at `s`).
-///
-/// Notes:
-/// - We do NOT nest limb-parallelism and basis-parallelism (to avoid oversubscription).
-/// - When `basis_parallelism > 1`, limbs are processed sequentially and basis accumulation runs in parallel.
-#[cfg(feature = "pq-openfhe")]
-pub fn decap_openfhe_with_parallelism(
-    shape_blob_dir: &Path,
-    residual_file: &Path,
-    armers: &[ArmerInputV0],
-    limb_parallelism: usize,
     basis_parallelism: usize,
 ) -> Result<()> {
     use pq_fhe_backend::FheBackend;
@@ -150,15 +131,18 @@ pub fn decap_openfhe_with_parallelism(
         );
     }
 
-    anyhow::ensure!(limb_parallelism > 0, "limb_parallelism must be > 0");
     anyhow::ensure!(basis_parallelism > 0, "basis_parallelism must be > 0");
 
-    // Read PVRS blocks once (shared by all limbs).
-    let pvrs_blocks_u32 = Arc::new(read_pvrs_blocks_u32(
-        residual_file,
-        m.slot_count,
-        m.block_count,
-    )?);
+    // Only load PVRS blocks into memory when we need basis-parallelism. Otherwise keep strict streaming.
+    let pvrs_blocks_u32: Option<Arc<Vec<u32>>> = if basis_parallelism > 1 {
+        Some(Arc::new(read_pvrs_blocks_u32(
+            residual_file,
+            m.slot_count,
+            m.block_count,
+        )?))
+    } else {
+        None
+    };
 
     let do_limb = |limb: usize| -> Result<Vec<bool>> {
         let limb_cfg = of
@@ -182,14 +166,23 @@ pub fn decap_openfhe_with_parallelism(
             shape_blob_dir.join(&limb_cfg.private_key_path).to_string_lossy().as_ref(),
             serial_mode,
         )?;
-        OpenFheBackend::deserialize_eval_mult_key(
-            shape_blob_dir.join(&limb_cfg.eval_mult_key_path).to_string_lossy().as_ref(),
-            serial_mode,
-        )?;
-        OpenFheBackend::deserialize_eval_rot_key(
-            shape_blob_dir.join(&limb_cfg.eval_rot_key_path).to_string_lossy().as_ref(),
-            serial_mode,
-        )?;
+        if basis_parallelism <= 1 {
+            // Sequential path needs eval keys (ct×pt mult + SlotSum rotations).
+            OpenFheBackend::deserialize_eval_mult_key(
+                shape_blob_dir
+                    .join(&limb_cfg.eval_mult_key_path)
+                    .to_string_lossy()
+                    .as_ref(),
+                serial_mode,
+            )?;
+            OpenFheBackend::deserialize_eval_rot_key(
+                shape_blob_dir
+                    .join(&limb_cfg.eval_rot_key_path)
+                    .to_string_lossy()
+                    .as_ref(),
+                serial_mode,
+            )?;
+        }
 
         // Prepare Enc(0-vector) for basis accumulators.
         let zeros = vec![0i64; m.slot_count];
@@ -291,7 +284,7 @@ pub fn decap_openfhe_with_parallelism(
                 for (ti, js) in parts.into_iter().enumerate() {
                     let out_paths = Arc::clone(&out_paths);
                     let key_deser_lock = Arc::clone(&key_deser_lock);
-                    let pvrs_blocks_u32 = Arc::clone(&pvrs_blocks_u32);
+                    let pvrs_blocks_u32 = Arc::clone(pvrs_blocks_u32.as_ref().expect("pvrs_blocks_u32 must exist"));
                     let tmp_dir = tmp_dir.clone();
                     let cc_path = cc_path.clone();
                     let pk_path = pk_path.clone();
@@ -425,20 +418,11 @@ pub fn decap_openfhe_with_parallelism(
         Ok(ok)
     };
 
-    // Avoid nesting: if basis_parallelism > 1, run limbs sequentially and use all threads per limb.
-    let limb_ok: Vec<Vec<bool>> = if basis_parallelism > 1 || m.d_limbs <= 1 || limb_parallelism == 1 {
-        let mut out = Vec::with_capacity(m.d_limbs);
-        for limb in 0..m.d_limbs {
-            out.push(do_limb(limb)?);
-        }
-        out
-    } else {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(limb_parallelism.min(m.d_limbs))
-            .build()
-            .context("build rayon threadpool for decap limb parallelism")?;
-        pool.install(|| (0..m.d_limbs).into_par_iter().map(do_limb).collect::<Result<Vec<_>>>())?
-    };
+    // Limbs are processed sequentially; parallelism is used inside the limb to split the basis work.
+    let mut limb_ok: Vec<Vec<bool>> = Vec::with_capacity(m.d_limbs);
+    for limb in 0..m.d_limbs {
+        limb_ok.push(do_limb(limb)?);
+    }
 
     let mut ok_all_limbs = vec![true; armers.len()];
     for limb in 0..m.d_limbs {
