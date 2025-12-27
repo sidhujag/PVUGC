@@ -1,5 +1,11 @@
 [workspace]
-members = ["."]
+members = [
+    ".",
+    "crates/pq-fhe-backend",
+    "crates/pq-fhe-openfhe",
+    "crates/pq-basis-blob",
+    "crates/pq-stream-tag",
+]
 
 [package]
 name = "arkworks_groth16"
@@ -22,6 +28,8 @@ pvugc-hooks = []
 asm = [
     "ark-ff/asm",
 ]
+# Enable OpenFHE-backed BFV/BGV evaluator (requires system OpenFHE install + linker flags).
+pq-openfhe = ["dep:pq-fhe-openfhe", "pq-stream-tag/pq-openfhe"]
 # Use production SP1 Groth16 VK (from sp1-keys/production/)
 # Without this, uses empty placeholder (for dev before keys are generated)
 sp1-production-vk = []
@@ -44,23 +52,30 @@ ark-std = "0.5"
 ark-crypto-primitives = { version = "0.5", features = ["crh"] }
 ark-secp256k1 = { version = "0.5", features = ["r1cs"] }
 array-init = "2.1"
-serde = { version = "1", features = ["derive"], optional = true }
-bincode = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1"
 
 # Crypto primitives
 sha2 = "0.10"
 anyhow = "1.0"  # Error handling for outer compressed
+clap = { version = "4.5", features = ["derive"] }
 once_cell = "1.19"  # For test fixtures
 rayon = "1.10"  # Parallel operations
 thiserror = "1.0"
 rand_core = "0.6"
 subtle = "2.6"
+hex = "0.4"
 k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
 bitcoin = { version = "0.31", default-features = false, features = ["std"] }
 ark-poly = "0.5.0"
+pq-fhe-backend = { path = "crates/pq-fhe-backend" }
+pq-basis-blob = { path = "crates/pq-basis-blob" }
+pq-stream-tag = { path = "crates/pq-stream-tag" }
+pq-fhe-openfhe = { path = "crates/pq-fhe-openfhe", optional = true }
 
 # SP1 SDK for zkVM proving (use syscoin/sp1 fork)
-sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
+sp1-sdk = { git = "https://github.com/syscoin/sp1", branch = "pq", features = ["native-gnark"] }
 
 
 # Dev profile: optimize for faster incremental builds
@@ -104,3 +119,4 @@ bincode = "1"
 [patch.crates-io]
 ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }
 p3-field = { git = "https://github.com/syscoin/p3-field", branch = "main" }
+openfhe = { path = "vendor/openfhe" }
