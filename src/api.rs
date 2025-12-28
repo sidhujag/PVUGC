@@ -534,10 +534,11 @@ impl OneSidedPvugc {
             }
         }
 
-        // Structural exclusion: γ₂ must not appear among statement-only bases
-        // (y_cols = {β₂} ∪ b_g2_query). Reject if any Y equals vk.gamma_g2.
+        // Structural exclusion: ±γ₂ must not appear among statement-only bases.
+        let gamma = vk.gamma_g2;
+        let gamma_neg = gamma.into_group().neg().into_affine();
         for y in &y_cols {
-            if *y == vk.gamma_g2 {
+            if *y == gamma || *y == gamma_neg {
                 return false;
             }
         }
