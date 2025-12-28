@@ -644,10 +644,12 @@ impl OneSidedPvugc {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::OneSidedPvugc;
     use crate::error::Error;
+    use crate::outer_compressed::{cycles::Mnt4Mnt6Cycle, RecursionCycle};
     use crate::ppe::PvugcVk;
     use crate::test_fixtures::get_fixture_mnt;
     use ark_ec::pairing::Pairing;
@@ -664,7 +666,8 @@ mod tests {
 
         // Provide correctly-sized public inputs (values don't matter for this structural test).
         let expected_inputs = vk.gamma_abc_g1.len().saturating_sub(1);
-        let public_inputs = vec![<fx::Mnt4Mnt6Cycle as crate::outer_compressed::RecursionCycle>::ConstraintField::zero(); expected_inputs];
+        type OuterE = <Mnt4Mnt6Cycle as RecursionCycle>::OuterE;
+        let public_inputs: Vec<<OuterE as Pairing>::ScalarField> = vec![Zero::zero(); expected_inputs];
 
         // Clone b_g2_query and inject γ₂ into the witness slice (index = total_instance).
         let total_instance = vk.gamma_abc_g1.len();
