@@ -188,6 +188,15 @@ impl OneSidedPvugc {
         let mut y_cols = Vec::with_capacity(1 + witness_cols.len());
         y_cols.push(public_leg);
         y_cols.extend(witness_cols);
+        // Structural exclusion (WE safety): γ₂ must not appear among statement-only bases.
+        // Enforce this at base construction so all downstream users (armers + verifiers) inherit it.
+        let gamma = vk.gamma_g2;
+        let gamma_neg = gamma.into_group().neg().into_affine();
+        for (idx, y) in y_cols.iter().enumerate() {
+            if *y == gamma || *y == gamma_neg {
+                return Err(Error::Crypto(format!("y_col_eq_pm_gamma2_at_index_{}", idx)));
+            }
+        }
         Ok(ColumnBases {
             y_cols,
             delta: pvugc_vk.delta_g2,
