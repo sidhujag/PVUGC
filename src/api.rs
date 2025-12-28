@@ -644,3 +644,51 @@ impl OneSidedPvugc {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::OneSidedPvugc;
+    use crate::error::Error;
+    use crate::ppe::PvugcVk;
+    use crate::test_fixtures::get_fixture_mnt;
+    use ark_ec::pairing::Pairing;
+    use ark_ff::Zero;
+
+    /// Negative test: if `pvugc_vk.b_g2_query` contains `vk.gamma_g2` among witness bases,
+    /// base construction must fail closed. This prevents publishing γ₂^ρ as an armed basis.
+    #[test]
+    fn build_column_bases_rejects_gamma2_mnt() {
+        let fx = get_fixture_mnt();
+
+        let vk = fx.vk_outer.as_ref();
+        let pvugc_vk = &fx.pvugc_vk;
+
+        // Provide correctly-sized public inputs (values don't matter for this structural test).
+        let expected_inputs = vk.gamma_abc_g1.len().saturating_sub(1);
+        let public_inputs = vec![<fx::Mnt4Mnt6Cycle as crate::outer_compressed::RecursionCycle>::ConstraintField::zero(); expected_inputs];
+
+        // Clone b_g2_query and inject γ₂ into the witness slice (index = total_instance).
+        let total_instance = vk.gamma_abc_g1.len();
+        let mut bq = (*pvugc_vk.b_g2_query).clone();
+        assert!(
+            bq.len() > total_instance,
+            "fixture must have at least one witness B-column"
+        );
+        bq[total_instance] = vk.gamma_g2;
+
+        let pvugc_vk_bad = PvugcVk::new_with_all_witnesses_isolated(
+            pvugc_vk.beta_g2,
+            pvugc_vk.delta_g2,
+            bq,
+            (*pvugc_vk.t_const_points_gt).clone(),
+        );
+
+        let res = OneSidedPvugc::build_column_bases(&pvugc_vk_bad, vk, &public_inputs);
+        match res {
+            Err(Error::Crypto(s)) => assert!(
+                s.starts_with("y_col_eq_pm_gamma2_at_index_"),
+                "unexpected error string: {s}"
+            ),
+            other => panic!("expected gamma2 exclusion error, got: {:?}", other),
+        }
+    }
+}
