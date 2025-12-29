@@ -138,6 +138,7 @@ fn test_outer_circuit_proof_agnostic() {
         arm_columns_outer_for, build_column_bases_outer_for, compute_r_to_rho_outer_for,
         compute_target_outer_for,
     };
+    use ark_serialize::CanonicalSerialize;
 
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
     // Match the Lean Prover E2E test shape: inner statement has *two* public inputs.
@@ -232,19 +233,33 @@ fn test_outer_circuit_proof_agnostic() {
         let bases_2 = build_column_bases_outer_for::<DefaultCycle>(&pvugc_vk, &vk_outer, &public_inputs_2);
         let arms_2 = arm_columns_outer_for::<DefaultCycle>(&bases_2, &rho);
 
+        // Use the SAME outer prover randomizers across statements/proofs to confirm that
+        // lean proofs remain bound to (statement,witness), not just to prover randomness.
+        let r_fixed = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let s_fixed = OuterScalar::<DefaultCycle>::rand(&mut rng);
+
+        let proof_bytes = |p: &ark_groth16::Proof<<DefaultCycle as RecursionCycle>::OuterE>| {
+            let mut v = Vec::new();
+            p.serialize_compressed(&mut v).expect("serialize proof");
+            v
+        };
+
         // === PROOF 1A: First proof of statement 1 ===
         let circuit_1a = OuterCircuit::<DefaultCycle>::new(
             (*fixture.vk_inner).clone(),
             x_inner_1.clone(),
             proof_inner_1a.clone(),
         );
-        let r1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let s1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let (proof_1a, assignment_1a) = prove_lean_with_randomizers(&lean_pk, circuit_1a, r1, s1)
+        let (proof_1a, assignment_1a) =
+            prove_lean_with_randomizers(&lean_pk, circuit_1a, r_fixed, s_fixed)
             .expect("proof 1a failed");
         let num_instance = vk_outer.gamma_abc_g1.len();
         let commits_1a = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_1a.a, &proof_1a.c, &s1, &assignment_1a, num_instance
+            &proof_1a.a,
+            &proof_1a.c,
+            &s_fixed,
+            &assignment_1a,
+            num_instance,
         );
 
         // === PROOF 1B: Second proof of statement 1 (DIFFERENT randomness) ===
@@ -253,12 +268,15 @@ fn test_outer_circuit_proof_agnostic() {
             x_inner_1.clone(),
             proof_inner_1b.clone(),
         );
-        let r2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let s2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let (proof_1b, assignment_1b) = prove_lean_with_randomizers(&lean_pk, circuit_1b, r2, s2)
+        let (proof_1b, assignment_1b) =
+            prove_lean_with_randomizers(&lean_pk, circuit_1b, r_fixed, s_fixed)
             .expect("proof 1b failed");
         let commits_1b = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_1b.a, &proof_1b.c, &s2, &assignment_1b, num_instance
+            &proof_1b.a,
+            &proof_1b.c,
+            &s_fixed,
+            &assignment_1b,
+            num_instance,
         );
 
         // === PROOF 2: Proof of statement 2 ===
@@ -267,12 +285,15 @@ fn test_outer_circuit_proof_agnostic() {
             x_inner_2.clone(),
             proof_inner_2.clone(),
         );
-        let r3 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let s3 = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let (proof_2, assignment_2) = prove_lean_with_randomizers(&lean_pk, circuit_2, r3, s3)
+        let (proof_2, assignment_2) =
+            prove_lean_with_randomizers(&lean_pk, circuit_2, r_fixed, s_fixed)
             .expect("proof 2 failed");
         let commits_2 = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_2.a, &proof_2.c, &s3, &assignment_2, num_instance
+            &proof_2.a,
+            &proof_2.c,
+            &s_fixed,
+            &assignment_2,
+            num_instance,
         );
 
         // === DECAP ===
@@ -289,6 +310,19 @@ fn test_outer_circuit_proof_agnostic() {
 
         // === ASSERTIONS ===
         
+        // 0. Proof data should change when (statement,witness) changes, even with identical (r,s).
+        // This confirms the lean prover remains input-bound and witness-bound.
+        assert_ne!(
+            proof_bytes(&proof_1a),
+            proof_bytes(&proof_1b),
+            "Outer lean proofs for SAME statement but different witness should differ even with same (r,s)"
+        );
+        assert_ne!(
+            proof_bytes(&proof_1a),
+            proof_bytes(&proof_2),
+            "Outer lean proofs for DIFFERENT statements should differ even with same (r,s)"
+        );
+
         // 1. Both proofs of statement 1 extract the SAME key
         assert_eq!(
             k_1a, k_1b,
