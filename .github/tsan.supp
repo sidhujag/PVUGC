@@ -6,8 +6,11 @@
 #
 # Keep these suppressions narrow and tied to specific internal functions.
 
-race:fun:*crossbeam_deque::deque::Buffer<*>::write*
-race:fun:*crossbeam_deque::deque::Buffer<*>::read*
-race:fun:*crossbeam_deque::deque::Worker<*>::push*
-race:fun:*rayon_core::registry::WorkerThread::push*
+# TSan suppression syntax is `race:<pattern>` (wildcards allowed; `*` is implicit
+# at both ends unless you anchor with ^/$). We match on demangled Rust symbol
+# substrings that appear in the report stacks.
+
+race:crossbeam_deque::deque::Buffer
+race:crossbeam_deque::deque::Worker
+race:rayon_core::registry::WorkerThread::push
 

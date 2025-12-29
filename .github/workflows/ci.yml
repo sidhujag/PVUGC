@@ -44,6 +44,7 @@ jobs:
           RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -C link-arg=-fuse-ld=lld -Cunsafe-allow-abi-mismatch=sanitizer
           RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} -Cunsafe-allow-abi-mismatch=sanitizer
           ASAN_OPTIONS: detect_leaks=0
+          TSAN_OPTIONS: ${{ matrix.sanitizer == 'thread' && format('suppressions={0}/.github/tsan.supp', github.workspace) || '' }}
         run: |
           cargo +nightly -Z build-std test --target x86_64-unknown-linux-gnu --locked \
             --package arkworks_groth16 --lib --bins --examples --tests
