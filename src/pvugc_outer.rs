@@ -129,6 +129,10 @@ where
             l_query: pk_outer.l_query.clone(),
         };
 
+        // Gap-preimage audit: since LeanProvingKey is public in the WE deployment, guard against
+        // accidentally publishing the exact omitted (0,j) gap handles through some other G1 vector.
+        audit_gap_preimages_not_directly_published::<C>(&lean_pk, &wb_result.omitted_gap_bases);
+
         // Pre-serialization audit: ensure the exact lean CRS view we will serialize/publish
         // contains no forbidden public handles or forbidden basis categories.
         let num_public = lean_pk.vk.gamma_abc_g1.len(); // includes constant "1" at index 0
@@ -217,6 +221,12 @@ pub fn build_column_bases_outer_for<C: RecursionCycle>(
 struct WitnessBasesResult<E: Pairing> {
     /// Sparse H_{ij} bases for witness terms (off-diagonal and diagonal contributions)
     pub h_query_wit: Vec<(u32, u32, E::G1Affine)>,
+    /// The omitted "gap preimage" bases (const×wit) for witness columns that touch public-C
+    /// binding rows. These are intentionally NOT published, but we compute them during setup
+    /// to audit that they do not appear verbatim among any other published G1 handles.
+    ///
+    /// Note: this is a direct-leak guard, not a full span-solve proof.
+    pub omitted_gap_bases: Vec<(u32, u32, E::G1Affine)>,
 }
 
 fn compute_witness_bases<C: RecursionCycle>(
@@ -688,7 +698,111 @@ fn compute_witness_bases<C: RecursionCycle>(
         );
     }
 
-    WitnessBasesResult { h_query_wit: h_wit }
+    // Compute the omitted gap-preimage bases (0,j) as actual points so we can audit that they
+    // aren't accidentally published elsewhere (e.g., via A/B/L query vectors).
+    //
+    // This is intentionally computed after the parallel h_wit construction: omit_const_wit_cols
+    // is tiny (≈ number of public inputs), so a sequential computation is fine.
+    let mut omitted_gap_bases: Vec<(u32, u32, <C::OuterE as Pairing>::G1Affine)> = Vec::new();
+    if !omit_const_wit_cols.is_empty() {
+        let mut acc_u: Vec<OuterScalar<C>> = Vec::new();
+        let mut acc_v: Vec<OuterScalar<C>> = Vec::new();
+
+        for &j in omit_const_wit_cols.iter() {
+            let i_idx = 0usize;
+            let j_idx = j;
+            if i_idx >= col_a.len() || j_idx >= col_b.len() {
+                continue;
+            }
+            let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
+            let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
+            if rows_u.is_empty() || rows_v.is_empty() {
+                continue;
+            }
+
+            let n_u = rows_u.len();
+            let n_v = rows_v.len();
+            acc_u.clear();
+            acc_u.resize(n_u, OuterScalar::<C>::zero());
+            acc_v.clear();
+            acc_v.resize(n_v, OuterScalar::<C>::zero());
+
+            let mut diag_terms: Vec<(usize, OuterScalar<C>)> = Vec::new();
+            diag_terms.reserve(std::cmp::min(n_u, n_v));
+
+            for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
+                for (idx_v, &(_, val_v)) in rows_v.iter().enumerate() {
+                    let k = rows_u[idx_u].0;
+                    let m = rows_v[idx_v].0;
+                    let prod = val_u * val_v;
+                    if k == m {
+                        diag_terms.push((k, prod));
+                    } else {
+                        let wm = domain_elements[m];
+                        let wk = domain_elements[k];
+                        let d = if k >= m { k - m } else { k + domain_size - m };
+                        let inv_denom = -(inv_domain_elements[m] * inv_n_one_minus_omega[d]);
+                        let common = prod * inv_denom;
+                        acc_u[idx_u] += common * wm;
+                        acc_v[idx_v] -= common * wk;
+                    }
+                }
+            }
+
+            let mut bases: Vec<<C::OuterE as Pairing>::G1Affine> =
+                Vec::with_capacity(n_u + n_v + diag_terms.len());
+            let mut scalars: Vec<OuterScalar<C>> = Vec::with_capacity(n_u + n_v + diag_terms.len());
+
+            for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
+                if !acc_u[idx_u].is_zero() {
+                    bases.push(lagrange_srs[k]);
+                    scalars.push(acc_u[idx_u]);
+                }
+            }
+            for (idx_v, &(m, _)) in rows_v.iter().enumerate() {
+                if !acc_v[idx_v].is_zero() {
+                    bases.push(lagrange_srs[m]);
+                    scalars.push(acc_v[idx_v]);
+                }
+            }
+
+            if !diag_terms.is_empty() {
+                diag_terms.sort_unstable_by_key(|(k, _)| *k);
+                let mut cur_k = diag_terms[0].0;
+                let mut cur_acc = OuterScalar::<C>::zero();
+                for (k, s) in diag_terms.into_iter() {
+                    if k != cur_k {
+                        if !cur_acc.is_zero() {
+                            bases.push(q_vector[cur_k]);
+                            scalars.push(cur_acc);
+                        }
+                        cur_k = k;
+                        cur_acc = s;
+                    } else {
+                        cur_acc += s;
+                    }
+                }
+                if !cur_acc.is_zero() {
+                    bases.push(q_vector[cur_k]);
+                    scalars.push(cur_acc);
+                }
+            }
+
+            if bases.is_empty() {
+                continue;
+            }
+            let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+            if h_acc.is_zero() {
+                continue;
+            }
+            omitted_gap_bases.push((0u32, j as u32, h_acc.into_affine()));
+        }
+    }
+
+    WitnessBasesResult {
+        h_query_wit: h_wit,
+        omitted_gap_bases,
+    }
 }
 // --- Group FFT Helpers ---
 
@@ -838,6 +952,65 @@ fn audit_witness_bases<C: RecursionCycle>(
     if only_safe_pairs {
         println!("[PASS] Quotient Reachability: h_query_wit contains clean span.");
     }
+}
+
+fn audit_gap_preimages_not_directly_published<C: RecursionCycle>(
+    lean_pk: &LeanProvingKey<C::OuterE>,
+    omitted_gap_bases: &[(u32, u32, <C::OuterE as Pairing>::G1Affine)],
+) {
+    use ark_serialize::CanonicalSerialize;
+
+    if omitted_gap_bases.is_empty() {
+        return;
+    }
+
+    fn key<E: Pairing>(p: &E::G1Affine) -> Vec<u8> {
+        let mut out = Vec::new();
+        p.serialize_compressed(&mut out)
+            .expect("G1 serialize_compressed");
+        out
+    }
+
+    let mut published: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+    // VK G1 handles
+    published.insert(key::<C::OuterE>(&lean_pk.vk.alpha_g1));
+    for g in &lean_pk.vk.gamma_abc_g1 {
+        published.insert(key::<C::OuterE>(g));
+    }
+
+    // Lean PK extra G1 handles
+    published.insert(key::<C::OuterE>(&lean_pk.beta_g1));
+    published.insert(key::<C::OuterE>(&lean_pk.delta_g1));
+    for g in &lean_pk.a_query_wit {
+        published.insert(key::<C::OuterE>(g));
+    }
+    for g in &lean_pk.b_g1_query {
+        published.insert(key::<C::OuterE>(g));
+    }
+    for g in &lean_pk.l_query {
+        published.insert(key::<C::OuterE>(g));
+    }
+    for &(_, _, g) in &lean_pk.h_query_wit {
+        published.insert(key::<C::OuterE>(&g));
+    }
+
+    // Audit: none of the omitted gap preimages may appear verbatim in the published set.
+    let mut offenders: Vec<(u32, u32)> = Vec::new();
+    for &(i, j, g) in omitted_gap_bases {
+        if published.contains(&key::<C::OuterE>(&g)) {
+            offenders.push((i, j));
+            if offenders.len() >= 8 {
+                break;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "[SECURITY AUDIT FAIL] Omitted (const,wit) gap preimage bases appear verbatim among published G1 handles. \
+        Example offending pairs: {:?}",
+        offenders
+    );
 }
 
 fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
