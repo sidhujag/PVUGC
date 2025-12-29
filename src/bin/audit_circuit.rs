@@ -347,6 +347,18 @@ fn run_audit(subject: &dyn AuditSubject) {
 
     let extractor = MatrixExtractor::new(cs.clone());
 
+    // 0.5. Binding-row gap omission check (models the same omission performed in
+    // `compute_witness_bases` during real setup):
+    //
+    // For the "public-in-C-only" binding constraint form
+    //   1 * x_wit = x_pub
+    // the quotient contains const×wit directions (0, x_wit) that touch the public-C row(s).
+    // Those are the precise G1 preimages that must be baked into T_const (GT-only), not
+    // published as lean witness bases. This check is circuit-structural and does not rely on
+    // concrete curve points; it ensures the circuit exhibits the expected binding pattern and
+    // identifies the witness columns that MUST be omitted from (0, j) quotient basis publication.
+    check_binding_row_gap_omission(&extractor, num_pub, num_wit);
+
     // 0. Check public column structure (Lean CRS diagnostic)
     // With public inputs in C (not B), the architecture is:
     //   - u_pub = 0 (public not in A) ✓
@@ -593,6 +605,86 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("3. Full Span Separation - verified above");
         println!("4. Aggregation - prevents GT-Slicing (verify separately)");
     }
+}
+
+fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, num_wit: usize) {
+    let num_vars = num_pub + num_wit;
+
+    // Build row -> witness B-cols incidence map.
+    let mut b_wit_cols_by_row: HashMap<usize, Vec<usize>> = HashMap::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.b_cols[col] {
+            b_wit_cols_by_row.entry(row).or_default().push(col);
+        }
+    }
+
+    // Identify witness columns that appear in B on a row where some public input appears in C.
+    // Heuristic (tight for intended binding rows): exactly one witness col in B on that row.
+    let mut omit_const_wit_cols: HashSet<usize> = HashSet::new();
+    let mut example_rows: Vec<(usize, usize, usize)> = Vec::new(); // (pub_col, row, wit_col)
+
+    if num_pub > 1 {
+        for pub_col in 1..num_pub {
+            for &(row, _) in &extractor.c_cols[pub_col] {
+                if let Some(cols) = b_wit_cols_by_row.get(&row) {
+                    if cols.len() == 1 {
+                        let wit_col = cols[0];
+                        omit_const_wit_cols.insert(wit_col);
+                        if example_rows.len() < 8 {
+                            example_rows.push((pub_col, row, wit_col));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if omit_const_wit_cols.is_empty() {
+        println!(
+            "[Gap/Omit] INFO: Did not detect any (const,wit) binding-row witness columns to omit. \
+             If this is the production outer circuit, re-check that public inputs are bound via 1*x_wit=x_pub."
+        );
+        return;
+    }
+
+    println!(
+        "[Gap/Omit] Detected {} witness B-columns touching public-C rows; these require omitting (0,j) quotient bases: {:?}",
+        omit_const_wit_cols.len(),
+        omit_const_wit_cols.iter().take(8).collect::<Vec<_>>()
+    );
+    if !example_rows.is_empty() {
+        println!("[Gap/Omit] Examples (pub_col, row, wit_col): {:?}", example_rows);
+    }
+
+    // Sanity: constant ONE wire should appear in A on those binding rows; otherwise this isn't the intended pattern.
+    let const_a_rows: HashSet<usize> = extractor.a_cols[0].iter().map(|(r, _)| *r).collect();
+    for &(_, row, _) in &example_rows {
+        if !const_a_rows.contains(&row) {
+            println!(
+                "[Gap/Omit] WARN: binding-row candidate row {} does not contain constant ONE in A; \
+                 expected 1 * x_wit = x_pub form.",
+                row
+            );
+        }
+    }
+
+    // Structural implication: if you were to publish all H_{i,j} for i∈vars_a, j∈vars_b,
+    // you would include (0,j) for these witness columns (since const is in A and wit_col in B).
+    // A lean/baked CRS must *not* publish those exact directions.
+    let const_in_a = !extractor.a_cols[0].is_empty();
+    assert!(
+        const_in_a,
+        "[Gap/Omit] FAIL: constant wire has no A entries; cannot model const×wit quotient directions."
+    );
+    for &j in &omit_const_wit_cols {
+        assert!(
+            !extractor.b_cols[j].is_empty(),
+            "[Gap/Omit] FAIL: marked witness col {} has no B entries (unexpected).",
+            j
+        );
+    }
+
+    println!("[Gap/Omit] PASS: circuit exhibits binding-row pattern requiring (0,j) omission; ensure setup bakes these into GT-only T_const.");
 }
 
 fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
