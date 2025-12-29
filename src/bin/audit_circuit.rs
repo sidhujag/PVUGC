@@ -618,6 +618,14 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
         }
     }
 
+    // Build row -> witness A-cols incidence map.
+    let mut a_wit_cols_by_row: HashMap<usize, Vec<usize>> = HashMap::new();
+    for col in num_pub..num_vars {
+        for &(row, _) in &extractor.a_cols[col] {
+            a_wit_cols_by_row.entry(row).or_default().push(col);
+        }
+    }
+
     // Identify witness columns that appear in B on a row where some public input appears in C.
     // Heuristic (tight for intended binding rows): exactly one witness col in B on that row.
     let mut omit_const_wit_cols: HashSet<usize> = HashSet::new();
@@ -659,6 +667,12 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
     );
     if !example_rows.is_empty() {
         println!("[Gap/Omit] Examples (pub_col, row, wit_col): {:?}", example_rows);
+    }
+
+    // Collect the binding rows (union across all public inputs) for later "quotient handle family" checks.
+    let mut binding_rows_all: HashSet<usize> = HashSet::new();
+    for rows in binding_rows_by_wit_col.values() {
+        binding_rows_all.extend(rows.iter().copied());
     }
 
     // Sanity: constant ONE wire should appear in A on those binding rows; otherwise this isn't the intended pattern.
@@ -729,6 +743,114 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
                 wit_col
             );
         }
+
+        // Enforce "A-only-const" and "B-only-witcopy" on binding rows (span-relevant uniqueness):
+        // - A must have no witness cols on binding rows (u_wit=0 on those rows)
+        // - B must have exactly this wit_col (no other witness cols in B on those rows)
+        for row in &binding_rows {
+            if let Some(a_wits) = a_wit_cols_by_row.get(row) {
+                let mut a_wits_sorted = a_wits.clone();
+                a_wits_sorted.sort_unstable();
+                panic!(
+                    "[Gap/Omit] FAIL: binding row {} has witness columns in A (expected A has only const-1). \
+                     witness_a_cols={:?}",
+                    row, a_wits_sorted
+                );
+            }
+            let b_wits = b_wit_cols_by_row.get(row).cloned().unwrap_or_default();
+            if b_wits.len() != 1 || b_wits[0] != wit_col {
+                let mut b_wits_sorted = b_wits;
+                b_wits_sorted.sort_unstable();
+                panic!(
+                    "[Gap/Omit] FAIL: binding row {} does not have exactly one witness column in B matching wit_col {}. \
+                     witness_b_cols={:?}",
+                    row, wit_col, b_wits_sorted
+                );
+            }
+        }
+    }
+
+    // Optional (but explicit) quotient-preimage handle family check:
+    //
+    // If we model the "publishable quotient-preimage handles" as the (i,j) family produced by
+    // `compute_witness_bases`/lean CRS (i.e., no generic PoT/Lagrange quotient basis is published),
+    // then for every *publishable* pair (i,j) we should have zero mass on the binding rows.
+    //
+    // Concretely: for every binding row r, there must not exist a publishable pair (i,j) with
+    // i supported in A on r AND j supported in B on r, except the intentionally omitted (0, wit_col).
+    //
+    // This makes the "row-unique ⇒ not-in-span" claim mechanically obvious inside the quotient-handle family.
+    if !binding_rows_all.is_empty() {
+        // Determine which columns participate in A and B at all (within the QAP domain).
+        let mut vars_a: Vec<usize> = Vec::new();
+        let mut vars_b: Vec<usize> = Vec::new();
+        for col in 0..num_vars {
+            if !extractor.a_cols[col].is_empty() {
+                vars_a.push(col);
+            }
+            if !extractor.b_cols[col].is_empty() {
+                vars_b.push(col);
+            }
+        }
+
+        // Precompute row-sets for faster intersection checks.
+        let mut a_rows_by_col: Vec<HashSet<usize>> = vec![HashSet::new(); num_vars];
+        let mut b_rows_by_col: Vec<HashSet<usize>> = vec![HashSet::new(); num_vars];
+        for col in 0..num_vars {
+            a_rows_by_col[col].extend(extractor.a_cols[col].iter().map(|(r, _)| *r));
+            b_rows_by_col[col].extend(extractor.b_cols[col].iter().map(|(r, _)| *r));
+        }
+
+        let mut offenders: Vec<(usize, usize, usize)> = Vec::new(); // (row, i, j)
+        for &i in &vars_a {
+            for &j in &vars_b {
+                // Model the lean/publication discipline: never publish pairs that reference public indices (excluding const 0).
+                let i_is_public = i > 0 && i < num_pub;
+                let j_is_public = j > 0 && j < num_pub;
+                if i_is_public || j_is_public {
+                    continue;
+                }
+                // Skip pure public pairs (should be irrelevant here anyway).
+                if i < num_pub && j < num_pub {
+                    continue;
+                }
+                // Skip the intentionally omitted (0, wit_col) pairs.
+                if i == 0 && omit_const_wit_cols.contains(&j) {
+                    continue;
+                }
+                // Skip the forbidden (0,0) const×const family (never published).
+                if i == 0 && j == 0 {
+                    continue;
+                }
+
+                // Check whether this pair has simultaneous support on any binding row.
+                // That is: rows(A_i) ∩ rows(B_j) ∩ binding_rows_all ≠ ∅.
+                // (If so, this publishable quotient-handle family would have mass on binding rows.)
+                for row in a_rows_by_col[i]
+                    .intersection(&b_rows_by_col[j])
+                    .copied()
+                    .filter(|r| binding_rows_all.contains(r))
+                {
+                    offenders.push((row, i, j));
+                    if offenders.len() >= 8 {
+                        break;
+                    }
+                }
+                if offenders.len() >= 8 {
+                    break;
+                }
+            }
+            if offenders.len() >= 8 {
+                break;
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "[Gap/Omit] FAIL: found publishable quotient-preimage (i,j) pairs with mass on binding rows (should be impossible under A-only-const/B-only-witcopy discipline). \
+             Example offenders (row,i,j): {:?}",
+            offenders
+        );
     }
 
     println!("[Gap/Omit] PASS: circuit exhibits binding-row pattern requiring (0,j) omission; ensure setup bakes these into GT-only T_const.");
