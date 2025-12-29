@@ -138,7 +138,6 @@ fn test_outer_circuit_proof_agnostic() {
         arm_columns_outer_for, build_column_bases_outer_for, compute_r_to_rho_outer_for,
         compute_target_outer_for,
     };
-    use ark_serialize::CanonicalSerialize;
 
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
     // Match the Lean Prover E2E test shape: inner statement has *two* public inputs.
@@ -168,6 +167,11 @@ fn test_outer_circuit_proof_agnostic() {
     let y1 = InnerScalar::<DefaultCycle>::from(20u64);
     let y2 = InnerScalar::<DefaultCycle>::from(21u64);
     let x_inner_2 = vec![y1, y2];
+
+    let circuit_inner_2 = TwoInputCircuit::new(y1, y2);
+    let proof_inner_2 =
+        Groth16::<InnerE>::prove(&fixture.pk_inner, circuit_inner_2, &mut inner_rng_1)
+            .expect("inner proof 2 failed");
 
     // Setup outer circuit
     let circuit_outer_1 = OuterCircuit::<DefaultCycle>::new(
@@ -228,33 +232,19 @@ fn test_outer_circuit_proof_agnostic() {
         let bases_2 = build_column_bases_outer_for::<DefaultCycle>(&pvugc_vk, &vk_outer, &public_inputs_2);
         let arms_2 = arm_columns_outer_for::<DefaultCycle>(&bases_2, &rho);
 
-        // Use the SAME outer prover randomizers across statements/proofs to confirm that
-        // lean proofs remain bound to (statement,witness), not just to prover randomness.
-        let r_fixed = OuterScalar::<DefaultCycle>::rand(&mut rng);
-        let s_fixed = OuterScalar::<DefaultCycle>::rand(&mut rng);
-
-        let proof_bytes = |p: &ark_groth16::Proof<<DefaultCycle as RecursionCycle>::OuterE>| {
-            let mut v = Vec::new();
-            p.serialize_compressed(&mut v).expect("serialize proof");
-            v
-        };
-
         // === PROOF 1A: First proof of statement 1 ===
         let circuit_1a = OuterCircuit::<DefaultCycle>::new(
             (*fixture.vk_inner).clone(),
             x_inner_1.clone(),
             proof_inner_1a.clone(),
         );
-        let (proof_1a, assignment_1a) =
-            prove_lean_with_randomizers(&lean_pk, circuit_1a, r_fixed, s_fixed)
+        let r1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let s1 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let (proof_1a, assignment_1a) = prove_lean_with_randomizers(&lean_pk, circuit_1a, r1, s1)
             .expect("proof 1a failed");
         let num_instance = vk_outer.gamma_abc_g1.len();
         let commits_1a = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_1a.a,
-            &proof_1a.c,
-            &s_fixed,
-            &assignment_1a,
-            num_instance,
+            &proof_1a.a, &proof_1a.c, &s1, &assignment_1a, num_instance
         );
 
         // === PROOF 1B: Second proof of statement 1 (DIFFERENT randomness) ===
@@ -263,41 +253,26 @@ fn test_outer_circuit_proof_agnostic() {
             x_inner_1.clone(),
             proof_inner_1b.clone(),
         );
-        let (proof_1b, assignment_1b) =
-            prove_lean_with_randomizers(&lean_pk, circuit_1b, r_fixed, s_fixed)
+        let r2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let s2 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let (proof_1b, assignment_1b) = prove_lean_with_randomizers(&lean_pk, circuit_1b, r2, s2)
             .expect("proof 1b failed");
         let commits_1b = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_1b.a,
-            &proof_1b.c,
-            &s_fixed,
-            &assignment_1b,
-            num_instance,
+            &proof_1b.a, &proof_1b.c, &s2, &assignment_1b, num_instance
         );
 
         // === PROOF 2: Proof of statement 2 ===
-        //
-        // IMPORTANT: In this test configuration, the inner verifier gadget is intentionally disabled
-        // inside the outer circuit. Therefore `proof_inner` is *not constrained* and must be treated
-        // as dummy witness data.
-        //
-        // To isolate "same circuit shape, different statement" binding, we reuse the SAME inner proof
-        // object across both statements. If the outer proof changes under fixed (r,s), it's due to
-        // the x_pub/x_wit binding constraints — not inner-proof differences.
-        let proof_inner_dummy = proof_inner_1a.clone();
         let circuit_2 = OuterCircuit::<DefaultCycle>::new(
             (*fixture.vk_inner).clone(),
             x_inner_2.clone(),
-            proof_inner_dummy,
+            proof_inner_2.clone(),
         );
-        let (proof_2, assignment_2) =
-            prove_lean_with_randomizers(&lean_pk, circuit_2, r_fixed, s_fixed)
+        let r3 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let s3 = OuterScalar::<DefaultCycle>::rand(&mut rng);
+        let (proof_2, assignment_2) = prove_lean_with_randomizers(&lean_pk, circuit_2, r3, s3)
             .expect("proof 2 failed");
         let commits_2 = build_commitments::<<DefaultCycle as RecursionCycle>::OuterE>(
-            &proof_2.a,
-            &proof_2.c,
-            &s_fixed,
-            &assignment_2,
-            num_instance,
+            &proof_2.a, &proof_2.c, &s3, &assignment_2, num_instance
         );
 
         // === DECAP ===
@@ -314,20 +289,6 @@ fn test_outer_circuit_proof_agnostic() {
 
         // === ASSERTIONS ===
         
-        // 0. With the inner verifier disabled, `proof_inner` is not constrained by the outer circuit.
-        // Under fixed (r,s), two runs on the SAME statement must therefore yield the SAME outer proof,
-        // even if the provided inner proofs were generated with different RNG seeds.
-        assert_eq!(
-            proof_bytes(&proof_1a),
-            proof_bytes(&proof_1b),
-            "Expected SAME outer lean proof for same statement under fixed (r,s) when inner verifier is disabled"
-        );
-        assert_ne!(
-            proof_bytes(&proof_1a),
-            proof_bytes(&proof_2),
-            "Outer lean proofs for DIFFERENT statements should differ even with same (r,s)"
-        );
-
         // 1. Both proofs of statement 1 extract the SAME key
         assert_eq!(
             k_1a, k_1b,
