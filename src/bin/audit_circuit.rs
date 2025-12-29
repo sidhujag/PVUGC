@@ -621,6 +621,7 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
     // Identify witness columns that appear in B on a row where some public input appears in C.
     // Heuristic (tight for intended binding rows): exactly one witness col in B on that row.
     let mut omit_const_wit_cols: HashSet<usize> = HashSet::new();
+    let mut binding_rows_by_wit_col: HashMap<usize, HashSet<usize>> = HashMap::new();
     let mut example_rows: Vec<(usize, usize, usize)> = Vec::new(); // (pub_col, row, wit_col)
 
     if num_pub > 1 {
@@ -630,6 +631,10 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
                     if cols.len() == 1 {
                         let wit_col = cols[0];
                         omit_const_wit_cols.insert(wit_col);
+                        binding_rows_by_wit_col
+                            .entry(wit_col)
+                            .or_default()
+                            .insert(row);
                         if example_rows.len() < 8 {
                             example_rows.push((pub_col, row, wit_col));
                         }
@@ -682,6 +687,48 @@ fn check_binding_row_gap_omission(extractor: &MatrixExtractor, num_pub: usize, n
             "[Gap/Omit] FAIL: marked witness col {} has no B entries (unexpected).",
             j
         );
+    }
+
+    // Stronger structural check: each detected witness-copy column must be isolated.
+    //
+    // In the intended outer circuit, each public input x_pub is bound via:
+    //   1 * x_wit = x_pub
+    // so x_wit should appear in B only on the binding row(s) where x_pub appears in C.
+    // If x_wit appears in B on any other row, then omitting (0,j) would also omit witness-dependent
+    // quotient mass and the "bake into T_const" story would no longer be valid.
+    for &wit_col in &omit_const_wit_cols {
+        let binding_rows = binding_rows_by_wit_col
+            .get(&wit_col)
+            .cloned()
+            .unwrap_or_default();
+        let b_rows: HashSet<usize> = extractor.b_cols[wit_col].iter().map(|(r, _)| *r).collect();
+
+        // We expect exact equality in the current binding design (typically |binding_rows|=1 for each wit_col).
+        if b_rows != binding_rows {
+            let mut extra: Vec<usize> = b_rows.difference(&binding_rows).copied().collect();
+            extra.sort_unstable();
+            let mut missing: Vec<usize> = binding_rows.difference(&b_rows).copied().collect();
+            missing.sort_unstable();
+            panic!(
+                "[Gap/Omit] FAIL: witness-copy column {} is not isolated. \
+                 B-rows for this column must match detected binding rows exactly.\n\
+                 binding_rows={:?}\n\
+                 b_rows={:?}\n\
+                 extra_b_rows={:?}\n\
+                 missing_b_rows={:?}",
+                wit_col, binding_rows, b_rows, extra, missing
+            );
+        }
+
+        // Also enforce const-in-A on all binding rows for this wit_col (tightens the "const×wit" story).
+        for row in &binding_rows {
+            assert!(
+                const_a_rows.contains(row),
+                "[Gap/Omit] FAIL: binding row {} for witness-copy column {} does not contain constant ONE in A.",
+                row,
+                wit_col
+            );
+        }
     }
 
     println!("[Gap/Omit] PASS: circuit exhibits binding-row pattern requiring (0,j) omission; ensure setup bakes these into GT-only T_const.");
