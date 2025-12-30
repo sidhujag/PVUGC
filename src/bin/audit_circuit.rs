@@ -114,8 +114,20 @@ enum TrapdoorMonomial {
     DeltaUV,     // ρ * delta * u * V
     DeltaPureUV, // ρ * delta * u * v
     AlphaDeltaSq, // ρ * alpha * delta^2
+    BetaDeltaSq,  // ρ * beta  * delta^2
+    DeltaSq,      // ρ *        delta^2   (from e([δ]_1, [δ]_2^ρ) under δ-normalization)
+    BetaSqDelta,  // ρ * beta^2 * delta   (from e([β]_1, D_pub^ρ) where D_pub carries β·δ)
+    BetaDeltaVPub, // ρ * beta * delta * V_pub (from e([β]_1, D_pub^ρ) where D_pub carries δ·V_pub)
     BetaV,       // ρ * v * beta
     PureVV,      // ρ * v * v
+
+    // ============================================================
+    // Conservative "weird pairing" cross-terms (Armed, deg_ρ = 1)
+    // ============================================================
+    // Over-approximation: pairing a published B-query handle [v_k]_1 against the *bundled public* armed leg
+    // D_pub^ρ = (β + V_pub)^ρ can introduce ρ·v_k·V_pub terms. In the ideal PVUGC OuterCircuit v_pub=0 so
+    // this is identically zero, but we include it anyway to avoid under-modeling.
+    VPubVWit,    // ρ * V_pub * v_wit
     
     // ============================================================
     // δ²·polynomial TERMS (Armed, deg_ρ = 1)
@@ -124,10 +136,25 @@ enum TrapdoorMonomial {
     // 
     // In PVUGC:
     // - Public A-queries are zeroed (u_pub = 0), so only DeltaSqUWit needed
-    // - Public B-queries are NOT zeroed (v_pub ≠ 0), so we need BOTH Pub and Wit
+    // - For the intended OuterCircuit architecture we also aim for v_pub = 0 (public appears in C only),
+    //   but we still track BOTH Pub/Wit variants here because `b_g1_query` exists for all columns and the
+    //   auditor may be run on subjects where v_pub ≠ 0.
     DeltaSqUWit, // ρ * delta^2 * u_wit (from e(u_k, δ^ρ), k >= num_pub)
     DeltaSqVPub, // ρ * delta^2 * v_pub (from e(v_k, δ^ρ), k < num_pub)
     DeltaSqVWit, // ρ * delta^2 * v_wit (from e(v_k, δ^ρ), k >= num_pub)
+
+    // ============================================================
+    // VK/IC-derived TERMS (Armed, deg_ρ = 1)
+    // ============================================================
+    // These correspond to pairing the *public* Groth16 IC(x) (a G1 element computed from vk.gamma_abc_g1 and x)
+    // against δ₂^ρ. We track them explicitly so the Gaussian-elimination span check covers the
+    // "attacker takes arbitrary linear combos of published G1 points" concern on VK handles too.
+    //
+    // Note: we model γ⁻¹ as an algebraically independent symbol (the attacker has γ₂ ∈ G2 but not γ as a scalar),
+    // so these monomials are distinct from the target’s β·δ·U_pub / α·δ·V_pub / δ·W_pub directions.
+    BetaDeltaSqOverGammaUPub,   // ρ * (beta * delta^2 / gamma) * U_pub
+    AlphaDeltaSqOverGammaVPub,  // ρ * (alpha * delta^2 / gamma) * V_pub
+    DeltaSqOverGammaWPub,       // ρ * (delta^2 / gamma) * W_pub
 }
 
 struct TrapdoorPolyVector {
@@ -1459,12 +1486,22 @@ fn check_independence_streaming(
         TrapdoorMonomial::DeltaUV,
         TrapdoorMonomial::DeltaPureUV,
         TrapdoorMonomial::AlphaDeltaSq,
+        TrapdoorMonomial::BetaDeltaSq,
+        TrapdoorMonomial::DeltaSq,
+        TrapdoorMonomial::BetaSqDelta,
+        TrapdoorMonomial::BetaDeltaVPub,
         TrapdoorMonomial::BetaV,
         TrapdoorMonomial::PureVV,
         // δ²·polynomial terms
         TrapdoorMonomial::DeltaSqUWit,
         TrapdoorMonomial::DeltaSqVPub,
         TrapdoorMonomial::DeltaSqVWit,
+        // Conservative "weird pairing" cross-term
+        TrapdoorMonomial::VPubVWit,
+        // VK/IC(x)-derived (γ⁻¹-tagged) directions (conservative completeness)
+        TrapdoorMonomial::BetaDeltaSqOverGammaUPub,
+        TrapdoorMonomial::AlphaDeltaSqOverGammaVPub,
+        TrapdoorMonomial::DeltaSqOverGammaWPub,
     ];
     for m in all_monos {
         mono_set.insert(m);
@@ -1505,13 +1542,18 @@ fn check_independence_streaming(
         }
     };
 
+    let mut u_pub_r = Fr::zero();
     let mut v_pub_r = Fr::zero();
+    let mut w_pub_r = Fr::zero();
     assert_eq!(pub_polys.len(), pub_coeffs.len());
-    for ((_, v, _), a_i) in pub_polys.iter().zip(pub_coeffs.iter()) {
+    for ((u, v, w), a_i) in pub_polys.iter().zip(pub_coeffs.iter()) {
         if a_i.is_zero() {
             continue;
         }
-        v_pub_r += v.evaluate(&r) * a_i;
+        let a = *a_i;
+        u_pub_r += u.evaluate(&r) * a;
+        v_pub_r += v.evaluate(&r) * a;
+        w_pub_r += w.evaluate(&r) * a;
     }
 
     let total_cols = num_vars;
@@ -1624,6 +1666,23 @@ fn check_independence_streaming(
         // v_k (G1) * beta (G2) -> v * beta
         add_basis_vec("Raw B BetaV", k, vec![(TrapdoorMonomial::BetaV, v_val)]);
         add_basis_vec("Raw B PureVV", k, vec![(TrapdoorMonomial::PureVV, v_val)]);
+
+        // 7b. Conservative: B-query paired against bundled public leg D_pub^ρ = (β + V_pub)^ρ.
+        //
+        // This can introduce a cross-term ρ·v_k·V_pub in GT. If the circuit enforces v_pub = 0
+        // (public columns absent from B), then V_pub is just the constant-column polynomial and
+        // for k in witness columns this still does not help reach the target’s missing public-C
+        // gap direction; but we include it anyway to avoid under-modeling.
+        //
+        // Model: e([v_k]_1, D_pub^ρ) = ρ·(β·v_k + V_pub·v_k)
+        // We already model β·v_k via BetaV; here we add the explicit V_pub·v_k cross-term.
+        if k >= num_pub {
+            add_basis_vec(
+                "Raw B * D_pub^rho cross-term",
+                k,
+                vec![(TrapdoorMonomial::VPubVWit, v_val * v_pub_r)],
+            );
+        }
         
     }
     println!(
@@ -1666,6 +1725,71 @@ fn check_independence_streaming(
         "Alpha * delta_rho",
         usize::MAX,
         vec![(TrapdoorMonomial::AlphaDeltaSq, Fr::one())],
+    );
+
+    // 10b. Beta * delta_rho - from e([β]_1, δ₂^ρ) = ρ·β·δ; under δ-normalization → ρ·β·δ²
+    add_basis_vec(
+        "Beta * delta_rho",
+        usize::MAX,
+        vec![(TrapdoorMonomial::BetaDeltaSq, Fr::one())],
+    );
+
+    // 10c. Delta * delta_rho - from e([δ]_1, δ₂^ρ) = ρ·δ·δ; under δ-normalization → ρ·δ²
+    add_basis_vec(
+        "Delta * delta_rho",
+        usize::MAX,
+        vec![(TrapdoorMonomial::DeltaSq, Fr::one())],
+    );
+
+    // 10d. Beta * D_pub^rho (public bundled G2^rho leg): from e([β]_1, y_cols_rho[0]).
+    // D_pub carries (β·δ + δ·V_pub), so we model β·(β·δ + δ·V_pub) = β²·δ + β·δ·V_pub.
+    add_basis_vec(
+        "Beta * y_cols_rho[0] (D_pub bundled)",
+        usize::MAX,
+        vec![
+            (TrapdoorMonomial::BetaSqDelta, Fr::one()),
+            (TrapdoorMonomial::BetaDeltaVPub, v_pub_r),
+        ],
+    );
+
+    // 10e. Delta * D_pub^rho (public bundled G2^rho leg): from e([δ]_1, y_cols_rho[0]).
+    // δ·(β·δ + δ·V_pub) = β·δ² + δ²·V_pub.
+    add_basis_vec(
+        "Delta * y_cols_rho[0] (D_pub bundled)",
+        usize::MAX,
+        vec![
+            (TrapdoorMonomial::BetaDeltaSq, Fr::one()),
+            (TrapdoorMonomial::DeltaSqVPub, v_pub_r),
+        ],
+    );
+
+    // 10f. Beta/Delta paired against witness Y_j^ρ (span): attacker has all y_cols_rho[j] for witness columns.
+    // We conservatively include the full monomial directions these singletons enable.
+    add_basis_vec(
+        "Beta * y_cols_rho[wit] (V_wit span)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::BetaV, Fr::one())],
+    );
+    add_basis_vec(
+        "Delta * y_cols_rho[wit] (V_wit span)",
+        usize::MAX,
+        vec![(TrapdoorMonomial::DeltaSqVWit, Fr::one())],
+    );
+
+    // 11. IC(x) * delta_rho (VK handle): attacker can compute IC(x) in G1 from vk.gamma_abc_g1 and x,
+    // then pair it against δ₂^ρ to get a ρ-tagged γ⁻¹ family direction.
+    //
+    // We model γ⁻¹ as algebraically independent, so these do not help span the target’s γ-free
+    // β·δ·U_pub / α·δ·V_pub / δ·W_pub components, but including them makes the GE check match the
+    // "arbitrary linear combinations of published G1 points" threat model more literally.
+    add_basis_vec(
+        "IC(x) * delta_rho (VK gamma_abc_g1 handle)",
+        usize::MAX,
+        vec![
+            (TrapdoorMonomial::BetaDeltaSqOverGammaUPub, u_pub_r),
+            (TrapdoorMonomial::AlphaDeltaSqOverGammaVPub, v_pub_r),
+            (TrapdoorMonomial::DeltaSqOverGammaWPub, w_pub_r),
+        ],
     );
 
     let residue = basis.reduce(target_vec);
