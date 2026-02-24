@@ -236,6 +236,61 @@ impl AuditSubject for MockQuadratic {
     }
 }
 
+/// TEST CIRCUIT: Binding witness used as mul output.
+///
+/// Public inputs: x0, x1, x2
+/// Witness:       y0, y1, y2, z
+///
+/// Constraints:
+///   1 * y0 = x0
+///   1 * y1 = x1
+///   1 * y2 = x2
+///   z * z  = y0
+///
+/// This passes "publics are C-only" but SHOULD FAIL the additional guard:
+/// the binding witness wire `y0` is produced by a true multiplication gate.
+struct MockLevBindingMul;
+impl AuditSubject for MockLevBindingMul {
+    fn name(&self) -> &'static str {
+        "Mock Lev BindingMul (SHOULD FAIL BindMul)"
+    }
+
+    fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
+        // Choose x0 as a likely non-square in typical SNARK fields so the circuit is
+        // plausibly unsatisfiable, but satisfiability is NOT required for structural audit.
+        let x0 = Fr::from(5u64);
+        let x1 = Fr::from(11u64);
+        let x2 = Fr::from(13u64);
+
+        let x0_pub = cs.new_input_variable(|| Ok(x0))?;
+        let x1_pub = cs.new_input_variable(|| Ok(x1))?;
+        let x2_pub = cs.new_input_variable(|| Ok(x2))?;
+
+        // Witness copies used in the binding constraints.
+        let y0 = cs.new_witness_variable(|| Ok(x0))?;
+        let y1 = cs.new_witness_variable(|| Ok(x1))?;
+        let y2 = cs.new_witness_variable(|| Ok(x2))?;
+        let z = cs.new_witness_variable(|| Ok(Fr::zero()))?;
+
+        let one_lc = LinearCombination::from((Fr::one(), Variable::One));
+
+        // Binding constraints: 1 * y_i = x_i  (public appears only in C)
+        for (x_pub, y_wit) in [(x0_pub, y0), (x1_pub, y1), (x2_pub, y2)] {
+            let lc_b = LinearCombination::from((Fr::one(), y_wit));
+            let lc_c = LinearCombination::from((Fr::one(), x_pub));
+            cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+        }
+
+        // Multiplication gate that outputs into binding witness: z * z = y0.
+        let lc_a = LinearCombination::from((Fr::one(), z));
+        let lc_b = LinearCombination::from((Fr::one(), z));
+        let lc_c = LinearCombination::from((Fr::one(), y0));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+
+        Ok(())
+    }
+}
+
 /// TEST CIRCUIT: V Span Separation SHOULD FAIL
 /// For v_pub ∈ span(v_wit), we need v_pub = c * v_wit (scalar multiple).
 /// 
@@ -350,6 +405,7 @@ fn main() {
     let subjects: Vec<Box<dyn AuditSubject>> = vec![
         Box::new(MockLinear),
         Box::new(MockQuadratic),
+        Box::new(MockLevBindingMul),    // Should FAIL BindMul guard
         Box::new(MockSpanViolation),    // Should FAIL V-span
         Box::new(MockUSpanViolation),   // Should FAIL U-span
         Box::new(MockWSpanViolation),   // Should FAIL W-span
@@ -460,6 +516,23 @@ fn run_audit(subject: &dyn AuditSubject) {
     // Verify Q_const ∉ span(H_{ij})
     // This is the "gold standard" check for quotient reachability
     verify_public_only_in_c_and_w_span_separated(&extractor, num_pub, num_wit);
+
+    // Additional guard: forbid "witness*witness -> binding-witness" patterns.
+    //
+    // Motivation:
+    //   z * z = y0
+    //   1 * y0 = x0   (public-C binding)
+    //
+    // Even if publics are C-only, letting the *binding witness wire* (the one that touches
+    // a public-C row) be produced by a true multiplication gate is a different shape from
+    // the intended OuterCircuit design where binding wires are linear-only.
+    let binding_witness_ok =
+        check_no_mul_outputs_into_binding_witness(&extractor, num_pub, num_wit);
+    if binding_witness_ok {
+        println!("[PASS] Binding-witness wires are not mul outputs.");
+    } else {
+        println!("[FAIL] Binding-witness wire produced by multiplication row.");
+    }
 
     // Additional guard: ensure no public column appears in both A and B on the same row
     let no_pub_ab_overlap = check_public_ab_overlap(&extractor, num_pub);
@@ -620,6 +693,106 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("3. Full Span Separation - verified above");
         println!("4. Aggregation - prevents GT-Slicing (verify separately)");
     }
+}
+
+/// Detect (and reject) circuits where a "binding witness" wire is produced by a real
+/// multiplication gate.
+///
+/// Definition used here:
+/// - "public-C rows" are constraint rows where some true public input column (1..num_pub-1)
+///   appears in C.
+/// - "binding witness columns" are witness columns (>= num_pub) that appear in B on any
+///   public-C row. This matches the intended `1 * x_wit = x_pub` binding pattern.
+/// - A "true multiplication row" is a row where A has some non-constant variable and B has
+///   some non-constant variable (i.e. not just the ONE wire at column 0).
+///
+/// We flag if any binding witness column appears in C on a true multiplication row.
+fn check_no_mul_outputs_into_binding_witness(
+    extractor: &MatrixExtractor,
+    num_pub: usize,
+    num_wit: usize,
+) -> bool {
+    let domain_size = extractor.domain.size();
+    let num_vars = num_pub + num_wit;
+
+    // Rows where true public inputs (excluding ONE at col 0) appear in C.
+    let mut public_c_rows: HashSet<usize> = HashSet::new();
+    for col in 1..num_pub {
+        for &(row, coeff) in &extractor.c_cols[col] {
+            if row < domain_size && !coeff.is_zero() {
+                public_c_rows.insert(row);
+            }
+        }
+    }
+
+    // Witness columns that touch B on any public-C row (intended to be x_wit binders).
+    let mut binding_wit_cols: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, coeff) in &extractor.b_cols[col] {
+            if row < domain_size && !coeff.is_zero() && public_c_rows.contains(&row) {
+                binding_wit_cols.insert(col);
+            }
+        }
+    }
+
+    println!("\n=== Binding Witness × Mul-Output Check ===");
+    if binding_wit_cols.is_empty() {
+        println!("  [BindMul] INFO: no witness columns touch public-C rows in B.");
+        println!("           This is stronger than expected; nothing to check here.");
+        return true;
+    }
+    println!(
+        "  [BindMul] Binding witness columns (touch public-C rows in B): {}",
+        binding_wit_cols.len()
+    );
+
+    // Precompute row-level predicates:
+    // - row_has_a_nonconst: some column != 0 appears in A on this row.
+    // - row_has_b_nonconst: some column != 0 appears in B on this row.
+    let mut row_has_a_nonconst = vec![false; domain_size];
+    let mut row_has_b_nonconst = vec![false; domain_size];
+    for col in 1..num_vars {
+        for &(row, coeff) in &extractor.a_cols[col] {
+            if row < domain_size && !coeff.is_zero() {
+                row_has_a_nonconst[row] = true;
+            }
+        }
+        for &(row, coeff) in &extractor.b_cols[col] {
+            if row < domain_size && !coeff.is_zero() {
+                row_has_b_nonconst[row] = true;
+            }
+        }
+    }
+
+    // Rows where any binding witness column appears in C.
+    let mut bad_rows: Vec<usize> = Vec::new();
+    for &col in &binding_wit_cols {
+        for &(row, coeff) in &extractor.c_cols[col] {
+            if row >= domain_size || coeff.is_zero() {
+                continue;
+            }
+            // True multiplication row: A(nonconst) and B(nonconst).
+            if row_has_a_nonconst[row] && row_has_b_nonconst[row] {
+                bad_rows.push(row);
+            }
+        }
+    }
+
+    bad_rows.sort_unstable();
+    bad_rows.dedup();
+
+    if bad_rows.is_empty() {
+        println!("  [BindMul] PASS: no binding witness column is a mul output.");
+        return true;
+    }
+
+    let show = bad_rows.len().min(10);
+    println!(
+        "  [BindMul] FAIL: binding witness appears in C on {} true-mul row(s). Example rows: {:?}",
+        bad_rows.len(),
+        &bad_rows[..show]
+    );
+    false
 }
 
 fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
