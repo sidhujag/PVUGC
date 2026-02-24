@@ -1,256 +1,113 @@
-//! PVUGC Operations on Outer Curve
-//!
-//! Thin wrappers that apply PVUGC column operations to the OUTER proof.
-//! All PVUGC logic runs on BW6-761 (outer curve) which has constant-size right-legs.
+use std::{collections::HashSet, time::Instant};
 
-use crate::arming::{ColumnArms, ColumnBases};
-use crate::outer_compressed::{
-    fr_inner_to_outer_for, InnerProof, InnerScalar, InnerVk, OuterCircuit,
-    OuterScalar, RecursionCycle,
-};
-use crate::ppe::PvugcVk;
-use crate::prover_lean::LeanProvingKey;
-use ark_ec::pairing::{Pairing, PairingOutput};
-use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{Field, One, PrimeField, Zero};
-use ark_groth16::{
-    r1cs_to_qap::PvugcReduction, Groth16, ProvingKey as Groth16PK, VerifyingKey as Groth16VK,
-};
+use anyhow::{anyhow, Result};
+use ark_ec::pairing::PairingOutput;
+use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::{pairing::Pairing, VariableBaseMSM};
+use ark_ff::{Field, Zero, One, PrimeField, UniformRand};
+use ark_groth16::Groth16;
+use ark_groth16::r1cs_to_qap::PvugcReduction;
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
-use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, OptimizationGoal};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_relations::r1cs::{
+    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, LinearCombination,
+    OptimizationGoal, SynthesisError, Variable,
+};
+use ark_snark::SNARK;
+use ark_std::rand::{rngs::StdRng, SeedableRng};
+use arkworks_groth16::{ColumnArms, LeanProvingKey, OneSidedPvugc, PvugcVk, pvugc_outer::WitnessBasesResult};
+use arkworks_groth16::decap::{build_commitments, decap};
+use arkworks_groth16::{prover_lean, pvugc_outer::*};
+use rand_core::{CryptoRng, RngCore};
 use rayon::prelude::*;
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
-use std::time::Instant;
 
-/// Public alias for Groth16 proving key (single-curve, non-recursive use).
-pub type Groth16Pk<E> = ark_groth16::ProvingKey<E>;
-/// Public alias for Groth16 verifying key (single-curve, non-recursive use).
-pub type Groth16Vk<E> = ark_groth16::VerifyingKey<E>;
+pub type Groth16PK<E> = ark_groth16::ProvingKey<E>;
+pub type Groth16VK<E> = ark_groth16::VerifyingKey<E>;
 
-type StatementVec<C> = Vec<InnerScalar<C>>;
 
-/// Build PVUGC VK and Lean PK from the OUTER proving key.
-///
-/// IMPORTANT: When the Groth16 verifier gadget is enabled in the outer circuit,
-/// the q_const computation needs to generate valid inner proofs for each sampled
-/// statement. This requires the inner proving key.
-///
-/// The `inner_proof_generator` closure takes a vector of statement values (one per
-/// public input) and returns a valid inner Groth16 proof for that statement.
-/// This ensures the outer circuit's verifier constraints are satisfied during
-/// q_const computation.
-pub fn build_pvugc_setup_from_pk_for<C, F>(
-    pk_outer: &Groth16PK<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    inner_proof_generator: F,
-) -> (PvugcVk<C::OuterE>, LeanProvingKey<C::OuterE>)
-where
-    C: RecursionCycle,
-    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
-{
-    let n_inner_inputs = vk_inner.gamma_abc_g1.len() - 1;
-    let canonical_samples = canonical_sample_statements::<C>(n_inner_inputs);
-    build_pvugc_setup_from_pk_for_with_samples::<C, F>(
-        pk_outer,
-        vk_inner,
-        inner_proof_generator,
-        canonical_samples,
-    )
+
+#[derive(Clone, Debug)]
+pub struct ExampleAttackWitness<F: PrimeField> {
+    pub y: F,
+    pub y_unlocc: F,
+    pub z: F,
+    pub w: F,
 }
 
-pub fn build_pvugc_setup_from_pk_for_with_samples<C, F>(
-    pk_outer: &Groth16PK<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    inner_proof_generator: F,
-    sample_statements: Vec<StatementVec<C>>,
-) -> (PvugcVk<C::OuterE>, LeanProvingKey<C::OuterE>)
-where
-    C: RecursionCycle,
-    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
-{
-    let start = Instant::now();
-    println!("[Setup] Starting PVUGC Setup from PK...");
+#[derive(Clone)]
+pub struct ExampleAttackCircuit<F: PrimeField> {
+    pub x: Option<F>,
+    pub witness: Option<ExampleAttackWitness<F>>,
+}
 
-    let n_inner_inputs = vk_inner.gamma_abc_g1.len() - 1;
-    println!(
-        "[Setup] Inner public inputs (packed outer instances): {}",
-        n_inner_inputs
-    );
-    assert_eq!(
-        sample_statements.len(),
-        n_inner_inputs + 1,
-        "sample statements must provide n+1 entries"
-    );
-
-    // Sanitize cycle name for filename and derive a hash of the verifying key (circuit)
-    // so caches from different circuits never collide.
-    let safe_name = C::name().replace('/', "_").replace(' ', "_");
-    let cache_path = format!("outer_lean_setup_pk_vk_{}.bin", safe_name);
-
-    let cache_file = std::path::Path::new(&cache_path);
-    let (lean_pk, t_const_gt) = if cache_file.exists() {
-        println!("[Setup] Found cached setup at {}, loading...", cache_path);
-        let file = File::open(&cache_path).expect("failed to open cached setup");
-        let reader = BufReader::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
-        let (pk, t_gt): (
-            LeanProvingKey<C::OuterE>,
-            Vec<PairingOutput<C::OuterE>>,
-        ) = CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
-            .expect("failed to deserialize setup");
-        println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
-        (pk, t_gt)
-    } else {
-        println!("[Setup] No cache found. Computing witness bases...");
-        let wb_result = compute_witness_bases::<C>(pk_outer, vk_inner, n_inner_inputs);
-        println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
-
-        audit_witness_bases::<C>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
-        
-        let lean_pk = LeanProvingKey {
-            vk: pk_outer.vk.clone(),
-            beta_g1: pk_outer.beta_g1,
-            delta_g1: pk_outer.delta_g1,
-            a_query_wit: {
-                let q = pk_outer.a_query.clone();
-                let num_public = pk_outer.vk.gamma_abc_g1.len();
-                for i in 1..num_public {
-                    if i < q.len() {
-                        assert!(
-                            q[i].is_zero(),
-                            "[SECURITY AUDIT FAIL] a_query has non-zero public handle at index {}. \
-                             Expected a_query[1..num_public) to be zero (public-in-C-only).",
-                            i
-                        );
-                    }
-                }
-                q
-            },
-            b_g1_query: pk_outer.b_g1_query.clone(),
-            b_g2_query: pk_outer.b_g2_query.clone(),
-            h_query_wit: wb_result.h_query_wit,
-            l_query: pk_outer.l_query.clone(),
-        };
-
-        // Gap-preimage audit: since LeanProvingKey is public in the WE deployment, guard against
-        // accidentally publishing the exact omitted (0,j) gap handles through some other G1 vector.
-        audit_gap_preimages_not_directly_published::<C>(&lean_pk, &wb_result.omitted_gap_bases);
-
-        // Pre-serialization audit: ensure the exact lean CRS view we will serialize/publish
-        // contains no forbidden public handles or forbidden basis categories.
-        let num_public = lean_pk.vk.gamma_abc_g1.len(); // includes constant "1" at index 0
-        for (i, g) in lean_pk.a_query_wit.iter().enumerate().take(num_public).skip(1) {
-            assert!(
-                g.is_zero(),
-                "[SECURITY AUDIT FAIL] LeanProvingKey leaks A-query public handle at index {}.",
-                i
-            );
+impl<F: PrimeField> ExampleAttackCircuit<F> {
+    pub fn with_witness(x: F, witness: ExampleAttackWitness<F>) -> Self {
+        Self {
+            x: Some(x),
+            witness: Some(witness),
         }
-        for &(i, j, base) in &lean_pk.h_query_wit {
-            let i_idx = i as usize;
-            let j_idx = j as usize;
-            assert!(
-                !base.is_zero(),
-                "[SECURITY AUDIT FAIL] h_query_wit contains a zero base at ({}, {}).",
-                i,
-                j
-            );
-            // For publication, forbid referencing any public column index (excluding const 0).
-            if (i_idx > 0 && i_idx < num_public) || (j_idx > 0 && j_idx < num_public) {
-                panic!(
-                    "[SECURITY AUDIT FAIL] h_query_wit contains a public-index pair ({}, {}). \
-                     Public indices (1..num_public) must not appear in published witness bases.",
-                    i,
-                    j
-                );
-            }
-            if i_idx == 0 && j_idx == 0 {
-                panic!("[SECURITY AUDIT FAIL] h_query_wit contains forbidden (0,0) const×const basis.");
-            }
-        }
-
-        println!("[Setup] Computing q_points from gap (using custom samples)...");
-        let t_const_gt = compute_t_const_points_gt_from_gap::<C, F>(
-            pk_outer,
-            &lean_pk,
-            vk_inner,
-            &sample_statements,
-            &inner_proof_generator,
-        );
-        println!("[Setup] t_const_points_gt computed in {:?}", start.elapsed());
-        println!("[Setup] Serializing setup to {}...", cache_path);
-        let file = File::create(&cache_path).expect("failed to create cache file");
-        let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
-        (lean_pk.clone(), t_const_gt.clone())
-            .serialize_uncompressed(&mut writer)
-            .expect("failed to serialize setup");
-        writer.flush().expect("failed to flush buffer");
-        (lean_pk, t_const_gt)
-    };
-
-    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
-        pk_outer.vk.beta_g2,
-        pk_outer.vk.delta_g2,
-        pk_outer.b_g2_query.clone(),
-        t_const_gt,
-    );
-
-    println!("[Setup] Complete.");
-    (pvugc_vk, lean_pk)
+    }
 }
 
-pub fn build_pvugc_vk_outer_from_pk_for<C, F>(
-    pk_outer: &Groth16PK<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    inner_proof_generator: F,
-) -> PvugcVk<C::OuterE>
-where
-    C: RecursionCycle,
-    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
-{
-    build_pvugc_setup_from_pk_for::<C, F>(pk_outer, vk_inner, inner_proof_generator).0
+impl<F: PrimeField> ConstraintSynthesizer<F> for ExampleAttackCircuit<F> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
+        let x = self.x.ok_or(SynthesisError::AssignmentMissing)?;
+        let w = self.witness.ok_or(SynthesisError::AssignmentMissing)?;
+
+        let x_pub = cs.new_input_variable(|| Ok(x))?;
+        let y = cs.new_witness_variable(|| Ok(w.y))?;
+        let y_unlocc = cs.new_witness_variable(|| Ok(w.y_unlocc))?;
+        let z = cs.new_witness_variable(|| Ok(w.z))?;
+        let w_var = cs.new_witness_variable(|| Ok(w.w))?;
+
+        let one_lc = LinearCombination::from((F::one(), Variable::One));
+
+        // 1 * y = x_pub  (public appears only in C)
+        let lc_b = LinearCombination::from((F::one(), y));
+        let lc_c = LinearCombination::from((F::one(), x_pub));
+        cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+
+        // 1 * y_unlocc = y
+        let lc_b = LinearCombination::from((F::one(), y_unlocc));
+        let lc_c = LinearCombination::from((F::one(), y));
+        cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+
+        // y_unlocc * (y_unlocc + 1) = z
+        let lc_a = LinearCombination::from((F::one(), y_unlocc));
+        let lc_b = LinearCombination(vec![(F::one(), y_unlocc), (F::one(), Variable::One)]);
+        let lc_c = LinearCombination::from((F::one(), z));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+
+        // w * w = z
+        let lc_a = LinearCombination::from((F::one(), w_var));
+        let lc_b = LinearCombination::from((F::one(), w_var));
+        let lc_c = LinearCombination::from((F::one(), z));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+
+        Ok(())
+    }
 }
 
-pub fn build_column_bases_outer_for<C: RecursionCycle>(
-    pvugc_vk: &PvugcVk<C::OuterE>,
-    vk_outer: &Groth16VK<C::OuterE>,
-    public_inputs_outer: &[OuterScalar<C>],
-) -> ColumnBases<C::OuterE> {
-    crate::api::OneSidedPvugc::build_column_bases(pvugc_vk, vk_outer, public_inputs_outer)
-        .expect("outer statement should satisfy PVUGC invariants")
+pub fn try_make_witness<F: PrimeField>(
+    x: F,
+) -> Option<ExampleAttackWitness<F>> {
+    let y = x;
+    let y_unlocc = y;
+    let z = y * (y + F::one());
+    z.sqrt().map(|w| ExampleAttackWitness { y, y_unlocc, z, w })
 }
 
-/// Result of computing witness bases
-pub struct WitnessBasesResult<E: Pairing> {
-    /// Sparse H_{ij} bases for witness terms (off-diagonal and diagonal contributions)
-    pub h_query_wit: Vec<(u32, u32, E::G1Affine)>,
-    /// The omitted "gap preimage" bases (const×wit) for witness columns that touch public-C
-    /// binding rows. These are intentionally NOT published, but we compute them during setup
-    /// to audit that they do not appear verbatim among any other published G1 handles.
-    ///
-    /// Note: this is a direct-leak guard, not a full span-solve proof.
-    pub omitted_gap_bases: Vec<(u32, u32, E::G1Affine)>,
-}
-
-fn compute_witness_bases<C: RecursionCycle>(
-    pk: &Groth16PK<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    n_inner_inputs: usize,
-) -> WitnessBasesResult<C::OuterE> {
+fn compute_witness_bases<E: Pairing>(
+    pk: &Groth16PK<E>,
+) -> WitnessBasesResult<E> {
     let start = Instant::now();
     println!("[Quotient] Synthesizing Circuit...");
 
-    let dummy_x = vec![InnerScalar::<C>::from(0u64); n_inner_inputs];
-    let dummy_proof = crate::outer_compressed::InnerProof::<C> {
-        a: Default::default(),
-        b: Default::default(),
-        c: Default::default(),
-    };
-    let circuit = OuterCircuit::<C>::new(vk_inner.clone(), dummy_x, dummy_proof);
+    let circuit = ExampleAttackCircuit::with_witness(
+        E::ScalarField::zero(), 
+        try_make_witness(E::ScalarField::zero()).unwrap()
+    );
 
-    let cs = ConstraintSystem::<OuterScalar<C>>::new_ref();
+    let cs = ConstraintSystem::<E::ScalarField>::new_ref();
     cs.set_optimization_goal(OptimizationGoal::Constraints);
     circuit
         .generate_constraints(cs.clone())
@@ -265,9 +122,9 @@ fn compute_witness_bases<C: RecursionCycle>(
     let num_inputs = cs.num_instance_variables(); // includes constant 1
     let qap_domain_size = num_constraints + num_inputs;
 
-    let domain = GeneralEvaluationDomain::<OuterScalar<C>>::new(qap_domain_size)
+    let domain = GeneralEvaluationDomain::<E::ScalarField>::new(qap_domain_size)
         .or_else(|| {
-            GeneralEvaluationDomain::<OuterScalar<C>>::new(qap_domain_size.next_power_of_two())
+            GeneralEvaluationDomain::<E::ScalarField>::new(qap_domain_size.next_power_of_two())
         })
         .expect("domain creation failed");
     let domain_size = domain.size();
@@ -306,7 +163,7 @@ fn compute_witness_bases<C: RecursionCycle>(
     let fft_start = Instant::now();
     let mut h_query_proj: Vec<_> = pk.h_query.iter().map(|p| p.into_group()).collect();
     if h_query_proj.len() < domain_size {
-        h_query_proj.resize(domain_size, <C::OuterE as Pairing>::G1::zero());
+        h_query_proj.resize(domain_size, E::G1::zero());
     } else {
         h_query_proj.truncate(domain_size);
     }
@@ -430,10 +287,10 @@ fn compute_witness_bases<C: RecursionCycle>(
 
     let n_field = domain.size_as_field_element();
     let t0 =
-        (n_field - OuterScalar::<C>::one()) * (n_field + n_field).inverse().expect("2n invertible");
+        (n_field - E::ScalarField::one()) * (n_field + n_field).inverse().expect("2n invertible");
 
     // 1. Build kernel u
-    let mut u = vec![OuterScalar::<C>::zero(); domain_size];
+    let mut u = vec![E::ScalarField::zero(); domain_size];
     u[0] = t0;
 
     // u[j] = 1 / (n * (1 - omega^j))
@@ -443,7 +300,7 @@ fn compute_witness_bases<C: RecursionCycle>(
 
     for j in 1..domain_size {
         let omega_j = domain.element(j);
-        let denom = n_field * (OuterScalar::<C>::one() - omega_j);
+        let denom = n_field * (E::ScalarField::one() - omega_j);
         denoms.push(denom);
         indices.push(j);
     }
@@ -528,8 +385,8 @@ fn compute_witness_bases<C: RecursionCycle>(
             // Build MSM tasks per pair, then run them in parallel. This preserves high throughput
             // on many-core machines (nested parallelism can help here).
             let mut msm_tasks: Vec<(
-                Vec<<C::OuterE as Pairing>::G1Affine>,
-                Vec<OuterScalar<C>>,
+                Vec<E::G1Affine>,
+                Vec<E::ScalarField>,
                 (u32, u32),
             )> = Vec::with_capacity(chunk.len());
 
@@ -549,8 +406,8 @@ fn compute_witness_bases<C: RecursionCycle>(
 
                 let i_idx = i as usize;
                 let j_idx = j as usize;
-                let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
-                let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
+                let rows_u: &Vec<(usize, E::ScalarField)> = &col_a[i_idx];
+                let rows_v: &Vec<(usize, E::ScalarField)> = &col_b[j_idx];
 
                 if rows_u.is_empty() || rows_v.is_empty() {
                     continue;
@@ -561,14 +418,14 @@ fn compute_witness_bases<C: RecursionCycle>(
 
                 // 1. Accumulate coefficients
                 acc_u.clear();
-                acc_u.resize(n_u, OuterScalar::<C>::zero());
+                acc_u.resize(n_u, E::ScalarField::zero());
                 acc_v.clear();
-                acc_v.resize(n_v, OuterScalar::<C>::zero());
+                acc_v.resize(n_v, E::ScalarField::zero());
 
                 // Extra bases for diagonal contributions (using q_vector)
                 // We may encounter multiple diagonal hits (k==m) per (i,j). Aggregate them by k so each
                 // q_vector[k] appears at most once in the MSM (reduces MSM size noticeably for dense overlaps).
-                let mut diag_terms: Vec<(usize, OuterScalar<C>)> = Vec::new();
+                let mut diag_terms: Vec<(usize, E::ScalarField)> = Vec::new();
                 diag_terms.reserve(std::cmp::min(n_u, n_v));
 
                 for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
@@ -620,7 +477,7 @@ fn compute_witness_bases<C: RecursionCycle>(
                 if !diag_terms.is_empty() {
                     diag_terms.sort_unstable_by_key(|(k, _)| *k);
                     let mut cur_k = diag_terms[0].0;
-                    let mut cur_acc = OuterScalar::<C>::zero();
+                    let mut cur_acc = E::ScalarField::zero();
                     for (k, s) in diag_terms.into_iter() {
                         if k != cur_k {
                             if !cur_acc.is_zero() {
@@ -645,10 +502,10 @@ fn compute_witness_bases<C: RecursionCycle>(
             }
 
             // Process MSMs in parallel for this chunk.
-            let msm_results: Vec<((u32, u32), <C::OuterE as Pairing>::G1)> = msm_tasks
+            let msm_results: Vec<((u32, u32), E::G1)> = msm_tasks
                 .into_par_iter()
                 .map(|(bases, scalars, pair_id)| {
-                    let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+                    let h_acc = E::G1::msm(&bases, &scalars).unwrap();
                     (pair_id, h_acc)
                 })
                 .filter(|(_, h_acc)| !h_acc.is_zero())
@@ -663,7 +520,7 @@ fn compute_witness_bases<C: RecursionCycle>(
 
             let mut affine_results = Vec::with_capacity(point_accs.len());
             if !point_accs.is_empty() {
-                let affines = <C::OuterE as Pairing>::G1::normalize_batch(&point_accs);
+                let affines = E::G1::normalize_batch(&point_accs);
                 for (idx, affine) in affines.into_iter().enumerate() {
                     affine_results.push((point_ids[idx].0, point_ids[idx].1, affine));
                 }
@@ -708,10 +565,10 @@ fn compute_witness_bases<C: RecursionCycle>(
     //
     // This is intentionally computed after the parallel h_wit construction: omit_const_wit_cols
     // is tiny (≈ number of public inputs), so a sequential computation is fine.
-    let mut omitted_gap_bases: Vec<(u32, u32, <C::OuterE as Pairing>::G1Affine)> = Vec::new();
+    let mut omitted_gap_bases: Vec<(u32, u32, E::G1Affine)> = Vec::new();
     if !omit_const_wit_cols.is_empty() {
-        let mut acc_u: Vec<OuterScalar<C>> = Vec::new();
-        let mut acc_v: Vec<OuterScalar<C>> = Vec::new();
+        let mut acc_u: Vec<E::ScalarField> = Vec::new();
+        let mut acc_v: Vec<E::ScalarField> = Vec::new();
 
         for &j in omit_const_wit_cols.iter() {
             let i_idx = 0usize;
@@ -719,8 +576,8 @@ fn compute_witness_bases<C: RecursionCycle>(
             if i_idx >= col_a.len() || j_idx >= col_b.len() {
                 continue;
             }
-            let rows_u: &Vec<(usize, OuterScalar<C>)> = &col_a[i_idx];
-            let rows_v: &Vec<(usize, OuterScalar<C>)> = &col_b[j_idx];
+            let rows_u: &Vec<(usize, E::ScalarField)> = &col_a[i_idx];
+            let rows_v: &Vec<(usize, E::ScalarField)> = &col_b[j_idx];
             if rows_u.is_empty() || rows_v.is_empty() {
                 continue;
             }
@@ -728,11 +585,11 @@ fn compute_witness_bases<C: RecursionCycle>(
             let n_u = rows_u.len();
             let n_v = rows_v.len();
             acc_u.clear();
-            acc_u.resize(n_u, OuterScalar::<C>::zero());
+            acc_u.resize(n_u, E::ScalarField::zero());
             acc_v.clear();
-            acc_v.resize(n_v, OuterScalar::<C>::zero());
+            acc_v.resize(n_v, E::ScalarField::zero());
 
-            let mut diag_terms: Vec<(usize, OuterScalar<C>)> = Vec::new();
+            let mut diag_terms: Vec<(usize, E::ScalarField)> = Vec::new();
             diag_terms.reserve(std::cmp::min(n_u, n_v));
 
             for (idx_u, &(_, val_u)) in rows_u.iter().enumerate() {
@@ -754,9 +611,9 @@ fn compute_witness_bases<C: RecursionCycle>(
                 }
             }
 
-            let mut bases: Vec<<C::OuterE as Pairing>::G1Affine> =
+            let mut bases: Vec<E::G1Affine> =
                 Vec::with_capacity(n_u + n_v + diag_terms.len());
-            let mut scalars: Vec<OuterScalar<C>> = Vec::with_capacity(n_u + n_v + diag_terms.len());
+            let mut scalars: Vec<E::ScalarField> = Vec::with_capacity(n_u + n_v + diag_terms.len());
 
             for (idx_u, &(k, _)) in rows_u.iter().enumerate() {
                 if !acc_u[idx_u].is_zero() {
@@ -774,7 +631,7 @@ fn compute_witness_bases<C: RecursionCycle>(
             if !diag_terms.is_empty() {
                 diag_terms.sort_unstable_by_key(|(k, _)| *k);
                 let mut cur_k = diag_terms[0].0;
-                let mut cur_acc = OuterScalar::<C>::zero();
+                let mut cur_acc = E::ScalarField::zero();
                 for (k, s) in diag_terms.into_iter() {
                     if k != cur_k {
                         if !cur_acc.is_zero() {
@@ -796,7 +653,7 @@ fn compute_witness_bases<C: RecursionCycle>(
             if bases.is_empty() {
                 continue;
             }
-            let h_acc = <C::OuterE as Pairing>::G1::msm(&bases, &scalars).unwrap();
+            let h_acc = E::G1::msm(&bases, &scalars).unwrap();
             if h_acc.is_zero() {
                 continue;
             }
@@ -809,45 +666,9 @@ fn compute_witness_bases<C: RecursionCycle>(
         omitted_gap_bases,
     }
 }
-// --- Group FFT Helpers ---
 
-pub fn parallel_fft_scalar<F: PrimeField>(a: &mut [F], domain: &GeneralEvaluationDomain<F>) {
-    let n = a.len();
-    if n <= 1 {
-        return;
-    }
-    let log_n = n.trailing_zeros();
-
-    for k in 0..n {
-        let rk = k.reverse_bits() >> (usize::BITS - log_n);
-        if k < rk {
-            a.swap(k, rk);
-        }
-    }
-
-    let mut m = 1;
-    while m < n {
-        let omega_m = domain.element(domain.size() / (2 * m));
-
-        // chunk_size = 2*m
-        // We can process in parallel if chunks are large enough
-        // For scalars, rayon might add overhead for small chunks, but let's stick to pattern
-        a.par_chunks_mut(2 * m).for_each(|chunk| {
-            let mut w = F::one();
-            for j in 0..m {
-                let t = chunk[j + m] * w;
-                let u = chunk[j];
-                chunk[j] = u + t;
-                chunk[j + m] = u - t;
-                w *= omega_m;
-            }
-        });
-        m *= 2;
-    }
-}
-
-fn audit_witness_bases<C: RecursionCycle>(
-    wb: &WitnessBasesResult<C::OuterE>,
+fn audit_witness_bases<E: Pairing>(
+    wb: &WitnessBasesResult<E>,
     num_public: usize,
 ) {
     // 1. Check for pure public pairs in h_query_wit
@@ -959,9 +780,9 @@ fn audit_witness_bases<C: RecursionCycle>(
     }
 }
 
-fn audit_gap_preimages_not_directly_published<C: RecursionCycle>(
-    lean_pk: &LeanProvingKey<C::OuterE>,
-    omitted_gap_bases: &[(u32, u32, <C::OuterE as Pairing>::G1Affine)],
+fn audit_gap_preimages_not_directly_published<E: Pairing>(
+    lean_pk: &LeanProvingKey<E>,
+    omitted_gap_bases: &[(u32, u32, E::G1Affine)],
 ) {
     use ark_serialize::CanonicalSerialize;
 
@@ -979,31 +800,31 @@ fn audit_gap_preimages_not_directly_published<C: RecursionCycle>(
     let mut published: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
     // VK G1 handles
-    published.insert(key::<C::OuterE>(&lean_pk.vk.alpha_g1));
+    published.insert(key::<E>(&lean_pk.vk.alpha_g1));
     for g in &lean_pk.vk.gamma_abc_g1 {
-        published.insert(key::<C::OuterE>(g));
+        published.insert(key::<E>(g));
     }
 
     // Lean PK extra G1 handles
-    published.insert(key::<C::OuterE>(&lean_pk.beta_g1));
-    published.insert(key::<C::OuterE>(&lean_pk.delta_g1));
+    published.insert(key::<E>(&lean_pk.beta_g1));
+    published.insert(key::<E>(&lean_pk.delta_g1));
     for g in &lean_pk.a_query_wit {
-        published.insert(key::<C::OuterE>(g));
+        published.insert(key::<E>(g));
     }
     for g in &lean_pk.b_g1_query {
-        published.insert(key::<C::OuterE>(g));
+        published.insert(key::<E>(g));
     }
     for g in &lean_pk.l_query {
-        published.insert(key::<C::OuterE>(g));
+        published.insert(key::<E>(g));
     }
     for &(_, _, g) in &lean_pk.h_query_wit {
-        published.insert(key::<C::OuterE>(&g));
+        published.insert(key::<E>(&g));
     }
 
     // Audit: none of the omitted gap preimages may appear verbatim in the published set.
     let mut offenders: Vec<(u32, u32)> = Vec::new();
     for &(i, j, g) in omitted_gap_bases {
-        if published.contains(&key::<C::OuterE>(&g)) {
+        if published.contains(&key::<E>(&g)) {
             offenders.push((i, j));
             if offenders.len() >= 8 {
                 break;
@@ -1018,82 +839,25 @@ fn audit_gap_preimages_not_directly_published<C: RecursionCycle>(
     );
 }
 
-pub fn parallel_fft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
-    a: &mut [G],
-    domain: &GeneralEvaluationDomain<F>,
-) {
-    let n = a.len();
-    if n <= 1 {
-        return;
-    }
-    let log_n = n.trailing_zeros();
-
-    // Serial bit reverse (fast enough)
-    for k in 0..n {
-        let rk = k.reverse_bits() >> (usize::BITS - log_n);
-        if k < rk {
-            a.swap(k, rk);
-        }
-    }
-
-    let mut m = 1;
-    while m < n {
-        let omega_m = domain.element(domain.size() / (2 * m));
-
-        // Parallel Butterfly
-        a.par_chunks_mut(2 * m).for_each(|chunk| {
-            let mut w = F::one();
-            for j in 0..m {
-                let t = chunk[j + m] * w;
-                let u = chunk[j];
-                chunk[j] = u + t;
-                chunk[j + m] = u - t;
-                w *= omega_m;
-            }
-        });
-        m *= 2;
-    }
-}
-
-pub fn parallel_ifft_g1<G: CurveGroup<ScalarField = F> + Send, F: PrimeField>(
-    a: &mut [G],
-    domain: &GeneralEvaluationDomain<F>,
-) {
-    parallel_fft_g1(a, domain);
-    if a.len() > 1 {
-        a[1..].reverse();
-    }
-    let n_inv = domain.size_as_field_element().inverse().unwrap();
-    // Parallel scaling
-    a.par_iter_mut().for_each(|x| *x *= n_inv);
-}
-
 /// Compute T_const basis points in GT:
 ///   T_i = e(Q_i, delta)
 /// where Q(x) = Q_0 + Σ x_i Q_i is the *C-gap* between standard and lean Groth16 proofs.
-pub fn compute_t_const_points_gt_from_gap<C, F>(
-    pk_outer: &Groth16PK<C::OuterE>,
-    lean_pk: &LeanProvingKey<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    sample_statements: &[StatementVec<C>],
-    inner_proof_generator: &F,
-) -> Vec<PairingOutput<C::OuterE>>
-where
-    C: RecursionCycle,
-    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
+pub fn compute_t_const_points_gt_from_gap<E: Pairing>(
+    pk_outer: &Groth16PK<E>,
+    lean_pk: &LeanProvingKey<E>,
+    sample_statements: &[(E::ScalarField, ExampleAttackWitness<E::ScalarField>)],
+) -> Vec<PairingOutput<E>>
 {
-    let q_points_g1 = compute_q_const_points_from_gap::<C, F>(
+    let q_points_g1 = compute_q_const_points_from_gap(
         pk_outer,
         lean_pk,
-        vk_inner,
         sample_statements,
-        inner_proof_generator,
     );
 
     let delta_g2 = pk_outer.vk.delta_g2;
     q_points_g1
         .into_iter()
-        .map(|q| C::OuterE::pairing(q, delta_g2))
+        .map(|q| E::pairing(q, delta_g2))
         .collect()
 }
 
@@ -1102,52 +866,53 @@ where
 ///
 /// IMPORTANT: we *assert* A_std == A_lean and B_std == B_lean (no randomizers / no mismatch),
 /// otherwise your gap is not the quotient-only delta.
-pub fn compute_q_const_points_from_gap<C, F>(
-    pk_outer: &Groth16PK<C::OuterE>,
-    lean_pk: &LeanProvingKey<C::OuterE>,
-    vk_inner: &InnerVk<C>,
-    sample_statements: &[StatementVec<C>],
-    inner_proof_generator: &F,
-) -> Vec<<C::OuterE as Pairing>::G1Affine>
-where
-    C: RecursionCycle,
-    F: Fn(&[InnerScalar<C>]) -> InnerProof<C>,
+pub fn compute_q_const_points_from_gap<E: Pairing>(
+    pk_outer: &Groth16PK<E>,
+    lean_pk: &LeanProvingKey<E>,
+    sample_statements: &[(E::ScalarField, ExampleAttackWitness<E::ScalarField>)],
+) -> Vec<<E as Pairing>::G1Affine>
 {
     assert!(!sample_statements.is_empty(), "need ≥ 1 sample");
-    let n_inner_inputs = sample_statements[0].len();
-    for (i, s) in sample_statements.iter().enumerate() {
-        assert_eq!(
-            s.len(),
-            n_inner_inputs,
-            "sample {} has wrong length: got {}, expected {}",
-            i,
-            s.len(),
-            n_inner_inputs
-        );
-    }
+    // let n_inner_inputs = sample_statements[0].len();
+    // for (i, s) in sample_statements.iter().enumerate() {
+    //     assert_eq!(
+    //         s.len(),
+    //         n_inner_inputs,
+    //         "sample {} has wrong length: got {}, expected {}",
+    //         i,
+    //         s.len(),
+    //         n_inner_inputs
+    //     );
+    // }
 
-    let mut gaps: Vec<(Vec<OuterScalar<C>>, <C::OuterE as Pairing>::G1Affine)> =
+    let mut gaps: Vec<(Vec<E::ScalarField>, E::G1Affine)> =
         Vec::with_capacity(sample_statements.len());
 
     for statement in sample_statements {
-        // Valid inner proof for THIS statement vector.
-        let inner_proof = inner_proof_generator(statement);
+        // // Valid inner proof for THIS statement vector.
+        // let inner_proof = inner_proof_generator(statement);
 
         // Standard proof (no-ZK) for the same circuit instance.
-        let circuit_std = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
-        let proof_std = Groth16::<C::OuterE, PvugcReduction>::create_proof_with_reduction_no_zk(
+        let circuit_std = ExampleAttackCircuit::with_witness(
+            statement.0,
+            statement.1.clone()
+        );
+        let proof_std = Groth16::<E, PvugcReduction>::create_proof_with_reduction_no_zk(
             circuit_std,
             pk_outer,
         )
         .expect("standard proof failed");
 
         // Lean proof with *explicit* r=s=0 (must match standard no-zk shape).
-        let circuit_lean = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof.clone());
-        let (proof_lean, _) = crate::prover_lean::prove_lean_with_randomizers(
+        let circuit_lean = ExampleAttackCircuit::with_witness(
+            statement.0,
+            statement.1.clone()
+        );
+        let (proof_lean, _) = prover_lean::prove_lean_with_randomizers(
             lean_pk,
             circuit_lean,
-            OuterScalar::<C>::zero(),
-            OuterScalar::<C>::zero(),
+            E::ScalarField::zero(),
+            E::ScalarField::zero(),
         )
         .expect("lean proof failed");
 
@@ -1164,33 +929,22 @@ where
         // The gap lives entirely in C:
         let c_gap = proof_std.c.into_group() - proof_lean.c.into_group();
 
-        // Extract outer circuit public inputs (instance assignment minus constant ONE).
-        let circuit_inputs = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof);
-        let cs_inputs = ark_relations::r1cs::ConstraintSystem::<OuterScalar<C>>::new_ref();
-        circuit_inputs
-            .generate_constraints(cs_inputs.clone())
-            .expect("input extraction failed");
-        cs_inputs.finalize();
+        // // Extract outer circuit public inputs (instance assignment minus constant ONE).
+        // let circuit_inputs = OuterCircuit::<C>::new(vk_inner.clone(), statement.clone(), inner_proof);
+        // let cs_inputs = ark_relations::r1cs::ConstraintSystem::<E::ScalarField>::new_ref();
+        // circuit_inputs
+        //     .generate_constraints(cs_inputs.clone())
+        //     .expect("input extraction failed");
+        // cs_inputs.finalize();
 
-        let mut instance = cs_inputs.borrow().unwrap().instance_assignment.clone();
-        let compressed_inputs = instance.split_off(1); // drop constant ONE
+        // let mut instance = cs_inputs.borrow().unwrap().instance_assignment.clone();
+
+        let compressed_inputs = vec![statement.0]; // drop constant ONE
 
         gaps.push((compressed_inputs, c_gap.into_affine()));
     }
 
-    solve_q_const_from_samples::<C>(gaps)
-}
-
-
-pub fn canonical_sample_statements<C: RecursionCycle>(n_inner_inputs: usize) -> Vec<StatementVec<C>> {
-    let mut samples = Vec::with_capacity(n_inner_inputs + 1);
-    samples.push(vec![InnerScalar::<C>::zero(); n_inner_inputs]);
-    for idx in 0..n_inner_inputs {
-        let mut statement = vec![InnerScalar::<C>::zero(); n_inner_inputs];
-        statement[idx] = InnerScalar::<C>::one();
-        samples.push(statement);
-    }
-    samples
+    solve_q_const_from_samples::<E>(gaps)
 }
 
 /// Solve Q_0..Q_n from samples (x_s, gap_s) where gap_s = Q_0 + Σ x_s[i] Q_{i+1}.
@@ -1198,9 +952,9 @@ pub fn canonical_sample_statements<C: RecursionCycle>(n_inner_inputs: usize) -> 
 /// Fast path: if samples are canonical (0, e1, e2, ...), then:
 ///   Q_0 = gap(0)
 ///   Q_{i+1} = gap(e_i) - gap(0)
-pub fn solve_q_const_from_samples<C: RecursionCycle>(
-    gaps: Vec<(Vec<OuterScalar<C>>, <C::OuterE as Pairing>::G1Affine)>,
-) -> Vec<<C::OuterE as Pairing>::G1Affine> {
+pub fn solve_q_const_from_samples<E:Pairing>(
+    gaps: Vec<(Vec<E::ScalarField>, E::G1Affine)>,
+) -> Vec<E::G1Affine> {
     assert!(!gaps.is_empty(), "need ≥ 1 sample");
     let n = gaps[0].0.len();
     assert_eq!(
@@ -1218,7 +972,7 @@ pub fn solve_q_const_from_samples<C: RecursionCycle>(
             (0..n).all(|i| {
                 let row = &gaps[i + 1].0;
                 row.iter().enumerate().all(|(j, v)| {
-                    if j == i { *v == OuterScalar::<C>::one() } else { v.is_zero() }
+                    if j == i { *v == E::ScalarField::one() } else { v.is_zero() }
                 })
             })
         }
@@ -1237,20 +991,20 @@ pub fn solve_q_const_from_samples<C: RecursionCycle>(
 
     // Fallback (generic): solve linear system M * Q = gap.
     let size = n + 1;
-    let mut matrix = vec![vec![OuterScalar::<C>::zero(); size]; size];
+    let mut matrix = vec![vec![E::ScalarField::zero(); size]; size];
     for (row, (x, _)) in gaps.iter().enumerate() {
-        matrix[row][0] = OuterScalar::<C>::one();
+        matrix[row][0] = E::ScalarField::one();
         for (col, value) in x.iter().enumerate() {
             matrix[row][col + 1] = *value;
         }
     }
 
-    let inv = invert_matrix::<C>(matrix);
+    let inv = invert_matrix(matrix);
     let gaps_group: Vec<_> = gaps.iter().map(|(_, gap)| gap.into_group()).collect();
 
     let mut q_points = Vec::with_capacity(size);
     for row in 0..size {
-        let mut acc = <C::OuterE as Pairing>::G1::zero();
+        let mut acc = E::G1::zero();
         for col in 0..size {
             let coeff = inv[row][col];
             if !coeff.is_zero() {
@@ -1262,18 +1016,18 @@ pub fn solve_q_const_from_samples<C: RecursionCycle>(
     q_points
 }
 
-pub fn invert_matrix<C: RecursionCycle>(
-    matrix: Vec<Vec<OuterScalar<C>>>,
-) -> Vec<Vec<OuterScalar<C>>> {
+pub fn invert_matrix<F: PrimeField>(
+    matrix: Vec<Vec<F>>,
+) -> Vec<Vec<F>> {
     let size = matrix.len();
-    let mut aug = vec![vec![OuterScalar::<C>::zero(); 2 * size]; size];
+    let mut aug = vec![vec![F::zero(); 2 * size]; size];
 
     for i in 0..size {
         assert_eq!(matrix[i].len(), size, "non-square matrix");
         for j in 0..size {
             aug[i][j] = matrix[i][j];
         }
-        aug[i][size + i] = OuterScalar::<C>::one();
+        aug[i][size + i] = F::one();
     }
 
     for col in 0..size {
@@ -1303,7 +1057,7 @@ pub fn invert_matrix<C: RecursionCycle>(
         }
     }
 
-    let mut inv = vec![vec![OuterScalar::<C>::zero(); size]; size];
+    let mut inv = vec![vec![F::zero(); size]; size];
     for i in 0..size {
         for j in 0..size {
             inv[i][j] = aug[i][size + j];
@@ -1312,31 +1066,234 @@ pub fn invert_matrix<C: RecursionCycle>(
     inv
 }
 
-pub fn compute_r_to_rho_outer_for<C: RecursionCycle>(
-    r: &PairingOutput<C::OuterE>,
-    rho: &OuterScalar<C>,
-) -> PairingOutput<C::OuterE> {
-    let r_to_rho = r.0.pow(&rho.into_bigint());
-    PairingOutput(r_to_rho)
+
+
+pub fn build_pvugc_setup_for_attack_circuit<E: Pairing>(
+    pk_outer: &Groth16PK<E>,
+) -> (PvugcVk<E>, LeanProvingKey<E>)
+{
+    let start = Instant::now();
+    println!("[Setup] Starting PVUGC Setup from PK...");
+
+    let one = E::ScalarField::one();
+
+    // Need n+1 samples, where n is number of real public inputs.
+    // vk.gamma_abc_g1.len() = n + 1 (includes constant ONE), so this is exactly n+1.
+    let n_samples = pk_outer.vk.gamma_abc_g1.len();
+    let mut samples = vec![];
+    let mut i = one;
+    while samples.len() < n_samples {
+        match try_make_witness(i) {
+            Some(sample) => samples.push((i, sample)),
+            None => {},
+        }
+        i += one;
+    }
+
+    //     let n_inner_inputs = vk_inner.gamma_abc_g1.len() - 1;
+//     println!(
+//         "[Setup] Inner public inputs (packed outer instances): {}",
+//         n_inner_inputs
+//     );
+//     assert_eq!(
+//         sample_statements.len(),
+//         n_inner_inputs + 1,
+//         "sample statements must provide n+1 entries"
+//     );
+
+//     // Sanitize cycle name for filename and derive a hash of the verifying key (circuit)
+//     // so caches from different circuits never collide.
+//     let safe_name = C::name().replace('/', "_").replace(' ', "_");
+//     let cache_path = format!("outer_lean_setup_pk_vk_{}.bin", safe_name);
+
+//     let cache_file = std::path::Path::new(&cache_path);
+//     let (lean_pk, t_const_gt) = if cache_file.exists() {
+//         println!("[Setup] Found cached setup at {}, loading...", cache_path);
+//         let file = File::open(&cache_path).expect("failed to open cached setup");
+//         let reader = BufReader::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
+//         let (pk, t_gt): (
+//             LeanProvingKey<C::OuterE>,
+//             Vec<PairingOutput<C::OuterE>>,
+//         ) = CanonicalDeserialize::deserialize_uncompressed_unchecked(reader)
+//             .expect("failed to deserialize setup");
+//         println!("[Setup] Cached setup loaded in {:?}", start.elapsed());
+//         (pk, t_gt)
+//     } else {
+        println!("[Setup] No cache found. Computing witness bases...");
+        let wb_result = compute_witness_bases(pk_outer);
+        println!("[Setup] Witness Bases Computed in {:?}", start.elapsed());
+
+        audit_witness_bases::<E>(&wb_result, pk_outer.vk.gamma_abc_g1.len());
+        
+        let lean_pk = LeanProvingKey {
+            vk: pk_outer.vk.clone(),
+            beta_g1: pk_outer.beta_g1,
+            delta_g1: pk_outer.delta_g1,
+            a_query_wit: {
+                let q = pk_outer.a_query.clone();
+                let num_public = pk_outer.vk.gamma_abc_g1.len();
+                for i in 1..num_public {
+                    if i < q.len() {
+                        assert!(
+                            q[i].is_zero(),
+                            "[SECURITY AUDIT FAIL] a_query has non-zero public handle at index {}. \
+                             Expected a_query[1..num_public) to be zero (public-in-C-only).",
+                            i
+                        );
+                    }
+                }
+                q
+            },
+            b_g1_query: pk_outer.b_g1_query.clone(),
+            b_g2_query: pk_outer.b_g2_query.clone(),
+            h_query_wit: wb_result.h_query_wit,
+            l_query: pk_outer.l_query.clone(),
+        };
+
+        // Gap-preimage audit: since LeanProvingKey is public in the WE deployment, guard against
+        // accidentally publishing the exact omitted (0,j) gap handles through some other G1 vector.
+        audit_gap_preimages_not_directly_published::<E>(&lean_pk, &wb_result.omitted_gap_bases);
+
+        // Pre-serialization audit: ensure the exact lean CRS view we will serialize/publish
+        // contains no forbidden public handles or forbidden basis categories.
+        let num_public = lean_pk.vk.gamma_abc_g1.len(); // includes constant "1" at index 0
+        for (i, g) in lean_pk.a_query_wit.iter().enumerate().take(num_public).skip(1) {
+            assert!(
+                g.is_zero(),
+                "[SECURITY AUDIT FAIL] LeanProvingKey leaks A-query public handle at index {}.",
+                i
+            );
+        }
+        for &(i, j, base) in &lean_pk.h_query_wit {
+            let i_idx = i as usize;
+            let j_idx = j as usize;
+            assert!(
+                !base.is_zero(),
+                "[SECURITY AUDIT FAIL] h_query_wit contains a zero base at ({}, {}).",
+                i,
+                j
+            );
+            // For publication, forbid referencing any public column index (excluding const 0).
+            if (i_idx > 0 && i_idx < num_public) || (j_idx > 0 && j_idx < num_public) {
+                panic!(
+                    "[SECURITY AUDIT FAIL] h_query_wit contains a public-index pair ({}, {}). \
+                     Public indices (1..num_public) must not appear in published witness bases.",
+                    i,
+                    j
+                );
+            }
+            if i_idx == 0 && j_idx == 0 {
+                panic!("[SECURITY AUDIT FAIL] h_query_wit contains forbidden (0,0) const×const basis.");
+            }
+        }
+
+        println!("[Setup] Computing q_points from gap (using custom samples)...");
+        let t_const_gt = compute_t_const_points_gt_from_gap(
+            pk_outer,
+            &lean_pk,
+            &samples,
+        );
+        // println!("[Setup] t_const_points_gt computed in {:?}", start.elapsed());
+        // println!("[Setup] Serializing setup to {}...", cache_path);
+        // let file = File::create(&cache_path).expect("failed to create cache file");
+        // let mut writer = BufWriter::with_capacity(1024 * 1024 * 1024, file); // 1GB buffer
+        // (lean_pk.clone(), t_const_gt.clone())
+        //     .serialize_uncompressed(&mut writer)
+        //     .expect("failed to serialize setup");
+        // writer.flush().expect("failed to flush buffer");
+    //     (lean_pk, t_const_gt)
+    // };
+
+    let pvugc_vk = PvugcVk::new_with_all_witnesses_isolated(
+        pk_outer.vk.beta_g2,
+        pk_outer.vk.delta_g2,
+        pk_outer.b_g2_query.clone(),
+        t_const_gt,
+    );
+
+    println!("[Setup] Complete.");
+    (pvugc_vk, lean_pk)
 }
 
-pub fn compute_target_outer_for<C: RecursionCycle>(
-    vk_outer: &Groth16VK<C::OuterE>,
-    pvugc_vk: &PvugcVk<C::OuterE>,
-    public_inputs_inner: &[InnerScalar<C>],
-) -> PairingOutput<C::OuterE> {
-    let x_outer: Vec<OuterScalar<C>> = public_inputs_inner
-        .iter()
-        .map(fr_inner_to_outer_for::<C>)
-        .collect();
-
-    crate::ppe::compute_baked_target::<C::OuterE>(vk_outer, pvugc_vk, &x_outer)
-        .expect("failed to compute baked target")
+#[derive(Clone)]
+pub struct AttackerView<E: Pairing> {
+    pub vk: Groth16VK<E>,
+    pub public_inputs: Vec<E::ScalarField>,
+    pub pvugc_vk: PvugcVk<E>,
+    pub lean_pk: LeanProvingKey<E>,
+    pub col_arms: ColumnArms<E>,
 }
 
-pub fn arm_columns_outer_for<C: RecursionCycle>(
-    bases: &ColumnBases<C::OuterE>,
-    rho: &OuterScalar<C>,
-) -> ColumnArms<C::OuterE> {
-    crate::arming::arm_columns(bases, rho).expect("arm_columns failed")
+pub fn solvable_setup<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng) -> (AttackerView<E>, PairingOutput<E>) {
+        // Find a random satisfiable statement for ExampleAttackCircuit.
+    let mut x = E::ScalarField::rand(rng);
+    let _ = loop {
+        if let Some(w) = try_make_witness(x) {
+            break w;
+        }
+        x += E::ScalarField::one();
+    };
+    setup_with_input_e2e::<E, Rng>(rng, x)
+}
+
+pub fn setup_with_input_e2e<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng, x: E::ScalarField) -> (AttackerView<E>, PairingOutput<E>) {
+
+    let public_inputs = vec![x];
+    let witness = try_make_witness(x).expect("setup_with_input_e2e requires satisfiable x");
+
+    let circuit = ExampleAttackCircuit::with_witness(x, witness.clone());
+    let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, rng)
+        .map_err(|e| anyhow!("circuit_specific_setup failed: {e}")).unwrap();
+
+    let (pvugc_vk, lean_pk) = build_pvugc_setup_for_attack_circuit(&pk);
+    let rho = E::ScalarField::rand(rng);
+
+    let (_bases, col_arms, _r_baked, k) =
+        OneSidedPvugc::setup_and_arm(&pvugc_vk, &vk, &public_inputs, &rho)
+            .map_err(|e| anyhow!("setup_and_arm failed: {e}")).unwrap();
+
+    (
+        AttackerView {
+            vk,
+            public_inputs,
+            pvugc_vk,
+            lean_pk,
+            col_arms,
+        },
+        k,
+    )
+}
+
+pub fn decap_e2e<E: Pairing>(view: &AttackerView<E>) -> PairingOutput<E> {
+    let x = view.public_inputs[0];
+    let witness = try_make_witness(x).expect("public input should have satisfiable witness");
+    let circuit = ExampleAttackCircuit::with_witness(x, witness);
+
+    let zero = E::ScalarField::zero();
+
+    let (proof_lean, full_assignment) = prover_lean::prove_lean_with_randomizers(
+        &view.lean_pk,
+        circuit,
+        zero,
+        zero,
+    )
+    .expect("lean proving failed");
+
+    let commitments = build_commitments::<E>(
+        &proof_lean.a,
+        &proof_lean.c,
+        &zero,
+        &full_assignment,
+        view.vk.gamma_abc_g1.len(),
+    );
+
+    decap(&commitments, &view.col_arms).expect("decap failed")
+}
+
+fn main() {
+    let mut rng = StdRng::seed_from_u64(42);
+    let (view, expected_k) = solvable_setup::<ark_bls12_381::Bls12_381, _>(&mut rng);
+    let decapped_k = decap_e2e(&view);
+    assert_eq!(decapped_k, expected_k, "decapsulated key does not match setup key");
+    println!("E2E check passed: decapsulated key matches original k");
 }
