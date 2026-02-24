@@ -534,6 +534,19 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("[FAIL] Binding-witness wire produced by multiplication row.");
     }
 
+    // Additional guard: binding-witness columns must be "hygienic" linear-only glue.
+    //
+    // Intended OuterCircuit shape:
+    // - binding witnesses appear in B only on the public-binding rows (1 * x_wit = x_pub),
+    // - they never appear in A,
+    // - and they never appear in B elsewhere (otherwise they become general witness knobs).
+    let binding_hygiene_ok = check_binding_witness_hygiene(&extractor, num_pub, num_wit);
+    if binding_hygiene_ok {
+        println!("[PASS] Binding-witness hygiene checks.");
+    } else {
+        println!("[FAIL] Binding-witness hygiene checks.");
+    }
+
     // Additional guard: ensure no public column appears in both A and B on the same row
     let no_pub_ab_overlap = check_public_ab_overlap(&extractor, num_pub);
     if no_pub_ab_overlap {
@@ -793,6 +806,114 @@ fn check_no_mul_outputs_into_binding_witness(
         &bad_rows[..show]
     );
     false
+}
+
+/// Additional structural guardrail for the "publics are C-only" architecture.
+///
+/// This is stricter than U/V/W span separation: it pins down the exact *role* of
+/// the binding witness wires.
+///
+/// Checks:
+/// 1) Binding witness columns must have **no A entries** (they should not participate
+///    in multiplicative gates as inputs).
+/// 2) Binding witness columns must have **B entries only on the public-C binding rows**.
+///    (In the intended construction, those are exactly the rows where some public input
+///    appears in C.)
+fn check_binding_witness_hygiene(
+    extractor: &MatrixExtractor,
+    num_pub: usize,
+    num_wit: usize,
+) -> bool {
+    let domain_size = extractor.domain.size();
+    let num_vars = num_pub + num_wit;
+
+    // Rows where true public inputs (excluding ONE at col 0) appear in C.
+    let mut public_c_rows: HashSet<usize> = HashSet::new();
+    for col in 1..num_pub {
+        for &(row, coeff) in &extractor.c_cols[col] {
+            if row < domain_size && !coeff.is_zero() {
+                public_c_rows.insert(row);
+            }
+        }
+    }
+
+    // Binding witness columns: witness columns that touch B on any public-C row.
+    let mut binding_wit_cols: HashSet<usize> = HashSet::new();
+    for col in num_pub..num_vars {
+        for &(row, coeff) in &extractor.b_cols[col] {
+            if row < domain_size && !coeff.is_zero() && public_c_rows.contains(&row) {
+                binding_wit_cols.insert(col);
+            }
+        }
+    }
+
+    println!("\n=== Binding Witness Hygiene Check ===");
+    if binding_wit_cols.is_empty() {
+        println!("  [BindHyg] INFO: no binding witness columns detected (no B-wit on public-C rows).");
+        return true;
+    }
+    let mut cols_sorted: Vec<usize> = binding_wit_cols.iter().copied().collect();
+    cols_sorted.sort_unstable();
+    let show_cols = cols_sorted.len().min(12);
+    println!(
+        "  [BindHyg] Binding witness columns: {} (showing first {}): {:?}",
+        cols_sorted.len(),
+        show_cols,
+        &cols_sorted[..show_cols]
+    );
+
+    // 1) No A entries for binding witness cols.
+    let mut a_offenders: Vec<usize> = Vec::new();
+    for &col in &binding_wit_cols {
+        if extractor.a_cols[col]
+            .iter()
+            .any(|(row, coeff)| *row < domain_size && !coeff.is_zero())
+        {
+            a_offenders.push(col);
+        }
+    }
+    a_offenders.sort_unstable();
+
+    // 2) B entries only on public-C rows.
+    let mut b_bad_rows: Vec<(usize, usize)> = Vec::new(); // (col,row)
+    for &col in &binding_wit_cols {
+        for &(row, coeff) in &extractor.b_cols[col] {
+            if row >= domain_size || coeff.is_zero() {
+                continue;
+            }
+            if !public_c_rows.contains(&row) {
+                b_bad_rows.push((col, row));
+            }
+        }
+    }
+    b_bad_rows.sort_unstable();
+
+    let mut ok = true;
+    if a_offenders.is_empty() {
+        println!("  [BindHyg] PASS: binding witness columns have no A entries.");
+    } else {
+        ok = false;
+        let show = a_offenders.len().min(12);
+        println!(
+            "  [BindHyg] FAIL: binding witness columns appear in A (showing first {}): {:?}",
+            show,
+            &a_offenders[..show]
+        );
+    }
+
+    if b_bad_rows.is_empty() {
+        println!("  [BindHyg] PASS: binding witness columns only appear in B on public-C rows.");
+    } else {
+        ok = false;
+        let show = b_bad_rows.len().min(12);
+        println!(
+            "  [BindHyg] FAIL: binding witness columns appear in B on non-binding rows (showing first {}): {:?}",
+            show,
+            &b_bad_rows[..show]
+        );
+    }
+
+    ok
 }
 
 fn check_public_ab_overlap(extractor: &MatrixExtractor, num_pub: usize) -> bool {
