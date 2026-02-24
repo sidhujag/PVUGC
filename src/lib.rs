@@ -41,6 +41,9 @@ pub mod test_fixtures; // Shared fixtures with disk caching
 
 // SP1 Bridge: Simplified integration for gnark proofs → PVUGC
 pub mod sp1_bridge;
+#[allow(dead_code, unused_imports)]
+#[path = "bin/audit_circuit.rs"]
+mod audit_circuit_bin;
 
 // Re-exports - Public API
 pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
@@ -69,4 +72,8 @@ pub use test_circuits::AddCircuit;
 pub use test_fixtures::{
     get_fixture, get_fixture_bls, get_fixture_mnt, BlsFixture, DefaultFixture, GlobalFixture,
     MntFixture,
+};
+pub use audit_circuit_bin::{
+    build_target, check_independence_streaming, Basis, MatrixExtractor, TrapdoorMonomial,
+    TrapdoorPolyVector,
 };

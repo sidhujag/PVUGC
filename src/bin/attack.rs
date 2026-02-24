@@ -6,10 +6,12 @@ use ark_ec::{AffineRepr, CurveGroup};
 use ark_ec::{pairing::Pairing, VariableBaseMSM};
 use ark_ff::{Field, Zero, One, PrimeField, UniformRand};
 use ark_groth16::Groth16;
-use ark_groth16::r1cs_to_qap::PvugcReduction;
-use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use ark_groth16::r1cs_to_qap::{evaluate_constraint, PvugcReduction};
+#[cfg(test)]
+use ark_groth16::r1cs_to_qap::R1CSToQAP;
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, LinearCombination,
+    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, LinearCombination,
     OptimizationGoal, SynthesisError, Variable,
 };
 use ark_snark::SNARK;
@@ -94,6 +96,441 @@ pub fn try_make_witness<F: PrimeField>(
     let y_unlocc = y;
     let z = y * (y + F::one());
     z.sqrt().map(|w| ExampleAttackWitness { y, y_unlocc, z, w })
+}
+
+/// Computes PVUGC-QAP residual polynomial coefficients:
+///   R(X) = A(X)B(X) - C(X) - Z_H(X) * H(X)
+/// for a provided assignment `(x, w)` and candidate quotient polynomial `H`.
+///
+/// Inputs:
+/// - `public_inputs_no_one`: public inputs without the implicit leading `1`
+/// - `witness_assignment`: witness assignment in CS variable order
+/// - `h_coeffs`: coefficients of H(X) in the monomial basis
+///
+/// Output:
+/// - Coefficients of `R(X)` in the monomial basis.
+pub fn pvugc_qap_error_vector<F: PrimeField>(
+    matrices: &ConstraintMatrices<F>,
+    num_inputs: usize,
+    num_constraints: usize,
+    public_inputs_no_one: &[F],
+    witness_assignment: &[F],
+    h_coeffs: &[F],
+) -> Result<Vec<F>> {
+    if num_inputs == 0 {
+        return Err(anyhow!("num_inputs must include the constant input"));
+    }
+    if public_inputs_no_one.len() + 1 != num_inputs {
+        return Err(anyhow!(
+            "public input length mismatch: got {}, expected {}",
+            public_inputs_no_one.len(),
+            num_inputs - 1
+        ));
+    }
+
+    let mut full_assignment = Vec::with_capacity(num_inputs + witness_assignment.len());
+    full_assignment.push(F::one());
+    full_assignment.extend_from_slice(public_inputs_no_one);
+    full_assignment.extend_from_slice(witness_assignment);
+
+    let domain = GeneralEvaluationDomain::<F>::new(num_constraints + num_inputs)
+        .ok_or_else(|| anyhow!("PolynomialDegreeTooLarge for QAP domain"))?;
+    let domain_size = domain.size();
+    let coset_domain = domain
+        .get_coset(F::GENERATOR)
+        .ok_or_else(|| anyhow!("failed to build multiplicative coset domain"))?;
+
+    let mut a_eval_h = vec![F::zero(); domain_size];
+    let mut b_eval_h = vec![F::zero(); domain_size];
+    let mut c_eval_h = vec![F::zero(); domain_size];
+
+    for i in 0..num_constraints {
+        a_eval_h[i] = evaluate_constraint(&matrices.a[i], &full_assignment);
+        b_eval_h[i] = evaluate_constraint(&matrices.b[i], &full_assignment);
+        c_eval_h[i] = evaluate_constraint(&matrices.c[i], &full_assignment);
+    }
+
+    // PVUGC reduction: no implicit public-input copy block is added to A.
+    domain.ifft_in_place(&mut a_eval_h);
+    domain.ifft_in_place(&mut b_eval_h);
+    domain.ifft_in_place(&mut c_eval_h);
+
+    coset_domain.fft_in_place(&mut a_eval_h);
+    coset_domain.fft_in_place(&mut b_eval_h);
+    coset_domain.fft_in_place(&mut c_eval_h);
+
+    let mut h = h_coeffs.to_vec();
+    if h.len() < domain_size {
+        h.resize(domain_size, F::zero());
+    } else if h.len() > domain_size {
+        return Err(anyhow!(
+            "h_coeffs length {} exceeds domain size {}",
+            h.len(),
+            domain_size
+        ));
+    }
+    coset_domain.fft_in_place(&mut h);
+
+    let z_on_coset = domain.evaluate_vanishing_polynomial(F::GENERATOR);
+    let mut residual_eval_coset = vec![F::zero(); domain_size];
+    for i in 0..domain_size {
+        residual_eval_coset[i] = a_eval_h[i] * b_eval_h[i] - c_eval_h[i] - (z_on_coset * h[i]);
+    }
+
+    coset_domain.ifft_in_place(&mut residual_eval_coset);
+    Ok(residual_eval_coset)
+}
+
+fn trim_trailing_zeros<F: PrimeField>(v: &mut Vec<F>) {
+    while v.last().map(|c| c.is_zero()).unwrap_or(false) {
+        v.pop();
+    }
+}
+
+fn poly_div_rem<F: PrimeField>(numer: &[F], denom: &[F]) -> Result<(Vec<F>, Vec<F>)> {
+    let mut n = numer.to_vec();
+    let mut d = denom.to_vec();
+    trim_trailing_zeros(&mut n);
+    trim_trailing_zeros(&mut d);
+    if d.is_empty() {
+        return Err(anyhow!("division by zero polynomial"));
+    }
+    if n.is_empty() {
+        return Ok((vec![F::zero()], vec![F::zero()]));
+    }
+    if n.len() < d.len() {
+        return Ok((vec![F::zero()], n));
+    }
+
+    let mut q = vec![F::zero(); n.len() - d.len() + 1];
+    let d_lead = *d.last().expect("non-empty");
+    let d_lead_inv = d_lead
+        .inverse()
+        .ok_or_else(|| anyhow!("denominator leading coefficient is zero"))?;
+    let mut r = n;
+
+    while !r.is_empty() && r.len() >= d.len() {
+        let shift = r.len() - d.len();
+        let coeff = *r.last().expect("non-empty") * d_lead_inv;
+        q[shift] += coeff;
+        for (i, d_i) in d.iter().enumerate() {
+            r[shift + i] -= coeff * *d_i;
+        }
+        trim_trailing_zeros(&mut r);
+    }
+    if r.is_empty() {
+        r.push(F::zero());
+    }
+    Ok((q, r))
+}
+
+/// Compute H by explicit polynomial division with remainder:
+/// 1) build A,B,C in coefficient form
+/// 2) compute N(X)=A(X)B(X)-C(X), Z(X)=X^n-1
+/// 3) divide N by Z to get (Q,R), and return Q in both coeff/coset-eval form.
+pub fn find_h_through_div_rem<F: PrimeField>(
+    matrices: &ConstraintMatrices<F>,
+    num_inputs: usize,
+    num_constraints: usize,
+    public_inputs_no_one: &[F],
+    witness_assignment: &[F],
+) -> Result<(Vec<F>, Vec<F>, Vec<F>)> {
+    if num_inputs == 0 {
+        return Err(anyhow!("num_inputs must include the constant input"));
+    }
+    if public_inputs_no_one.len() + 1 != num_inputs {
+        return Err(anyhow!(
+            "public input length mismatch: got {}, expected {}",
+            public_inputs_no_one.len(),
+            num_inputs - 1
+        ));
+    }
+
+    let mut full_assignment = Vec::with_capacity(num_inputs + witness_assignment.len());
+    full_assignment.push(F::one());
+    full_assignment.extend_from_slice(public_inputs_no_one);
+    full_assignment.extend_from_slice(witness_assignment);
+
+    let domain = GeneralEvaluationDomain::<F>::new(num_constraints + num_inputs)
+        .ok_or_else(|| anyhow!("PolynomialDegreeTooLarge for QAP domain"))?;
+    let domain_size = domain.size();
+    let coset_domain = domain
+        .get_coset(F::GENERATOR)
+        .ok_or_else(|| anyhow!("failed to build multiplicative coset domain"))?;
+
+    let mut a_eval_h = vec![F::zero(); domain_size];
+    let mut b_eval_h = vec![F::zero(); domain_size];
+    let mut c_eval_h = vec![F::zero(); domain_size];
+    for i in 0..num_constraints {
+        a_eval_h[i] = evaluate_constraint(&matrices.a[i], &full_assignment);
+        b_eval_h[i] = evaluate_constraint(&matrices.b[i], &full_assignment);
+        c_eval_h[i] = evaluate_constraint(&matrices.c[i], &full_assignment);
+    }
+
+    // Convert to coefficient form.
+    let a_coeffs = domain.ifft(&a_eval_h);
+    let b_coeffs = domain.ifft(&b_eval_h);
+    let c_coeffs = domain.ifft(&c_eval_h);
+    let a_poly = DensePolynomial::from_coefficients_vec(a_coeffs);
+    let b_poly = DensePolynomial::from_coefficients_vec(b_coeffs);
+    let c_poly = DensePolynomial::from_coefficients_vec(c_coeffs);
+    let numer_poly = &(&a_poly * &b_poly) - &c_poly;
+
+    // Z(X)=X^n-1 where n=|domain|.
+    let mut z_coeffs = vec![F::zero(); domain_size + 1];
+    z_coeffs[0] = -F::one();
+    z_coeffs[domain_size] = F::one();
+
+    let (h_coeffs, remainder_coeffs) = poly_div_rem(&numer_poly.coeffs, &z_coeffs)?;
+
+    // Cast quotient into coset evaluation form.
+    let mut h_eval_coset = h_coeffs.clone();
+    if h_eval_coset.len() < domain_size {
+        h_eval_coset.resize(domain_size, F::zero());
+    } else if h_eval_coset.len() > domain_size {
+        h_eval_coset.truncate(domain_size);
+    }
+    coset_domain.fft_in_place(&mut h_eval_coset);
+
+    Ok((h_coeffs, h_eval_coset, remainder_coeffs))
+}
+
+fn find_relation_with_nonzero_sum<F: PrimeField>(errors: &[Vec<F>]) -> Option<Vec<F>> {
+    if errors.is_empty() {
+        return None;
+    }
+    let rows_n = errors[0].len();
+    let cols_n = errors.len();
+    if cols_n == 0 || rows_n == 0 {
+        return None;
+    }
+    if errors.iter().any(|v| v.len() != rows_n) {
+        return None;
+    }
+
+    // Matrix with error vectors as columns: rows_n x cols_n
+    let mut mat = vec![vec![F::zero(); cols_n]; rows_n];
+    for (c, v) in errors.iter().enumerate() {
+        for r in 0..rows_n {
+            mat[r][c] = v[r];
+        }
+    }
+
+    // RREF over rows to get nullspace basis for mat * s = 0.
+    let mut pivot_cols: Vec<usize> = Vec::new();
+    let mut pivot_row = 0usize;
+    for col in 0..cols_n {
+        let mut found = None;
+        for r in pivot_row..rows_n {
+            if !mat[r][col].is_zero() {
+                found = Some(r);
+                break;
+            }
+        }
+        let Some(rp) = found else {
+            continue;
+        };
+        mat.swap(pivot_row, rp);
+        let inv = mat[pivot_row][col].inverse()?;
+        for j in col..cols_n {
+            mat[pivot_row][j] *= inv;
+        }
+        for r in 0..rows_n {
+            if r == pivot_row {
+                continue;
+            }
+            let factor = mat[r][col];
+            if factor.is_zero() {
+                continue;
+            }
+            let pivot_slice = mat[pivot_row][col..cols_n].to_vec();
+            for j in col..cols_n {
+                mat[r][j] -= factor * pivot_slice[j - col];
+            }
+        }
+        pivot_cols.push(col);
+        pivot_row += 1;
+        if pivot_row == rows_n {
+            break;
+        }
+    }
+
+    let mut is_pivot_col = vec![false; cols_n];
+    for &c in &pivot_cols {
+        is_pivot_col[c] = true;
+    }
+    let free_cols: Vec<usize> = (0..cols_n).filter(|&c| !is_pivot_col[c]).collect();
+    if free_cols.is_empty() {
+        return None;
+    }
+
+    // Try nullspace basis vectors and return one with non-zero coefficient sum.
+    for &free in &free_cols {
+        let mut s = vec![F::zero(); cols_n];
+        s[free] = F::one();
+        for (r, &pc) in pivot_cols.iter().enumerate().rev() {
+            let mut acc = F::zero();
+            for j in (pc + 1)..cols_n {
+                if !mat[r][j].is_zero() {
+                    acc += mat[r][j] * s[j];
+                }
+            }
+            s[pc] = -acc;
+        }
+        let sum_s = s.iter().fold(F::zero(), |acc, x| acc + *x);
+        if !sum_s.is_zero() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn combine_k_with_scalars<E: Pairing>(
+    coeffs: &[E::ScalarField],
+    ks: &[PairingOutput<E>],
+) -> PairingOutput<E> {
+    assert_eq!(coeffs.len(), ks.len(), "coeff and k length mismatch");
+    let mut acc = PairingOutput::<E>(<<E as Pairing>::TargetField as Field>::ONE);
+    for (s, k) in coeffs.iter().zip(ks.iter()) {
+        if s.is_zero() {
+            continue;
+        }
+        // PairingOutput group law is multiplicative in GT; scalar multiplication is exponentiation.
+        let term = k.0.pow(s.into_bigint());
+        acc = PairingOutput(acc.0 * term);
+    }
+    acc
+}
+
+#[test]
+fn qap_error_vector_is_zero_for_valid_example_assignment() {
+    type E = ark_bls12_381::Bls12_381;
+    type F = <E as Pairing>::ScalarField;
+
+    let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+    let mut x = F::rand(&mut rng);
+    let witness = loop {
+        if let Some(w) = try_make_witness(x) {
+            break w;
+        }
+        x += F::one();
+    };
+
+    let circuit = ExampleAttackCircuit::with_witness(x, witness);
+    let cs = ConstraintSystem::<F>::new_ref();
+    cs.set_optimization_goal(OptimizationGoal::Constraints);
+    circuit
+        .generate_constraints(cs.clone())
+        .expect("synthesis failed");
+    cs.finalize();
+
+    let matrices = cs.to_matrices().expect("matrix extraction failed");
+    let num_inputs = cs.num_instance_variables();
+    let num_constraints = cs.num_constraints();
+    let witness_assignment = cs.borrow().unwrap().witness_assignment.clone();
+
+    let h_coeffs = PvugcReduction::witness_map::<F, GeneralEvaluationDomain<F>>(cs.clone())
+        .expect("witness_map failed");
+
+    let residual = pvugc_qap_error_vector(
+        &matrices,
+        num_inputs,
+        num_constraints,
+        &[x],
+        &witness_assignment,
+        &h_coeffs,
+    )
+    .expect("residual computation failed");
+
+    assert!(
+        residual.iter().all(|v| v.is_zero()),
+        "expected zero residual for valid assignment"
+    );
+}
+
+#[test]
+fn sampling_loop_finds_relation_before_bound() {
+    type E = ark_bls12_381::Bls12_381;
+    type F = <E as Pairing>::ScalarField;
+
+    let mut rng = StdRng::seed_from_u64(0xBAD5EED);
+    let mut x = F::rand(&mut rng);
+    while try_make_witness(x).is_some() {
+        x += F::one();
+    }
+
+    // Build once to get fixed matrix/domain dimensions for this circuit.
+    let witness0 = ExampleAttackWitness {
+        y: x,
+        y_unlocc: x,
+        z: F::zero(),
+        w: F::zero(),
+    };
+    let circuit0 = ExampleAttackCircuit::with_witness(x, witness0);
+    let cs0 = ConstraintSystem::<F>::new_ref();
+    cs0.set_optimization_goal(OptimizationGoal::Constraints);
+    circuit0
+        .generate_constraints(cs0.clone())
+        .expect("synthesis failed");
+    cs0.finalize();
+    let matrices = cs0.to_matrices().expect("matrix extraction failed");
+    let num_inputs = cs0.num_instance_variables();
+    let num_constraints = cs0.num_constraints();
+    let domain = GeneralEvaluationDomain::<F>::new(num_constraints + num_inputs)
+        .expect("domain creation failed");
+    let error_dim = domain.size();
+    let sample_cap = 2 * error_dim + 1;
+
+    let mut errors: Vec<Vec<F>> = Vec::new();
+    let mut found_relation = None;
+
+    for _ in 0..sample_cap {
+        // Per attack rule: keep x=y=y_unlocc fixed; vary only z,w (and derive h from AB-C).
+        let z = F::rand(&mut rng);
+        let w = F::rand(&mut rng);
+        let witness = ExampleAttackWitness {
+            y: x,
+            y_unlocc: x,
+            z,
+            w,
+        };
+        let circuit = ExampleAttackCircuit::with_witness(x, witness);
+
+        let cs = ConstraintSystem::<F>::new_ref();
+        cs.set_optimization_goal(OptimizationGoal::Constraints);
+        circuit
+            .generate_constraints(cs.clone())
+            .expect("synthesis failed");
+        cs.finalize();
+
+        let witness_assignment = cs.borrow().unwrap().witness_assignment.clone();
+        let h_coeffs =
+            PvugcReduction::witness_map::<F, GeneralEvaluationDomain<F>>(cs.clone())
+                .expect("witness_map failed");
+        let err = pvugc_qap_error_vector(
+            &matrices,
+            num_inputs,
+            num_constraints,
+            &[x],
+            &witness_assignment,
+            &h_coeffs,
+        )
+        .expect("error-vector computation failed");
+        errors.push(err);
+
+        if let Some(s) = find_relation_with_nonzero_sum(&errors) {
+            found_relation = Some(s);
+            break;
+        }
+    }
+
+    if found_relation.is_none() {
+        panic!(
+            "sampling bound broken: sampled {} vectors with no usable dependence (cap={})",
+            errors.len(),
+            sample_cap
+        );
+    }
 }
 
 fn compute_witness_bases<E: Pairing>(
@@ -1225,7 +1662,7 @@ pub struct AttackerView<E: Pairing> {
 }
 
 pub fn solvable_setup<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng) -> (AttackerView<E>, PairingOutput<E>) {
-        // Find a random satisfiable statement for ExampleAttackCircuit.
+    // Find a random satisfiable statement for ExampleAttackCircuit.
     let mut x = E::ScalarField::rand(rng);
     let _ = loop {
         if let Some(w) = try_make_witness(x) {
@@ -1236,12 +1673,30 @@ pub fn solvable_setup<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng) -> (A
     setup_with_input_e2e::<E, Rng>(rng, x)
 }
 
+pub fn unsolvable_setup<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng) -> (AttackerView<E>, PairingOutput<E>) {
+    // Find a random unsatisfiable statement for ExampleAttackCircuit.
+    let mut x = E::ScalarField::rand(rng);
+    let _ = loop {
+        if let None = try_make_witness(x) {
+            break;
+        }
+        x += E::ScalarField::one();
+    };
+    setup_with_input_e2e::<E, Rng>(rng, x)
+
+}
+
 pub fn setup_with_input_e2e<E: Pairing, Rng: RngCore + CryptoRng>(rng: &mut Rng, x: E::ScalarField) -> (AttackerView<E>, PairingOutput<E>) {
 
     let public_inputs = vec![x];
-    let witness = try_make_witness(x).expect("setup_with_input_e2e requires satisfiable x");
+    let witness = ExampleAttackWitness {
+        y: x,
+        y_unlocc: x,
+        z: E::ScalarField::rand(rng),
+        w: E::ScalarField::rand(rng),
+    }; // mock witness, setup actually doesn't need it
 
-    let circuit = ExampleAttackCircuit::with_witness(x, witness.clone());
+    let circuit = ExampleAttackCircuit::with_witness(x, witness);
     let (pk, vk) = Groth16::<E, PvugcReduction>::circuit_specific_setup(circuit, rng)
         .map_err(|e| anyhow!("circuit_specific_setup failed: {e}")).unwrap();
 
@@ -1290,10 +1745,168 @@ pub fn decap_e2e<E: Pairing>(view: &AttackerView<E>) -> PairingOutput<E> {
     decap(&commitments, &view.col_arms).expect("decap failed")
 }
 
-fn main() {
+/// Lean-path decapsulation from an explicit assignment `(x, witness)`.
+///
+/// This does not require satisfiability of the assignment; it follows the same
+/// proving/commitment schedule as `decap_e2e` with fixed randomizers `r=s=0`.
+pub fn fake_decap_from_assignment<E: Pairing>(
+    view: &AttackerView<E>,
+    x: E::ScalarField,
+    witness: ExampleAttackWitness<E::ScalarField>,
+) -> Result<PairingOutput<E>> {
+    let circuit = ExampleAttackCircuit::with_witness(x, witness);
+    let zero = E::ScalarField::zero();
+
+    let (proof_lean, full_assignment) = prover_lean::prove_lean_with_randomizers(
+        &view.lean_pk,
+        circuit,
+        zero,
+        zero,
+    )
+    .map_err(|e| anyhow!("lean proving from assignment failed: {e}"))?;
+
+    let commitments = build_commitments::<E>(
+        &proof_lean.a,
+        &proof_lean.c,
+        &zero,
+        &full_assignment,
+        view.vk.gamma_abc_g1.len(),
+    );
+
+    decap(&commitments, &view.col_arms).map_err(|e| anyhow!("decap failed: {e}"))
+}
+
+pub fn attack<E: Pairing>(view: &AttackerView<E>) -> PairingOutput<E> {
+    let x = view.public_inputs[0];
+
+    // Circuit shape / matrix template (independent of witness values).
+    let template_witness = ExampleAttackWitness {
+        y: x,
+        y_unlocc: x,
+        z: E::ScalarField::zero(),
+        w: E::ScalarField::zero(),
+    };
+    let template_circuit = ExampleAttackCircuit::with_witness(x, template_witness);
+    let cs_template = ConstraintSystem::<E::ScalarField>::new_ref();
+    cs_template.set_optimization_goal(OptimizationGoal::Constraints);
+    template_circuit
+        .generate_constraints(cs_template.clone())
+        .expect("template synthesis failed");
+    cs_template.finalize();
+    let matrices = cs_template
+        .to_matrices()
+        .expect("template matrix extraction failed");
+    let num_inputs = cs_template.num_instance_variables();
+    let num_constraints = cs_template.num_constraints();
+    let error_dim = GeneralEvaluationDomain::<E::ScalarField>::new(num_inputs + num_constraints)
+        .expect("domain creation failed")
+        .size();
+    let sample_cap = 2 * error_dim + 1;
+
+    let mut rng = StdRng::seed_from_u64(1337);
+    let mut errors: Vec<Vec<E::ScalarField>> = Vec::new();
+    let mut ks: Vec<PairingOutput<E>> = Vec::new();
+
+    for _ in 0..sample_cap {
+        // Ground rule for sampling: x=y=y_unlocc fixed; vary only z,w (and derived h).
+        let witness = ExampleAttackWitness {
+            y: x,
+            y_unlocc: x,
+            z: E::ScalarField::rand(&mut rng),
+            w: E::ScalarField::rand(&mut rng),
+        };
+        let circuit = ExampleAttackCircuit::with_witness(x, witness.clone());
+
+        let cs = ConstraintSystem::<E::ScalarField>::new_ref();
+        cs.set_optimization_goal(OptimizationGoal::Constraints);
+        circuit
+            .generate_constraints(cs.clone())
+            .expect("sample synthesis failed");
+        cs.finalize();
+        let witness_assignment = cs.borrow().unwrap().witness_assignment.clone();
+
+        let (h_coeffs, _h_eval, _rem) = find_h_through_div_rem(
+            &matrices,
+            num_inputs,
+            num_constraints,
+            &[x],
+            &witness_assignment,
+        )
+        .expect("find_h_through_div_rem failed");
+        let err = pvugc_qap_error_vector(
+            &matrices,
+            num_inputs,
+            num_constraints,
+            &[x],
+            &witness_assignment,
+            &h_coeffs,
+        )
+        .expect("error vector computation failed");
+        if err.iter().all(|v| v.is_zero()) {
+            continue;
+        }
+        let k_i =
+            fake_decap_from_assignment::<E>(view, x, witness).expect("fake decap sample failed");
+
+        errors.push(err);
+        ks.push(k_i);
+
+        if let Some(mut s) = find_relation_with_nonzero_sum(&errors) {
+            let sum_s = s.iter().fold(E::ScalarField::zero(), |acc, v| acc + *v);
+            if sum_s.is_zero() {
+                continue;
+            }
+            let inv = sum_s.inverse().expect("non-zero sum must be invertible");
+            for c in &mut s {
+                *c *= inv;
+            }
+
+            println!("[attack] linear combination coefficients (sum=1):");
+            for (i, c) in s.iter().enumerate() {
+                if !c.is_zero() {
+                    println!("  s[{i}] = {c:?}");
+                }
+            }
+            return combine_k_with_scalars::<E>(&s, &ks);
+        }
+    }
+
+    panic!(
+        "sampling bound broken: sampled {} vectors (cap={}) with no usable affine dependence",
+        errors.len(),
+        sample_cap
+    );
+}
+
+
+#[test]
+pub fn legitimate_encap_decap_flow() {
     let mut rng = StdRng::seed_from_u64(42);
     let (view, expected_k) = solvable_setup::<ark_bls12_381::Bls12_381, _>(&mut rng);
     let decapped_k = decap_e2e(&view);
+    assert_eq!(decapped_k, expected_k, "decapsulated key does not match setup key");
+    println!("E2E check passed: decapsulated key matches original k");
+}
+
+#[test]
+fn fake_decap_matches_decap_e2e_on_valid_assignment() {
+    type E = ark_bls12_381::Bls12_381;
+    let mut rng = StdRng::seed_from_u64(7);
+    let (view, expected_k) = solvable_setup::<E, _>(&mut rng);
+
+    let x = view.public_inputs[0];
+    let witness = try_make_witness(x).expect("solvable setup should have valid witness");
+    let k_fake = fake_decap_from_assignment::<E>(&view, x, witness).expect("fake decap failed");
+    let k_ref = decap_e2e::<E>(&view);
+
+    assert_eq!(k_fake, k_ref, "fake decap must match decap_e2e on valid assignment");
+    assert_eq!(k_fake, expected_k, "fake decap must match setup key on valid assignment");
+}
+
+fn main() {
+    let mut rng = StdRng::seed_from_u64(42);
+    let (view, expected_k) = unsolvable_setup::<ark_bls12_381::Bls12_381, _>(&mut rng);
+    let decapped_k = attack(&view);
     assert_eq!(decapped_k, expected_k, "decapsulated key does not match setup key");
     println!("E2E check passed: decapsulated key matches original k");
 }

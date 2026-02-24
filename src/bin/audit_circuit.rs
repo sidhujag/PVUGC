@@ -67,7 +67,7 @@ type Fr = ark_bls12_381::Fr;
 // We model this by using SEPARATE monomials for Pub vs Wit.
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum TrapdoorMonomial {
+pub enum TrapdoorMonomial {
     // ============================================================
     // TARGET TERMS (Armed, deg_ρ = 1) - All PUBLIC polynomials!
     // ============================================================
@@ -163,12 +163,12 @@ enum TrapdoorMonomial {
     DeltaSqOverGammaWPub,       // ρ * (delta^2 / gamma) * W_pub
 }
 
-struct TrapdoorPolyVector {
-    components: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>,
+pub struct TrapdoorPolyVector {
+    pub components: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>,
 }
 
 impl TrapdoorPolyVector {
-    fn new(components: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>) -> Self {
+    pub fn new(components: Vec<(TrapdoorMonomial, DensePolynomial<Fr>)>) -> Self {
         Self { components }
     }
 }
@@ -1592,7 +1592,7 @@ fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
     OuterCircuit::new((*fixture.vk_inner).clone(), x_inner, proof_inner)
 }
 
-struct MatrixExtractor {
+pub struct MatrixExtractor {
     a_cols: Vec<Vec<(usize, Fr)>>,
     b_cols: Vec<Vec<(usize, Fr)>>,
     c_cols: Vec<Vec<(usize, Fr)>>,
@@ -1600,7 +1600,7 @@ struct MatrixExtractor {
 }
 
 impl MatrixExtractor {
-    fn new(cs: ConstraintSystemRef<Fr>) -> Self {
+    pub fn new(cs: ConstraintSystemRef<Fr>) -> Self {
         let matrices = cs.to_matrices().expect("matrix extraction");
         // CRITICAL: Domain must match the Groth16/QAP domain used in proving.
         // Standard Groth16 uses a domain of size (num_constraints + num_inputs),
@@ -1650,7 +1650,7 @@ impl MatrixExtractor {
         }
     }
 
-    fn get_column_polys(
+    pub fn get_column_polys(
         &self,
         col: usize,
     ) -> (
@@ -1679,7 +1679,7 @@ impl MatrixExtractor {
         )
     }
 
-    fn evaluate_column(&self, col: usize, r: Fr) -> (Fr, Fr, Fr) {
+    pub fn evaluate_column(&self, col: usize, r: Fr) -> (Fr, Fr, Fr) {
         let n_as_field = self.domain.size_as_field_element();
         let n_inv = n_as_field.inverse().unwrap();
         let z_h_at_r = r.pow([self.domain.size() as u64]) - Fr::one();
@@ -1741,7 +1741,7 @@ fn check_linearity(
     true
 }
 
-fn build_target(
+pub fn build_target(
     pub_polys: &[(
         DensePolynomial<Fr>,
         DensePolynomial<Fr>,
@@ -1788,18 +1788,18 @@ fn build_target(
 ///
 /// We key rows by their pivot index in a BTreeMap so that reduction always
 /// processes pivots in ascending order, avoiding order-dependent artifacts.
-struct Basis {
+pub struct Basis {
     rows: BTreeMap<usize, Vec<Fr>>,
 }
 
 impl Basis {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             rows: BTreeMap::new(),
         }
     }
 
-    fn reduce(&self, mut v: Vec<Fr>) -> Vec<Fr> {
+    pub fn reduce(&self, mut v: Vec<Fr>) -> Vec<Fr> {
         for (&pivot, row) in self.rows.iter() {
             if pivot >= v.len() {
                 continue;
@@ -1814,7 +1814,7 @@ impl Basis {
         v
     }
 
-    fn insert(&mut self, v: Vec<Fr>) {
+    pub fn insert(&mut self, v: Vec<Fr>) {
         let reduced = self.reduce(v);
         if let Some(pivot) = reduced.iter().position(|x| !x.is_zero()) {
             let inv = reduced[pivot].inverse().unwrap();
@@ -1824,7 +1824,7 @@ impl Basis {
     }
 }
 
-fn check_independence_streaming(
+pub fn check_independence_streaming(
     extractor: &MatrixExtractor,
     pub_polys: &[(
         DensePolynomial<Fr>,
