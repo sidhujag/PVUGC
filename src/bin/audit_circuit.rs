@@ -244,53 +244,51 @@ impl AuditSubject for MockQuadratic {
     }
 }
 
-/// TEST CIRCUIT: Binding witness used as mul output.
+/// TEST CIRCUIT: binding witness with proxy witness for nonlinear use.
 ///
 /// Public inputs: x
-/// Witness:       y, z, w
+/// Witness:       y, y_unlocc, z, w
 ///
 /// Constraints:
-///   1 * y = x
-///   y * (y+1)  = z
+///   1 * y       = x
+///   1 * y_unlocc = y
+///   y_unlocc * (y_unlocc + 1) = z
 ///   w * w = z
-/// 
-/// This passes "publics are C-only" but SHOULD FAIL the additional guard:
-/// the binding witness wire `y0` is produced by a true multiplication gate.
 struct ExampleAttackCircuit;
 
 impl AuditSubject for ExampleAttackCircuit {
     fn name(&self) -> &'static str {
-        "Mock Lev BindingMul (SHOULD FAIL BindMul)"
+        "Example Attack Circuit (proxy witness)"
     }
 
     fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
-        // Choose x0 as a likely non-square in typical SNARK fields so the circuit is
-        // plausibly unsatisfiable, but satisfiability is NOT required for structural audit.
-        
-        let x_val = Fr::from(5);
+        let x_val = Fr::from(5u64);
         let x_pub = cs.new_input_variable(|| Ok(x_val))?;
-        
-        // Witness copies used in the binding constraints.
+
         let y = cs.new_witness_variable(|| Ok(x_val))?;
-        let z = cs.new_witness_variable(|| Ok(Fr::from(420)))?;
-        let w = cs.new_witness_variable(|| Ok(Fr::from(69)))?;
+        let y_unlocc = cs.new_witness_variable(|| Ok(x_val))?;
+        let z = cs.new_witness_variable(|| Ok(Fr::from(420u64)))?;
+        let w = cs.new_witness_variable(|| Ok(Fr::from(69u64)))?;
 
         let one_lc = LinearCombination::from((Fr::one(), Variable::One));
 
-        // Binding constraints: 1 * y = x  (public appears only in C)
+        // 1 * y = x
         let lc_b = LinearCombination::from((Fr::one(), y));
         let lc_c = LinearCombination::from((Fr::one(), x_pub));
         cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
-        
-        // Multiplication gate that outputs into binding witness: y * (y + 1) = z
-        let lc_a = LinearCombination::from((Fr::one(), y));
-        let lc_b =
-            LinearCombination(vec![(Fr::one(), y), (Fr::one(), Variable::One)]);
+
+        // 1 * y_unlocc = y
+        let lc_b = LinearCombination::from((Fr::one(), y_unlocc));
+        let lc_c = LinearCombination::from((Fr::one(), y));
+        cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+
+        // y_unlocc * (y_unlocc + 1) = z
+        let lc_a = LinearCombination::from((Fr::one(), y_unlocc));
+        let lc_b = LinearCombination(vec![(Fr::one(), y_unlocc), (Fr::one(), Variable::One)]);
         let lc_c = LinearCombination::from((Fr::one(), z));
         cs.enforce_constraint(lc_a, lc_b, lc_c)?;
 
-
-        // Multiplication gate that outputs into binding witness: w * w = z
+        // w * w = z
         let lc_a = LinearCombination::from((Fr::one(), w));
         let lc_b = LinearCombination::from((Fr::one(), w));
         let lc_c = LinearCombination::from((Fr::one(), z));
