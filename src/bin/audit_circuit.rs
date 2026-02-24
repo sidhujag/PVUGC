@@ -291,6 +291,57 @@ impl AuditSubject for MockLevBindingMul {
     }
 }
 
+/// TEST CIRCUIT (Lev new): Binding witness used as mul *input* (not output).
+///
+/// Public:  x
+/// Witness: y, z, w
+///
+/// Constraints:
+///   1 * y = x
+///   y * (y + 1) = z
+///   w * w = z
+///
+/// This avoids the specific "mul outputs into binding witness" pattern, but it SHOULD FAIL
+/// the stronger binding-witness hygiene rule: the binding witness `y` is now used inside
+/// a multiplication gate (appears in A/B outside the binding rows).
+struct MockLevBindInputMul;
+impl AuditSubject for MockLevBindInputMul {
+    fn name(&self) -> &'static str {
+        "Mock Lev BindInputMul (SHOULD FAIL BindHyg)"
+    }
+
+    fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
+        let x_val = Fr::from(5u64);
+        let x_pub = cs.new_input_variable(|| Ok(x_val))?;
+
+        // Binding witness
+        let y = cs.new_witness_variable(|| Ok(x_val))?;
+        let z = cs.new_witness_variable(|| Ok(Fr::from(420u64)))?;
+        let w = cs.new_witness_variable(|| Ok(Fr::from(69u64)))?;
+
+        let one_lc = LinearCombination::from((Fr::one(), Variable::One));
+
+        // 1 * y = x
+        let lc_b = LinearCombination::from((Fr::one(), y));
+        let lc_c = LinearCombination::from((Fr::one(), x_pub));
+        cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+
+        // y * (y + 1) = z
+        let lc_a = LinearCombination::from((Fr::one(), y));
+        let lc_b = LinearCombination(vec![(Fr::one(), y), (Fr::one(), Variable::One)]);
+        let lc_c = LinearCombination::from((Fr::one(), z));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+
+        // w * w = z
+        let lc_a = LinearCombination::from((Fr::one(), w));
+        let lc_b = LinearCombination::from((Fr::one(), w));
+        let lc_c = LinearCombination::from((Fr::one(), z));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
+
+        Ok(())
+    }
+}
+
 /// TEST CIRCUIT: V Span Separation SHOULD FAIL
 /// For v_pub ∈ span(v_wit), we need v_pub = c * v_wit (scalar multiple).
 /// 
@@ -406,20 +457,39 @@ fn main() {
         Box::new(MockLinear),
         Box::new(MockQuadratic),
         Box::new(MockLevBindingMul),    // Should FAIL BindMul guard
+        Box::new(MockLevBindInputMul), // Should FAIL BindHyg guard
         Box::new(MockSpanViolation),    // Should FAIL V-span
         Box::new(MockUSpanViolation),   // Should FAIL U-span
         Box::new(MockWSpanViolation),   // Should FAIL W-span
         Box::new(ProductionSubject(get_valid_circuit())),
     ];
 
+    let mut overall_ok = true;
     for subject in subjects {
         println!(">>> AUDITING: {} <<<", subject.name());
-        run_audit(subject.as_ref());
+        let subject_safe = run_audit(subject.as_ref());
+
+        // Keep the mock subjects as self-tests: they should fail when labeled SHOULD FAIL.
+        // Only fail the *process* if a subject violates its expectation.
+        let subject_name = subject.name();
+        let should_fail = subject_name.contains("SHOULD FAIL") || subject_name.contains("(Unsafe)");
+        let subject_ok = if should_fail { !subject_safe } else { subject_safe };
+        if !subject_ok {
+            overall_ok = false;
+            println!(
+                "[AUDIT HARNESS] FAIL: subject expectation violated (should_fail={}, subject_safe={})",
+                should_fail, subject_safe
+            );
+        }
         println!("\n");
+    }
+
+    if !overall_ok {
+        std::process::exit(1);
     }
 }
 
-fn run_audit(subject: &dyn AuditSubject) {
+fn run_audit(subject: &dyn AuditSubject) -> bool {
     let cs = ConstraintSystem::<Fr>::new_ref();
     subject.synthesize(cs.clone()).unwrap();
     cs.finalize();
@@ -647,12 +717,19 @@ fn run_audit(subject: &dyn AuditSubject) {
     );
 
     // Final verdict
-    let fully_safe = is_linear && is_unmixed && all_safe && no_pub_ab_overlap;
+    let fully_safe = is_linear
+        && is_unmixed
+        && all_safe
+        && no_pub_ab_overlap
+        && binding_witness_ok
+        && binding_hygiene_ok;
     
     println!("\n=== SECURITY SUMMARY (AGBGM) ===");
     println!("Linearity:          {}", if is_linear { "PASS" } else { "FAIL" });
     println!("No Pub/Wit Mix:     {}", if is_unmixed { "PASS" } else { "FAIL" });
     println!("No Pub A/B Overlap: {}", if no_pub_ab_overlap { "PASS" } else { "FAIL" });
+    println!("BindMul (no mul->bind): {}", if binding_witness_ok { "PASS" } else { "FAIL" });
+    println!("BindHyg (bind hygiene): {}", if binding_hygiene_ok { "PASS" } else { "FAIL" });
     println!("V Span Separation:  {}", if v_span_separated { "PASS" } else { "FAIL" });
     println!("U Span Separation:  {}", if u_span_separated { "PASS" } else { "FAIL" });
     println!("W Span Separation:  {}", if w_span_separated { "PASS" } else { "FAIL" });
@@ -706,6 +783,8 @@ fn run_audit(subject: &dyn AuditSubject) {
         println!("3. Full Span Separation - verified above");
         println!("4. Aggregation - prevents GT-Slicing (verify separately)");
     }
+
+    fully_safe && full_span_separated
 }
 
 /// Detect (and reject) circuits where a "binding witness" wire is produced by a real
