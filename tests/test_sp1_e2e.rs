@@ -1,3 +1,5 @@
+#![cfg(feature = "sp1-e2e-tests")]
+
 //! SP1 End-to-End Integration Test
 //!
 //! This test demonstrates the full flow:

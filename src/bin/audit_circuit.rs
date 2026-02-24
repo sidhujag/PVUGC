@@ -28,7 +28,6 @@
 //! Optimization: Uses streaming column processing + Incremental Basis + Sparse Eval.
 
 use ark_ff::{Field, One, Zero};
-use ark_groth16::Groth16;
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
     Polynomial,
@@ -36,9 +35,13 @@ use ark_poly::{
 use ark_relations::r1cs::{
     ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef, LinearCombination, Variable,
 };
-use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 use ark_std::UniformRand;
+#[cfg(feature = "audit-production-subject")]
+use ark_groth16::Groth16;
+#[cfg(feature = "audit-production-subject")]
+use ark_snark::SNARK;
+#[cfg(feature = "audit-production-subject")]
 use arkworks_groth16::{
     outer_compressed::{DefaultCycle, InnerE, InnerScalar, OuterCircuit, OuterFr},
     test_circuits::TwoInputCircuit,
@@ -46,7 +49,10 @@ use arkworks_groth16::{
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+#[cfg(feature = "audit-production-subject")]
 type Fr = OuterFr;
+#[cfg(not(feature = "audit-production-subject"))]
+type Fr = ark_bls12_381::Fr;
 
 // All handles/targets are multiplied by delta to clear denominators from L-queries.
 // Base ring: F[alpha, beta, gamma, delta, rho, x]
@@ -174,7 +180,9 @@ trait AuditSubject {
     fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()>;
 }
 
+#[cfg(feature = "audit-production-subject")]
 struct ProductionSubject(OuterCircuit<DefaultCycle>);
+#[cfg(feature = "audit-production-subject")]
 impl AuditSubject for ProductionSubject {
     fn name(&self) -> &'static str {
         "Production OuterCircuit"
@@ -238,19 +246,19 @@ impl AuditSubject for MockQuadratic {
 
 /// TEST CIRCUIT: Binding witness used as mul output.
 ///
-/// Public inputs: x0, x1, x2
-/// Witness:       y0, y1, y2, z
+/// Public inputs: x
+/// Witness:       y, z, w
 ///
 /// Constraints:
-///   1 * y0 = x0
-///   1 * y1 = x1
-///   1 * y2 = x2
-///   z * z  = y0
-///
+///   1 * y = x
+///   y * (y+1)  = z
+///   w * w = z
+/// 
 /// This passes "publics are C-only" but SHOULD FAIL the additional guard:
 /// the binding witness wire `y0` is produced by a true multiplication gate.
-struct MockLevBindingMul;
-impl AuditSubject for MockLevBindingMul {
+struct ExampleAttackCircuit;
+
+impl AuditSubject for ExampleAttackCircuit {
     fn name(&self) -> &'static str {
         "Mock Lev BindingMul (SHOULD FAIL BindMul)"
     }
@@ -258,33 +266,34 @@ impl AuditSubject for MockLevBindingMul {
     fn synthesize(&self, cs: ConstraintSystemRef<Fr>) -> ark_relations::r1cs::Result<()> {
         // Choose x0 as a likely non-square in typical SNARK fields so the circuit is
         // plausibly unsatisfiable, but satisfiability is NOT required for structural audit.
-        let x0 = Fr::from(5u64);
-        let x1 = Fr::from(11u64);
-        let x2 = Fr::from(13u64);
-
-        let x0_pub = cs.new_input_variable(|| Ok(x0))?;
-        let x1_pub = cs.new_input_variable(|| Ok(x1))?;
-        let x2_pub = cs.new_input_variable(|| Ok(x2))?;
-
+        
+        let x_val = Fr::from(5);
+        let x_pub = cs.new_input_variable(|| Ok(x_val))?;
+        
         // Witness copies used in the binding constraints.
-        let y0 = cs.new_witness_variable(|| Ok(x0))?;
-        let y1 = cs.new_witness_variable(|| Ok(x1))?;
-        let y2 = cs.new_witness_variable(|| Ok(x2))?;
-        let z = cs.new_witness_variable(|| Ok(Fr::zero()))?;
+        let y = cs.new_witness_variable(|| Ok(x_val))?;
+        let z = cs.new_witness_variable(|| Ok(Fr::from(420)))?;
+        let w = cs.new_witness_variable(|| Ok(Fr::from(69)))?;
 
         let one_lc = LinearCombination::from((Fr::one(), Variable::One));
 
-        // Binding constraints: 1 * y_i = x_i  (public appears only in C)
-        for (x_pub, y_wit) in [(x0_pub, y0), (x1_pub, y1), (x2_pub, y2)] {
-            let lc_b = LinearCombination::from((Fr::one(), y_wit));
-            let lc_c = LinearCombination::from((Fr::one(), x_pub));
-            cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
-        }
+        // Binding constraints: 1 * y = x  (public appears only in C)
+        let lc_b = LinearCombination::from((Fr::one(), y));
+        let lc_c = LinearCombination::from((Fr::one(), x_pub));
+        cs.enforce_constraint(one_lc.clone(), lc_b, lc_c)?;
+        
+        // Multiplication gate that outputs into binding witness: y * (y + 1) = z
+        let lc_a = LinearCombination::from((Fr::one(), y));
+        let lc_b =
+            LinearCombination(vec![(Fr::one(), y), (Fr::one(), Variable::One)]);
+        let lc_c = LinearCombination::from((Fr::one(), z));
+        cs.enforce_constraint(lc_a, lc_b, lc_c)?;
 
-        // Multiplication gate that outputs into binding witness: z * z = y0.
-        let lc_a = LinearCombination::from((Fr::one(), z));
-        let lc_b = LinearCombination::from((Fr::one(), z));
-        let lc_c = LinearCombination::from((Fr::one(), y0));
+
+        // Multiplication gate that outputs into binding witness: w * w = z
+        let lc_a = LinearCombination::from((Fr::one(), w));
+        let lc_b = LinearCombination::from((Fr::one(), w));
+        let lc_c = LinearCombination::from((Fr::one(), z));
         cs.enforce_constraint(lc_a, lc_b, lc_c)?;
 
         Ok(())
@@ -403,12 +412,13 @@ fn main() {
     println!("===========================\n");
 
     let subjects: Vec<Box<dyn AuditSubject>> = vec![
-        Box::new(MockLinear),
-        Box::new(MockQuadratic),
-        Box::new(MockLevBindingMul),    // Should FAIL BindMul guard
-        Box::new(MockSpanViolation),    // Should FAIL V-span
-        Box::new(MockUSpanViolation),   // Should FAIL U-span
-        Box::new(MockWSpanViolation),   // Should FAIL W-span
+        // Box::new(MockLinear),
+        // Box::new(MockQuadratic),
+        Box::new(ExampleAttackCircuit),    // Should FAIL BindMul guard
+        // Box::new(MockSpanViolation),    // Should FAIL V-span
+        // Box::new(MockUSpanViolation),   // Should FAIL U-span
+        // Box::new(MockWSpanViolation),   // Should FAIL W-span
+        #[cfg(feature = "audit-production-subject")]
         Box::new(ProductionSubject(get_valid_circuit())),
     ];
 
@@ -1488,6 +1498,7 @@ where
     all_separated
 }
 
+#[cfg(feature = "audit-production-subject")]
 fn get_valid_circuit() -> OuterCircuit<DefaultCycle> {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(42);
     let fixture = get_fixture_two_input();

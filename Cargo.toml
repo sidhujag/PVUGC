@@ -25,6 +25,10 @@ asm = [
 # Use production SP1 Groth16 VK (from sp1-keys/production/)
 # Without this, uses empty placeholder (for dev before keys are generated)
 sp1-production-vk = []
+# TEMP: used to opt-in SP1 SDK-dependent integration tests only.
+sp1-e2e-tests = []
+# TEMP: opt-in full production-subject path in `audit_circuit` (heavier compile).
+audit-production-subject = []
 
 [dependencies]
 # Arkworks ecosystem (0.5 for PVUGC compatibility)
@@ -59,8 +63,9 @@ k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
 bitcoin = { version = "0.31", default-features = false, features = ["std"] }
 ark-poly = "0.5.0"
 
-# SP1 SDK for zkVM proving (use syscoin/sp1 fork)
-sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
+# TEMP(disabled for VM investigation): SP1 SDK pulls a large external tree.
+# Re-enable once mock-circuit investigation is complete.
+# sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
 
 
 # Dev profile: optimize for faster incremental builds
@@ -101,6 +106,8 @@ serial_test = "2.0"
 test-artifacts = { path = "crates/test-artifacts" }
 bincode = "1"
 rand_chacha = "0.3"
+# TEMP(disabled for VM investigation): enable again when SP1 e2e tests are needed.
+# sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
 
 [patch.crates-io]
 ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }
