@@ -824,6 +824,46 @@ fn scratchpad_sample_combination_checks() {
         );
     }
 
+    // Decisive check for the omission-drift hypothesis:
+    // omitted const×wit columns must be sample-invariant across assignments.
+    let x_inner = vec![x0];
+    let (matrices, _full_for_omit, num_constraints, n_instances, _n_witnesses) =
+        synthesize_outer_with_matrices::<C>(vk_inner.clone(), x_inner, combo.proofs[0].clone())
+            .expect("synthesis for omitted-cols check failed");
+    let domain_size =
+        GeneralEvaluationDomain::<OuterScalar<C>>::new(num_constraints + n_instances)
+            .expect("domain")
+            .size();
+    let omit_cols = compute_omit_const_wit_cols_from_matrices::<OuterScalar<C>>(
+        &matrices,
+        n_instances,
+        domain_size,
+    );
+    if !omit_cols.is_empty() {
+        let baseline = &combo.assignments[0];
+        for &col in &omit_cols {
+            let base_val = baseline[col];
+            for (sample_idx, assignment) in combo.assignments.iter().enumerate().skip(1) {
+                assert_eq!(
+                    assignment[col],
+                    base_val,
+                    "omitted col {} changed at sample {}",
+                    col,
+                    sample_idx
+                );
+            }
+            let mut affine_val = OuterScalar::<C>::zero();
+            for (s, assignment) in combo.coeffs.iter().zip(combo.assignments.iter()) {
+                affine_val += *s * assignment[col];
+            }
+            assert_eq!(
+                affine_val, base_val,
+                "omitted col {} is not affine-invariant under solved coefficients",
+                col
+            );
+        }
+    }
+
     // Validate cancellation also in full (uncut) extended QAP residual space:
     // AB - C - ZH, with H computed by the library helper.
     let x_inner = vec![x0];
