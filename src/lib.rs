@@ -23,6 +23,7 @@ pub mod ctx;
 pub mod decap;
 pub mod error;
 pub mod io;
+pub mod linear_relation;
 pub mod poce;
 pub mod poseidon_fr381_t3;
 pub mod ppe; // Bitcoin integration module (new)
@@ -44,6 +45,8 @@ pub mod sp1_bridge;
 #[allow(dead_code, unused_imports)]
 #[path = "bin/audit_circuit.rs"]
 mod audit_circuit_bin;
+#[cfg(test)]
+mod scratchpad;
 
 // Re-exports - Public API
 pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
@@ -77,3 +80,4 @@ pub use audit_circuit_bin::{
     build_target, check_independence_streaming, Basis, MatrixExtractor, TrapdoorMonomial,
     TrapdoorPolyVector,
 };
+pub use linear_relation::find_relation_with_nonzero_sum;
