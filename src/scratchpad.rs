@@ -9,7 +9,6 @@ use crate::outer_compressed::{
 use crate::find_relation_with_nonzero_sum;
 use crate::outer_compressed::{prove_outer_for, setup_outer_params_for};
 use crate::pvugc_outer::build_pvugc_setup_from_pk_for;
-use crate::test_circuits::AddCircuit;
 use crate::{prover_lean, ColumnArms, LeanProvingKey, OneSidedPvugc, PvugcVk};
 use crate::decap::{build_commitments, decap};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup, VariableBaseMSM};
@@ -24,6 +23,37 @@ use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use ark_std::{One, UniformRand, Zero};
 use rayon::prelude::*;
+
+#[derive(Clone)]
+struct TargetInnerCircuit<F: PrimeField> {
+    x: Option<F>,
+    y: Option<F>,
+}
+
+impl<F: PrimeField> TargetInnerCircuit<F> {
+    fn with_witness(x: F, y: F) -> Self {
+        Self {
+            x: Some(x),
+            y: Some(y),
+        }
+    }
+}
+
+impl<F: PrimeField> ConstraintSynthesizer<F> for TargetInnerCircuit<F> {
+    fn generate_constraints(self, cs: ark_relations::r1cs::ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
+        use ark_relations::r1cs::LinearCombination;
+
+        let x = self.x.ok_or(SynthesisError::AssignmentMissing)?;
+        let y = self.y.ok_or(SynthesisError::AssignmentMissing)?;
+        let x_pub = cs.new_input_variable(|| Ok(x))?;
+        let y_wit = cs.new_witness_variable(|| Ok(y))?;
+
+        let lc_y = LinearCombination::from((F::one(), y_wit));
+        let lc_x = LinearCombination::from((F::one(), x_pub));
+        cs.enforce_constraint(lc_y.clone(), lc_y, lc_x)?;
+        Ok(())
+    }
+}
 
 pub struct SynthesizedOuterWitness<C: RecursionCycle> {
     pub num_constraints: usize,
@@ -61,19 +91,45 @@ fn random_invalid_inner_proof<C: RecursionCycle, R: Rng + ?Sized>(rng: &mut R) -
     }
 }
 
-fn uniform_random_inner_vk<C: RecursionCycle, R: Rng + ?Sized>(
-    n_public_inputs: usize,
-    rng: &mut R,
-) -> InnerVk<C> {
-    InnerVk::<C> {
-        alpha_g1: <<C as RecursionCycle>::InnerE as Pairing>::G1::rand(rng).into_affine(),
-        beta_g2: <<C as RecursionCycle>::InnerE as Pairing>::G2::rand(rng).into_affine(),
-        gamma_g2: <<C as RecursionCycle>::InnerE as Pairing>::G2::rand(rng).into_affine(),
-        delta_g2: <<C as RecursionCycle>::InnerE as Pairing>::G2::rand(rng).into_affine(),
-        gamma_abc_g1: (0..=n_public_inputs)
-            .map(|_| <<C as RecursionCycle>::InnerE as Pairing>::G1::rand(rng).into_affine())
-            .collect(),
+fn sample_square_x_and_witness<F: PrimeField, R: Rng + ?Sized>(rng: &mut R) -> (F, F) {
+    let y = F::rand(rng);
+    (y.square(), y)
+}
+
+fn sample_nonsquare_x<F: PrimeField, R: Rng + ?Sized>(rng: &mut R) -> F {
+    loop {
+        let x = F::rand(rng);
+        if x.sqrt().is_none() {
+            return x;
+        }
     }
+}
+
+fn build_target_inner_pk_vk<C: RecursionCycle, R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> (ark_groth16::ProvingKey<C::InnerE>, InnerVk<C>) {
+    let (x_setup, y_setup) = sample_square_x_and_witness::<InnerScalar<C>, _>(rng);
+    Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::circuit_specific_setup(
+        TargetInnerCircuit::<InnerScalar<C>>::with_witness(x_setup, y_setup),
+        rng,
+    )
+    .expect("inner setup failed")
+}
+
+fn prove_target_inner<C: RecursionCycle, R: RngCore + CryptoRng>(
+    pk_inner: &ark_groth16::ProvingKey<C::InnerE>,
+    x: InnerScalar<C>,
+    rng: &mut R,
+) -> InnerProof<C> {
+    let y = x
+        .sqrt()
+        .expect("prove_target_inner requires square x");
+    Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
+        pk_inner,
+        TargetInnerCircuit::<InnerScalar<C>>::with_witness(x, y),
+        rng,
+    )
+    .expect("inner prove failed")
 }
 
 fn synthesize_outer_with_matrices<C: RecursionCycle>(
@@ -414,18 +470,10 @@ fn measure_outer_circuit_size_for<C: RecursionCycle>() -> (usize, usize, usize) 
     let mut rng = StdRng::seed_from_u64(2026);
 
     // Inner circuit with exactly 1 public input.
-    let x0 = InnerScalar::<C>::from(7u64);
-    let inner_circuit = AddCircuit::<InnerScalar<C>>::with_public_input(x0);
-    let (pk_inner, vk_inner) = Groth16::<C::InnerE>::circuit_specific_setup(inner_circuit, &mut rng)
-        .expect("inner setup failed");
-
+    let (x0, _y0) = sample_square_x_and_witness::<InnerScalar<C>, _>(&mut rng);
+    let (pk_inner, vk_inner) = build_target_inner_pk_vk::<C, _>(&mut rng);
     let x_inner = vec![x0];
-    let inner_proof = Groth16::<C::InnerE>::prove(
-        &pk_inner,
-        AddCircuit::<InnerScalar<C>>::with_public_input(x0),
-        &mut rng,
-    )
-    .expect("inner prove failed");
+    let inner_proof = prove_target_inner::<C, _>(&pk_inner, x0, &mut rng);
 
     let synthesized =
         synthesize_outer_from_explicit_inner::<C>(vk_inner, x_inner, inner_proof)
@@ -444,7 +492,7 @@ pub fn solvable_setup<Rng: RngCore + CryptoRng>(
     AttackerView<<Mnt4Mnt6Cycle as RecursionCycle>::OuterE>,
     PairingOutput<<Mnt4Mnt6Cycle as RecursionCycle>::OuterE>,
 ) {
-    let x = InnerScalar::<Mnt4Mnt6Cycle>::rand(rng);
+    let (x, _y) = sample_square_x_and_witness::<InnerScalar<Mnt4Mnt6Cycle>, _>(rng);
     setup_with_input_e2e(rng, x)
 }
 
@@ -457,23 +505,8 @@ pub fn setup_with_input_e2e<Rng: RngCore + CryptoRng>(
 ) {
     type C = Mnt4Mnt6Cycle;
 
-    let inner_circuit = AddCircuit::<InnerScalar<C>>::with_public_input(x);
-    let (pk_inner, vk_inner) =
-        Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::circuit_specific_setup(
-            inner_circuit,
-            rng,
-        )
-        .expect("inner setup failed");
-    let proof_inner = Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
-        &pk_inner,
-        AddCircuit::<InnerScalar<C>>::with_public_input(x),
-        rng,
-    )
-    .expect("inner prove failed");
-
-    // Keep RNG call-order parity with `unsolvable_setup` before outer CRS generation.
-    // This burns exactly the same random draws as `uniform_random_inner_vk::<C, _>(1, rng)`.
-    let _ = uniform_random_inner_vk::<C, _>(1, rng);
+    let (pk_inner, vk_inner) = build_target_inner_pk_vk::<C, _>(rng);
+    let proof_inner = prove_target_inner::<C, _>(&pk_inner, x, rng);
 
     let (pk_outer, vk_outer) =
         setup_outer_params_for::<C>(&vk_inner, 1, rng).expect("outer setup failed");
@@ -484,10 +517,14 @@ pub fn setup_with_input_e2e<Rng: RngCore + CryptoRng>(
     let pk_inner_for_setup = pk_inner.clone();
     let inner_proof_generator = move |statement: &[InnerScalar<C>]| -> InnerProof<C> {
         assert_eq!(statement.len(), 1, "expected exactly one public input");
+        let x_i = statement[0];
+        let y_i = x_i
+            .sqrt()
+            .expect("interpolation statement must be square for TargetInnerCircuit");
         let mut local_rng = StdRng::seed_from_u64(0xA11CE);
         Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
             &pk_inner_for_setup,
-            AddCircuit::<InnerScalar<C>>::with_public_input(statement[0]),
+            TargetInnerCircuit::<InnerScalar<C>>::with_witness(x_i, y_i),
             &mut local_rng,
         )
         .expect("inner sample proof generation failed")
@@ -522,29 +559,14 @@ pub fn unsolvable_setup<Rng: RngCore + CryptoRng>(
     PairingOutput<<Mnt4Mnt6Cycle as RecursionCycle>::OuterE>,
 ) {
     type C = Mnt4Mnt6Cycle;
-    let x = InnerScalar::<C>::rand(rng);
-
-    // Keep a small inner PK available for proving helper parity (not linked to vk_inner below).
-    let (pk_inner, _vk_inner_valid) =
-        Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::circuit_specific_setup(
-            AddCircuit::<InnerScalar<C>>::with_public_input(x),
-            rng,
-        )
-        .expect("inner setup failed");
-    let proof_inner = Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
-        &pk_inner,
-        AddCircuit::<InnerScalar<C>>::with_public_input(x),
-        rng,
-    )
-    .expect("inner prove failed");
-
-    // Required by request: uniformly random VK.
-    let vk_inner = uniform_random_inner_vk::<C, _>(1, rng);
+    let x = sample_nonsquare_x::<InnerScalar<C>, _>(rng);
+    let (pk_inner, vk_inner) = build_target_inner_pk_vk::<C, _>(rng);
     let (pk_outer, vk_outer) =
         setup_outer_params_for::<C>(&vk_inner, 1, rng).expect("outer setup failed");
 
     // Extract compressed public inputs directly by synthesis (no outer proving needed here).
     let cs = ConstraintSystem::<OuterScalar<C>>::new_ref();
+    let proof_inner = random_invalid_inner_proof::<C, _>(rng);
     let oc = OuterCircuit::<C>::new(vk_inner.clone(), vec![x], proof_inner);
     oc.generate_constraints(cs.clone()).expect("outer synthesis failed");
     cs.finalize();
@@ -554,10 +576,14 @@ pub fn unsolvable_setup<Rng: RngCore + CryptoRng>(
     let pk_inner_for_setup = pk_inner.clone();
     let inner_proof_generator = move |statement: &[InnerScalar<C>]| -> InnerProof<C> {
         assert_eq!(statement.len(), 1, "expected exactly one public input");
+        let x_i = statement[0];
+        let y_i = x_i
+            .sqrt()
+            .expect("interpolation statement must be square for TargetInnerCircuit");
         let mut local_rng = StdRng::seed_from_u64(0xA11CE);
         Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
             &pk_inner_for_setup,
-            AddCircuit::<InnerScalar<C>>::with_public_input(statement[0]),
+            TargetInnerCircuit::<InnerScalar<C>>::with_witness(x_i, y_i),
             &mut local_rng,
         )
         .expect("inner sample proof generation failed")
@@ -577,7 +603,7 @@ pub fn unsolvable_setup<Rng: RngCore + CryptoRng>(
             pvugc_vk,
             lean_pk,
             col_arms,
-            pk_inner: None,
+            pk_inner: Some(pk_inner),
             vk_inner,
             x_inner: vec![x],
         },
@@ -597,7 +623,10 @@ pub fn decap_e2e(
         .expect("decap_e2e requires AttackerView with pk_inner=Some(..)");
     let inner_proof = Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
         pk_inner,
-        AddCircuit::<InnerScalar<C>>::with_public_input(x),
+        TargetInnerCircuit::<InnerScalar<C>>::with_witness(
+            x,
+            x.sqrt().expect("decap_e2e requires square statement"),
+        ),
         &mut StdRng::seed_from_u64(0xDECAF_u64),
     )
     .expect("inner prove failed");
@@ -771,8 +800,8 @@ fn scratchpad_sample_combination_checks() {
     type C = Mnt4Mnt6Cycle;
     let mut rng = StdRng::seed_from_u64(2028);
 
-    let x0 = InnerScalar::<C>::rand(&mut rng);
-    let vk_inner = uniform_random_inner_vk::<C, _>(1, &mut rng);
+    let x0 = sample_nonsquare_x::<InnerScalar<C>, _>(&mut rng);
+    let (_pk_inner, vk_inner) = build_target_inner_pk_vk::<C, _>(&mut rng);
 
     let x_inner = vec![x0];
     let combo =
@@ -938,8 +967,8 @@ fn scratchpad_omitted_cols_disjoint_from_randomized_tail() {
     const RANDOMIZED_TAIL_WITNESS_VARS: usize = 7;
 
     let mut rng = StdRng::seed_from_u64(4040);
-    let x0 = InnerScalar::<C>::rand(&mut rng);
-    let vk_inner = uniform_random_inner_vk::<C, _>(1, &mut rng);
+    let x0 = sample_nonsquare_x::<InnerScalar<C>, _>(&mut rng);
+    let (_pk_inner, vk_inner) = build_target_inner_pk_vk::<C, _>(&mut rng);
     let proof_inner = random_invalid_inner_proof::<C, _>(&mut rng);
 
     let (matrices, _full, num_constraints, n_instances, n_witnesses) =
@@ -995,7 +1024,10 @@ fn fake_decap_matches_real_decap_on_valid_assignment() {
         .expect("solvable_setup must provide pk_inner");
     let inner_proof = Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
         pk_inner,
-        AddCircuit::<InnerScalar<C>>::with_public_input(x),
+        TargetInnerCircuit::<InnerScalar<C>>::with_witness(
+            x,
+            x.sqrt().expect("solvable_setup must produce square x"),
+        ),
         &mut StdRng::seed_from_u64(0xDECAF_u64),
     )
     .expect("inner prove failed");
