@@ -15,7 +15,7 @@ use crate::decap::{build_commitments, decap};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{FftField, Field, PrimeField};
 use ark_groth16::{Groth16, VerifyingKey as Groth16VK};
-use ark_groth16::r1cs_to_qap::{evaluate_constraint, PvugcReduction};
+use ark_groth16::r1cs_to_qap::{evaluate_constraint, PvugcReduction, R1CSToQAP};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, SynthesisError,
@@ -146,11 +146,11 @@ fn row_error_vector<F: ark_ff::PrimeField>(
     out
 }
 
-/// Compute full (uncut) QAP-domain error evaluations:
-/// e = A_eval * B_eval - C_eval, where A/B/C are laid out over
-/// domain size `num_constraints + num_instance_variables` and include
-/// the public-input copy segment in A.
-fn full_qap_error_vector<F: FftField>(
+/// Compute full (uncut) extended QAP residual evaluations:
+/// e = A_eval * B_eval - C_eval - Z_eval * H_eval
+/// where H is taken from the library helper
+/// `PvugcReduction::witness_map_from_matrices`.
+fn extended_qap_residual_vector_from_helper<F: FftField + PrimeField>(
     matrices: &ConstraintMatrices<F>,
     full_assignment: &[F],
     num_instance_variables: usize,
@@ -164,6 +164,21 @@ fn full_qap_error_vector<F: FftField>(
         return Err(SynthesisError::Unsatisfiable);
     }
 
+    // H coefficients from the reduction helper (library path).
+    let mut h_coeff = <PvugcReduction as R1CSToQAP>::witness_map_from_matrices::<
+        F,
+        GeneralEvaluationDomain<F>,
+    >(
+        matrices,
+        num_instance_variables,
+        num_constraints,
+        full_assignment,
+    )?;
+    h_coeff.resize(domain_size, F::zero());
+    domain.fft_in_place(&mut h_coeff);
+
+    // Build A,B,C evaluations over the full QAP domain shape.
+    // IMPORTANT: for PvugcReduction, there is no implicit input-copy block in A.
     let mut a_eval = vec![F::zero(); domain_size];
     let mut b_eval = vec![F::zero(); domain_size];
     let mut c_eval = vec![F::zero(); domain_size];
@@ -174,16 +189,11 @@ fn full_qap_error_vector<F: FftField>(
         c_eval[i] = evaluate_constraint(&matrices.c[i], full_assignment);
     }
 
-    let copy_start = num_constraints;
-    let copy_end = core::cmp::min(copy_start + num_instance_variables, domain_size);
-    let copy_len = copy_end.saturating_sub(copy_start);
-    if copy_len > 0 {
-        a_eval[copy_start..copy_end].copy_from_slice(&full_assignment[..copy_len]);
-    }
-
     let mut out = vec![F::zero(); domain_size];
     for i in 0..domain_size {
-        out[i] = a_eval[i] * b_eval[i] - c_eval[i];
+        let point = domain.element(i);
+        let z_eval = domain.evaluate_vanishing_polynomial(point);
+        out[i] = a_eval[i] * b_eval[i] - c_eval[i] - z_eval * h_coeff[i];
     }
     Ok(out)
 }
@@ -782,35 +792,36 @@ fn scratchpad_sample_combination_checks() {
         );
     }
 
-    // Validate cancellation also in full (uncut) QAP-domain error space.
+    // Validate cancellation also in full (uncut) extended QAP residual space:
+    // AB - C - ZH, with H computed by the library helper.
     let x_inner = vec![x0];
     let (matrices, _full0_uncut, num_constraints, n_instances, _n_witnesses) =
         synthesize_outer_with_matrices::<C>(vk_inner.clone(), x_inner, combo.proofs[0].clone())
             .expect("synthesis for uncut-error check failed");
-    let mut full_errors = Vec::with_capacity(combo.assignments.len());
+    let mut full_residuals = Vec::with_capacity(combo.assignments.len());
     for assignment in &combo.assignments {
-        full_errors.push(
-            full_qap_error_vector::<OuterScalar<C>>(
+        full_residuals.push(
+            extended_qap_residual_vector_from_helper::<OuterScalar<C>>(
                 &matrices,
                 assignment,
                 n_instances,
                 num_constraints,
             )
-            .expect("full_qap_error_vector failed"),
+            .expect("extended_qap_residual_vector_from_helper failed"),
         );
     }
-    let full_n = full_errors[0].len();
-    for err in &full_errors {
-        assert_eq!(err.len(), full_n, "uncut error vectors must have equal length");
+    let full_n = full_residuals[0].len();
+    for err in &full_residuals {
+        assert_eq!(err.len(), full_n, "uncut residual vectors must have equal length");
     }
     for i in 0..full_n {
         let mut sum_i = OuterScalar::<C>::zero();
-        for (s, err) in combo.coeffs.iter().zip(full_errors.iter()) {
+        for (s, err) in combo.coeffs.iter().zip(full_residuals.iter()) {
             sum_i += *s * err[i];
         }
         assert!(
             sum_i.is_zero(),
-            "combined uncut error must be zero at row {i}, got {:?}",
+            "combined uncut residual (AB-C-ZH) must be zero at row {i}, got {:?}",
             sum_i
         );
     }
