@@ -302,6 +302,38 @@ fn randomize_last_witness_variables<F: ark_ff::PrimeField, R: Rng + ?Sized>(
     }
 }
 
+fn compute_omit_const_wit_cols_from_matrices<F: PrimeField>(
+    matrices: &ConstraintMatrices<F>,
+    num_public: usize,
+    domain_size: usize,
+) -> std::collections::HashSet<usize> {
+    let mut omit_const_wit_cols: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if num_public <= 1 {
+        return omit_const_wit_cols;
+    }
+    for pub_col in 1..num_public {
+        let mut c_rows: Vec<usize> = Vec::new();
+        for (row, terms) in matrices.c.iter().enumerate() {
+            if row >= domain_size {
+                continue;
+            }
+            if terms.iter().any(|&(_, col)| col == pub_col) {
+                c_rows.push(row);
+            }
+        }
+        for &row in &c_rows {
+            let b_wit_cols: Vec<usize> = matrices.b[row]
+                .iter()
+                .filter_map(|&(_, col)| if col >= num_public { Some(col) } else { None })
+                .collect();
+            if b_wit_cols.len() == 1 {
+                omit_const_wit_cols.insert(b_wit_cols[0]);
+            }
+        }
+    }
+    omit_const_wit_cols
+}
+
 /// Sample three random invalid inner proofs for the same (vk, x), randomize
 /// the last outer witness variable independently for each sample, then solve:
 ///   s1 * e1 + s2 * e2 + s3 * e3 = 0   and   s1 + s2 + s3 = 1
@@ -857,6 +889,47 @@ fn scratchpad_sample_combination_checks() {
     assert!(
         !h_is_zero,
         "expected non-zero affine combination of H-vectors, got all-zero"
+    );
+}
+
+#[test]
+fn scratchpad_omitted_cols_disjoint_from_randomized_tail() {
+    type C = Mnt4Mnt6Cycle;
+    const RANDOMIZED_TAIL_WITNESS_VARS: usize = 7;
+
+    let mut rng = StdRng::seed_from_u64(4040);
+    let x0 = InnerScalar::<C>::rand(&mut rng);
+    let vk_inner = uniform_random_inner_vk::<C, _>(1, &mut rng);
+    let proof_inner = random_invalid_inner_proof::<C, _>(&mut rng);
+
+    let (matrices, _full, num_constraints, n_instances, n_witnesses) =
+        synthesize_outer_with_matrices::<C>(vk_inner, vec![x0], proof_inner)
+            .expect("synthesis failed");
+    let domain_size = GeneralEvaluationDomain::<OuterScalar<C>>::new(num_constraints + n_instances)
+        .expect("domain")
+        .size();
+
+    let omit_cols = compute_omit_const_wit_cols_from_matrices::<OuterScalar<C>>(
+        &matrices,
+        n_instances,
+        domain_size,
+    );
+
+    let count = core::cmp::min(RANDOMIZED_TAIL_WITNESS_VARS, n_witnesses);
+    let tail_start = n_instances + n_witnesses - count;
+    let tail_end = n_instances + n_witnesses;
+    let tail_cols: std::collections::HashSet<usize> = (tail_start..tail_end).collect();
+
+    let overlap: Vec<usize> = omit_cols
+        .iter()
+        .copied()
+        .filter(|c| tail_cols.contains(c))
+        .collect();
+
+    assert!(
+        overlap.is_empty(),
+        "omitted const×wit cols overlap randomized tail: {:?}",
+        overlap
     );
 }
 
