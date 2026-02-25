@@ -146,6 +146,48 @@ fn row_error_vector<F: ark_ff::PrimeField>(
     out
 }
 
+/// Compute full (uncut) QAP-domain error evaluations:
+/// e = A_eval * B_eval - C_eval, where A/B/C are laid out over
+/// domain size `num_constraints + num_instance_variables` and include
+/// the public-input copy segment in A.
+fn full_qap_error_vector<F: FftField>(
+    matrices: &ConstraintMatrices<F>,
+    full_assignment: &[F],
+    num_instance_variables: usize,
+    num_constraints: usize,
+) -> Result<Vec<F>, SynthesisError> {
+    let domain = GeneralEvaluationDomain::<F>::new(num_constraints + num_instance_variables)
+        .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+    let domain_size = domain.size();
+
+    if full_assignment.len() < num_instance_variables {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+
+    let mut a_eval = vec![F::zero(); domain_size];
+    let mut b_eval = vec![F::zero(); domain_size];
+    let mut c_eval = vec![F::zero(); domain_size];
+
+    for i in 0..num_constraints {
+        a_eval[i] = evaluate_constraint(&matrices.a[i], full_assignment);
+        b_eval[i] = evaluate_constraint(&matrices.b[i], full_assignment);
+        c_eval[i] = evaluate_constraint(&matrices.c[i], full_assignment);
+    }
+
+    let copy_start = num_constraints;
+    let copy_end = core::cmp::min(copy_start + num_instance_variables, domain_size);
+    let copy_len = copy_end.saturating_sub(copy_start);
+    if copy_len > 0 {
+        a_eval[copy_start..copy_end].copy_from_slice(&full_assignment[..copy_len]);
+    }
+
+    let mut out = vec![F::zero(); domain_size];
+    for i in 0..domain_size {
+        out[i] = a_eval[i] * b_eval[i] - c_eval[i];
+    }
+    Ok(out)
+}
+
 /// Compute H in evaluation form by:
 /// 1) building A,B,C in coefficient form for this assignment,
 /// 2) computing AB-C,
@@ -736,6 +778,39 @@ fn scratchpad_sample_combination_checks() {
         assert!(
             sum_i.is_zero(),
             "combined error must be zero at row {i}, got {:?}",
+            sum_i
+        );
+    }
+
+    // Validate cancellation also in full (uncut) QAP-domain error space.
+    let x_inner = vec![x0];
+    let (matrices, _full0_uncut, num_constraints, n_instances, _n_witnesses) =
+        synthesize_outer_with_matrices::<C>(vk_inner.clone(), x_inner, combo.proofs[0].clone())
+            .expect("synthesis for uncut-error check failed");
+    let mut full_errors = Vec::with_capacity(combo.assignments.len());
+    for assignment in &combo.assignments {
+        full_errors.push(
+            full_qap_error_vector::<OuterScalar<C>>(
+                &matrices,
+                assignment,
+                n_instances,
+                num_constraints,
+            )
+            .expect("full_qap_error_vector failed"),
+        );
+    }
+    let full_n = full_errors[0].len();
+    for err in &full_errors {
+        assert_eq!(err.len(), full_n, "uncut error vectors must have equal length");
+    }
+    for i in 0..full_n {
+        let mut sum_i = OuterScalar::<C>::zero();
+        for (s, err) in combo.coeffs.iter().zip(full_errors.iter()) {
+            sum_i += *s * err[i];
+        }
+        assert!(
+            sum_i.is_zero(),
+            "combined uncut error must be zero at row {i}, got {:?}",
             sum_i
         );
     }
