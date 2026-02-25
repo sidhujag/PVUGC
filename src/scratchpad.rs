@@ -22,6 +22,7 @@ use ark_relations::r1cs::{
 use ark_snark::SNARK;
 use ark_std::rand::{rngs::StdRng, CryptoRng, Rng, RngCore, SeedableRng};
 use ark_std::{One, UniformRand, Zero};
+use rayon::prelude::*;
 
 pub struct SynthesizedOuterWitness<C: RecursionCycle> {
     pub num_constraints: usize,
@@ -548,19 +549,42 @@ fn fake_decap_from_full_assignment(
         witness_scalars_bigint,
     );
 
-    for (i, j, base) in &view.lean_pk.h_query_wit {
-        let ii = *i as usize;
-        let jj = *j as usize;
-        assert!(
-            ii < full_assignment.len() && jj < full_assignment.len(),
-            "h_query_wit index out of bounds: ({ii}, {jj}) for assignment len {}",
-            full_assignment.len()
-        );
-        let coeff = full_assignment[ii] * full_assignment[jj];
-        if coeff.is_zero() {
-            continue;
-        }
-        c_acc += base.into_group() * coeff;
+    // H-term via chunked MSM (parity with lean prover performance pattern).
+    const MSM_CHUNK_SIZE: usize = 1 << 20;
+    let h_bases_scalars: Vec<_> = view
+        .lean_pk
+        .h_query_wit
+        .par_iter()
+        .filter_map(|(i, j, base)| {
+            let ii = *i as usize;
+            let jj = *j as usize;
+            assert!(
+                ii < full_assignment.len() && jj < full_assignment.len(),
+                "h_query_wit index out of bounds: ({ii}, {jj}) for assignment len {}",
+                full_assignment.len()
+            );
+            let coeff = full_assignment[ii] * full_assignment[jj];
+            if coeff.is_zero() {
+                None
+            } else {
+                Some((*base, coeff))
+            }
+        })
+        .collect();
+
+    let chunk_results: Vec<_> = h_bases_scalars
+        .par_chunks(MSM_CHUNK_SIZE)
+        .map(|chunk| {
+            let (h_bases, h_scalars): (Vec<_>, Vec<_>) = chunk.iter().cloned().unzip();
+            let h_scalars_bigint: Vec<_> = h_scalars.iter().map(|s| s.into_bigint()).collect();
+            <<<C as RecursionCycle>::OuterE as Pairing>::G1 as VariableBaseMSM>::msm_bigint(
+                &h_bases,
+                &h_scalars_bigint,
+            )
+        })
+        .collect();
+    for partial in chunk_results {
+        c_acc += partial;
     }
 
     let proof_lean = ark_groth16::Proof::<<C as RecursionCycle>::OuterE> {
@@ -673,11 +697,13 @@ fn attack() {
     let combo = sample_combination::<C, _>(view.vk_inner.clone(), view.x_inner.clone(), &mut rng)
         .expect("sample_combination failed");
 
-    let ks: Vec<PairingOutput<E>> = combo
-        .assignments
-        .iter()
-        .map(|a| fake_decap_from_full_assignment(&view, a))
-        .collect();
+    let total = combo.assignments.len();
+    let mut ks: Vec<PairingOutput<E>> = Vec::with_capacity(total);
+    for (idx, assignment) in combo.assignments.iter().enumerate() {
+        let k_i = fake_decap_from_full_assignment(&view, assignment);
+        println!("[scratchpad::attack] fake decap progress: {}/{}", idx + 1, total);
+        ks.push(k_i);
+    }
     let attack_k = combine_k_with_scalars::<E>(&combo.coeffs, &ks);
     println!(
         "[scratchpad::attack] samples={}, touched_rows={}, recovered_matches_target={}",
