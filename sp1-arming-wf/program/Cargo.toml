@@ -1,0 +1,20 @@
+[package]
+name = "pvugc-sp1-arming-wf-program"
+version = "0.1.0"
+edition = "2021"
+
+# SP1 guest programs typically build as binaries with a `no_main` entrypoint.
+
+[dependencies]
+sp1-zkvm = { path = "../../../sp1/crates/zkvm/entrypoint" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+# Outer curve / GT key derivation
+ark-bw6-761 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-serialize = "0.5"
+
+[workspace]
+

@@ -59,8 +59,8 @@ k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
 bitcoin = { version = "0.31", default-features = false, features = ["std"] }
 ark-poly = "0.5.0"
 
-# SP1 SDK for zkVM proving (use syscoin/sp1 fork)
-sp1-sdk = { git = "https://github.com/syscoin/sp1", features = ["native-gnark"] }
+# SP1 SDK for zkVM proving (local checkout). Assumes `sp1/` sits next to this repo.
+sp1-sdk = { path = "../sp1/crates/sdk", features = ["native-gnark"] }
 
 
 # Dev profile: optimize for faster incremental builds
@@ -101,6 +101,7 @@ serial_test = "2.0"
 test-artifacts = { path = "crates/test-artifacts" }
 bincode = "1"
 rand_chacha = "0.3"
+serde = { version = "1", features = ["derive"] }
 
 [patch.crates-io]
 ark-r1cs-std = { git = "https://github.com/syscoin/r1cs-std", rev = "2a28ae9ea3d10e6e55cfa17956464a45228879d2" }

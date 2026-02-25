@@ -1,31 +1,35 @@
-//! Ciphertext helpers with Poseidon-based DEM (Key-Committing Deterministic Encryption Mode)
+//! Ciphertext helpers with SHA-256-based DEM (Key-Committing Deterministic Encryption Mode)
 //!
-//! Implements the Poseidon-based DEM used by PVUGC:
+//! Implements the SHA-256-based DEM used by PVUGC:
 //! - KDF inputs are unchanged (ser_GT(M), ctx_hash, GS digest).
-//! - Keystream blocks are derived from Poseidon with the transcript binding
-//!   digest and a counter: `KS_i = Poseidon("PVUGC/DEM/keystream" || K_i ||
+//! - Keystream blocks are derived from SHA-256 with the transcript binding
+//!   digest and a counter: `KS_i = SHA256("PVUGC/DEM/keystream" || K_i ||
 //!   ad_digest || counter_le)`.
-//! - Tags are `τ_i = Poseidon("PVUGC/DEM/tag" || K_i || ad_digest || ct_i)[..32]`.
+//! - Tags are `τ_i = SHA256("PVUGC/DEM/tag" || K_i || ad_digest || ct_i)`.
 //!
 //! AD_core binds 15 components per spec §8:293:
 //! "PVUGC/WE/v1" || vk_hash || H_bytes(x) || ctx_hash || tapleaf_hash ||
 //! tapleaf_version || txid_template || path_tag || share_index || T_i || T ||
 //! {D_j} || D_δ || GS_instance_digest
 
-use crate::{
-    error::{Error, Result},
-    poseidon_fr381_t3::{absorb_bytes_native_fr, POSEIDON381_PARAMS_T3_V1},
-};
-use ark_bls12_381::Fr;
-use ark_crypto_primitives::sponge::{poseidon::PoseidonSponge, CryptographicSponge};
+use crate::error::{Error, Result};
 use ark_ec::pairing::{Pairing, PairingOutput};
-use core::convert::TryInto;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-pub const DEM_PROFILE_ID: &[u8] = b"PVUGC/DEM-Poseidon-v1";
+// Historical name retained for now (not in production).
+pub const DEM_PROFILE_ID: &[u8] = b"PVUGC/DEM-SHA256-v1";
 const AD_CORE_HASH_DOMAIN: &[u8] = b"PVUGC/AD_CORE";
 const DEM_KEYSTREAM_DOMAIN: &[u8] = b"PVUGC/DEM/keystream";
 const DEM_TAG_DOMAIN: &[u8] = b"PVUGC/DEM/tag";
+
+fn sha256_concat(parts: &[&[u8]]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    for p in parts {
+        h.update(p);
+    }
+    h.finalize().into()
+}
 
 /// Complete AD_core binding per spec §8:293
 /// Binds all 15 components to ensure ciphertext integrity
@@ -134,18 +138,18 @@ impl AdCore {
     }
 }
 
-/// DEM-Poseidon: hash-only deterministic encryption mode.
-/// Per spec §8: keystream and tag are derived from Poseidon2 with domain separation.
+/// DEM-SHA256: hash-only deterministic encryption mode.
+/// Per spec §8: keystream and tag are derived from SHA-256 with domain separation.
 #[derive(Clone, Debug)]
 pub struct DemP2 {
     /// Key derived from R^ρ
     key: Vec<u8>,
-    /// Poseidon digest of AD_core (fixed-size binding)
+    /// Digest of AD_core (fixed-size binding)
     ad_digest: [u8; 32],
 }
 
 impl DemP2 {
-    /// Create DEM-Poseidon instance
+    /// Create DEM instance
     pub fn new(k_bytes: &[u8], ad_core: &[u8]) -> Self {
         let ad_digest = ad_core_digest(ad_core);
         Self {
@@ -154,7 +158,7 @@ impl DemP2 {
         }
     }
 
-    /// Encrypt plaintext with DEM-Poseidon
+    /// Encrypt plaintext with DEM
     /// ct = pt ⊕ keystream
     pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
         let keystream = self.derive_keystream(plaintext.len());
@@ -165,27 +169,28 @@ impl DemP2 {
             .collect()
     }
 
-    /// Decrypt ciphertext with DEM-Poseidon
+    /// Decrypt ciphertext with DEM
     /// pt = ct ⊕ keystream
     pub fn decrypt(&self, ciphertext: &[u8]) -> Vec<u8> {
         // XOR is symmetric
         self.encrypt(ciphertext)
     }
 
-    /// Derive keystream via domain-separated Poseidon2 sponge
+    /// Derive keystream via domain-separated SHA-256 blocks
     fn derive_keystream(&self, len: usize) -> Vec<u8> {
         let mut keystream = Vec::with_capacity(len);
         let mut counter: u32 = 0;
 
         while keystream.len() < len {
-            let mut sponge = PoseidonSponge::<Fr>::new(&POSEIDON381_PARAMS_T3_V1);
-            absorb_bytes_native_fr(&mut sponge, DEM_KEYSTREAM_DOMAIN);
-            absorb_bytes_native_fr(&mut sponge, &self.key);
-            absorb_bytes_native_fr(&mut sponge, &self.ad_digest);
             let counter_bytes = counter.to_le_bytes();
-            absorb_bytes_native_fr(&mut sponge, &counter_bytes);
-            let block = sponge.squeeze_bytes(len - keystream.len());
-            keystream.extend_from_slice(&block);
+            let block = sha256_concat(&[
+                DEM_KEYSTREAM_DOMAIN,
+                &self.key,
+                &self.ad_digest,
+                &counter_bytes,
+            ]);
+            let remaining = len - keystream.len();
+            keystream.extend_from_slice(&block[..core::cmp::min(32, remaining)]);
             counter = counter
                 .checked_add(1)
                 .expect("DEM keystream counter overflowed");
@@ -195,15 +200,10 @@ impl DemP2 {
     }
 }
 
-/// Compute key-commitment tag τ_i per spec §8:286 (DEM-Poseidon)
+/// Compute key-commitment tag τ_i per spec §8:286 (DEM-SHA256)
 pub fn compute_key_commitment_tag(k_bytes: &[u8], ad_core: &[u8], ciphertext: &[u8]) -> [u8; 32] {
     let ad_digest = ad_core_digest(ad_core);
-    let mut sponge = PoseidonSponge::<Fr>::new(&POSEIDON381_PARAMS_T3_V1);
-    absorb_bytes_native_fr(&mut sponge, DEM_TAG_DOMAIN);
-    absorb_bytes_native_fr(&mut sponge, k_bytes);
-    absorb_bytes_native_fr(&mut sponge, &ad_digest);
-    absorb_bytes_native_fr(&mut sponge, ciphertext);
-    bytes32_from_sponge(&mut sponge)
+    sha256_concat(&[DEM_TAG_DOMAIN, k_bytes, &ad_digest, ciphertext])
 }
 
 /// Verify DEM tag (key-commitment binding)
@@ -220,19 +220,10 @@ pub fn verify_key_commitment(
 
 /// Domain-separated digest of `ad_core`.
 ///
-/// ad_digest = Poseidon2("PVUGC/AD_CORE" || len(ad_core)_le || ad_core)
+/// ad_digest = SHA256("PVUGC/AD_CORE" || len(ad_core)_le || ad_core)
 pub fn ad_core_digest(ad_core: &[u8]) -> [u8; 32] {
-    let mut sponge = PoseidonSponge::<Fr>::new(&POSEIDON381_PARAMS_T3_V1);
-    absorb_bytes_native_fr(&mut sponge, AD_CORE_HASH_DOMAIN);
     let len_bytes = (ad_core.len() as u64).to_le_bytes();
-    absorb_bytes_native_fr(&mut sponge, &len_bytes);
-    absorb_bytes_native_fr(&mut sponge, ad_core);
-    bytes32_from_sponge(&mut sponge)
-}
-
-fn bytes32_from_sponge(sponge: &mut PoseidonSponge<Fr>) -> [u8; 32] {
-    let bytes = sponge.squeeze_bytes(32);
-    bytes.try_into().expect("poseidon squeeze length")
+    sha256_concat(&[AD_CORE_HASH_DOMAIN, &len_bytes, ad_core])
 }
 
 /// GS attestation size bounds per spec §6:185

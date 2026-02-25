@@ -41,6 +41,7 @@ pub mod test_fixtures; // Shared fixtures with disk caching
 
 // SP1 Bridge: Simplified integration for gnark proofs → PVUGC
 pub mod sp1_bridge;
+pub mod sp1_arming_wf;
 
 // Re-exports - Public API
 pub use adaptor_ve::{prove_adaptor_ve, verify_adaptor_ve, AdaptorVeProof};
