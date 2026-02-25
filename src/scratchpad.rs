@@ -329,6 +329,10 @@ pub fn setup_with_input_e2e<Rng: RngCore + CryptoRng>(
     )
     .expect("inner prove failed");
 
+    // Keep RNG call-order parity with `unsolvable_setup` before outer CRS generation.
+    // This burns exactly the same random draws as `uniform_random_inner_vk::<C, _>(1, rng)`.
+    let _ = uniform_random_inner_vk::<C, _>(1, rng);
+
     let (pk_outer, vk_outer) =
         setup_outer_params_for::<C>(&vk_inner, 1, rng).expect("outer setup failed");
     let (_proof_outer, _vk_outer_check, public_inputs) =
@@ -681,7 +685,7 @@ fn scratchpad_sample_combination_checks() {
 
 #[test]
 fn legitimate_encap_decap_flow() {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = StdRng::seed_from_u64(1337);
     let (view, expected_k) = solvable_setup(&mut rng);
     let decapped_k = decap_e2e(&view);
     assert_eq!(decapped_k, expected_k, "decapsulated key does not match setup key");
