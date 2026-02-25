@@ -13,9 +13,10 @@ use crate::test_circuits::AddCircuit;
 use crate::{prover_lean, ColumnArms, LeanProvingKey, OneSidedPvugc, PvugcVk};
 use crate::decap::{build_commitments, decap};
 use ark_ec::{pairing::{Pairing, PairingOutput}, AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{Field, PrimeField};
+use ark_ff::{FftField, Field, PrimeField};
 use ark_groth16::{Groth16, VerifyingKey as Groth16VK};
 use ark_groth16::r1cs_to_qap::{evaluate_constraint, PvugcReduction};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, SynthesisError,
 };
@@ -143,6 +144,63 @@ fn row_error_vector<F: ark_ff::PrimeField>(
         out[i] = a * b - c;
     }
     out
+}
+
+/// Compute H in evaluation form by:
+/// 1) building A,B,C in coefficient form for this assignment,
+/// 2) computing AB-C,
+/// 3) dividing by vanishing polynomial Z with remainder,
+/// 4) casting quotient back to evaluation form.
+fn find_h_through_div_rem<F: FftField>(
+    matrices: &ConstraintMatrices<F>,
+    full_assignment: &[F],
+    num_instance_variables: usize,
+    num_constraints: usize,
+) -> Result<Vec<F>, SynthesisError> {
+    let domain = GeneralEvaluationDomain::<F>::new(num_constraints + num_instance_variables)
+        .ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+    let domain_size = domain.size();
+
+    if full_assignment.len() < num_instance_variables {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+
+    // Build A,B,C evaluations over the full QAP domain shape.
+    let mut a_eval = vec![F::zero(); domain_size];
+    let mut b_eval = vec![F::zero(); domain_size];
+    let mut c_eval = vec![F::zero(); domain_size];
+
+    for i in 0..num_constraints {
+        a_eval[i] = evaluate_constraint(&matrices.a[i], full_assignment);
+        b_eval[i] = evaluate_constraint(&matrices.b[i], full_assignment);
+        c_eval[i] = evaluate_constraint(&matrices.c[i], full_assignment);
+    }
+    let copy_start = num_constraints;
+    let copy_end = core::cmp::min(copy_start + num_instance_variables, domain_size);
+    let copy_len = copy_end.saturating_sub(copy_start);
+    if copy_len > 0 {
+        a_eval[copy_start..copy_end].copy_from_slice(&full_assignment[..copy_len]);
+    }
+
+    // Cast evaluations to coefficient form.
+    let a_poly = DensePolynomial::from_coefficients_slice(&domain.ifft(&a_eval));
+    let b_poly = DensePolynomial::from_coefficients_slice(&domain.ifft(&b_eval));
+    let c_poly = DensePolynomial::from_coefficients_slice(&domain.ifft(&c_eval));
+
+    // AB - C in coefficient form.
+    let ab_minus_c_poly = &(&a_poly * &b_poly) - &c_poly;
+
+    // Divide by vanishing polynomial Z (with remainder).
+    let (h_poly, _remainder_poly) = ab_minus_c_poly.divide_by_vanishing_poly(domain);
+
+    // Cast quotient back to evaluation form on the same domain.
+    let mut h_coeff = vec![F::zero(); domain_size];
+    let take = core::cmp::min(h_poly.coeffs.len(), domain_size);
+    if take > 0 {
+        h_coeff[..take].copy_from_slice(&h_poly.coeffs[..take]);
+    }
+    domain.fft_in_place(&mut h_coeff);
+    Ok(h_coeff)
 }
 
 fn single_nonzero_row<F: ark_ff::PrimeField>(e: &[F]) -> Option<usize> {
@@ -634,7 +692,7 @@ fn scratchpad_sample_combination_checks() {
 
     let x_inner = vec![x0];
     let combo =
-        sample_combination::<C, _>(vk_inner, x_inner, &mut rng).expect("sample_combination failed");
+        sample_combination::<C, _>(vk_inner.clone(), x_inner, &mut rng).expect("sample_combination failed");
 
     assert_eq!(
         combo.proofs.len(),
@@ -681,6 +739,39 @@ fn scratchpad_sample_combination_checks() {
             sum_i
         );
     }
+
+    // Check that the same coefficients do NOT annihilate the derived H vectors.
+    let x_inner = vec![x0];
+    let (matrices, _full0, num_constraints, n_instances, _n_witnesses) =
+        synthesize_outer_with_matrices::<C>(vk_inner, x_inner, combo.proofs[0].clone())
+            .expect("synthesis for H-check failed");
+    let mut h_vectors = Vec::with_capacity(combo.assignments.len());
+    for assignment in &combo.assignments {
+        h_vectors.push(
+            find_h_through_div_rem::<OuterScalar<C>>(
+                &matrices,
+                assignment,
+                n_instances,
+                num_constraints,
+            )
+            .expect("find_h_through_div_rem failed"),
+        );
+    }
+    let h_len = h_vectors[0].len();
+    for h in &h_vectors {
+        assert_eq!(h.len(), h_len, "H vectors must have equal length");
+    }
+    let mut combined_h = vec![OuterScalar::<C>::zero(); h_len];
+    for (s, h) in combo.coeffs.iter().zip(h_vectors.iter()) {
+        for (acc, h_i) in combined_h.iter_mut().zip(h.iter()) {
+            *acc += *s * *h_i;
+        }
+    }
+    let h_is_zero = combined_h.iter().all(|v| v.is_zero());
+    assert!(
+        !h_is_zero,
+        "expected non-zero affine combination of H-vectors, got all-zero"
+    );
 }
 
 #[test]
@@ -689,6 +780,42 @@ fn legitimate_encap_decap_flow() {
     let (view, expected_k) = solvable_setup(&mut rng);
     let decapped_k = decap_e2e(&view);
     assert_eq!(decapped_k, expected_k, "decapsulated key does not match setup key");
+}
+
+#[test]
+fn fake_decap_matches_real_decap_on_valid_assignment() {
+    type C = Mnt4Mnt6Cycle;
+
+    let mut rng = StdRng::seed_from_u64(1337);
+    let (view, _expected_k) = solvable_setup(&mut rng);
+
+    let x = view.x_inner[0];
+    let pk_inner = view
+        .pk_inner
+        .as_ref()
+        .expect("solvable_setup must provide pk_inner");
+    let inner_proof = Groth16::<<C as RecursionCycle>::InnerE, PvugcReduction>::prove(
+        pk_inner,
+        AddCircuit::<InnerScalar<C>>::with_public_input(x),
+        &mut StdRng::seed_from_u64(0xDECAF_u64),
+    )
+    .expect("inner prove failed");
+
+    let outer_circuit = OuterCircuit::<C>::new(view.vk_inner.clone(), view.x_inner.clone(), inner_proof);
+    let (_proof_lean, full_assignment) = prover_lean::prove_lean_with_randomizers(
+        &view.lean_pk,
+        outer_circuit,
+        OuterScalar::<C>::zero(),
+        OuterScalar::<C>::zero(),
+    )
+    .expect("lean proving failed");
+
+    let k_real = decap_e2e(&view);
+    let k_fake = fake_decap_from_full_assignment(&view, &full_assignment);
+    assert_eq!(
+        k_fake, k_real,
+        "fake decap must match decap_e2e on valid assignment"
+    );
 }
 
 #[test]
