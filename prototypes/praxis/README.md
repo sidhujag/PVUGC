@@ -24,6 +24,17 @@ Each recovery outputs the same 65-byte Bitcoin witness signature. Inputs `00` an
 
 The Rust crate has its own manifest and lockfile so it can run on CPU independently of the older SP1 fork.
 
+## Measured CPU run
+
+The existing 16-CPU Linux server built commit `0f55d17` in release mode. All 13 tests passed. Separate arming and recovery processes used fresh randomness, three simulated signers and the reduced fixture. Each pair of valid openings produced identical Bitcoin signature bytes, and the two invalid witnesses returned failures.
+
+| Capsules per signer | Public archive | Setup | Open with 01 | Open with 10 | Peak process RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 82,644 bytes | 0.65 s | 0.42 s | 0.42 s | 4.5 MiB |
+| 104 | 4,268,265 bytes | 31.71 s | 16.16 s | 16.20 s | 16.3 MiB |
+
+Each public receipt was 275 bytes. The timings include archive encoding and validation as applicable, with no precomputed decryptor state. The larger run uses 312 small capsules. These measurements do not extrapolate to full Groth16 statements.
+
 ## What the experiment checks
 
 - The reduced BN254 backend implements the group-valued left and right factors, extension-field weights and ties, quotient and remainder bases, paired alpha copies, and bounded search in Praxis Figures 6 and 7. The program specializes the QAP to the fixture. The backend uses the hash of the recovered target-group value to unmask a random 100-bit seed. A separate domain-separated hash derives a 32-byte key for the authenticated share encryption. The profile uses 2 Boolean variables, extension degree 4, search parameter 8, and real curve operations.
@@ -45,6 +56,10 @@ The Bitcoin test sets `M=2,d=1` to exercise the flow. A separate four-row test e
 ## Full Syscoin integration
 
 The authors report an SP1 v6.1.0 Groth16-verifier encoding with 391,693 Boolean unknowns and 1,692 constraints. Their public Lean repository formalizes parts of the security and correctness argument. The full executable encoder, witness lifting, and corresponding BN254 test vectors were unavailable for this prototype. The reduced backend here would require a general public QAP frontend and full parameter/encoding support to consume them. An independently audited AuxPoW fork guest must also bind the withdrawal, ancestry, starting difficulty context and cumulative-work rule to that statement.
+
+We also measured an [independent gnark verifier frontend](frontend/README.md) with real SP1 keys. A uniform 254-bit expansion of its private and internal wires needs 513,074,158 Boolean unknowns. At the paper's left-factor width of 192, those two arrays alone would use 5.73 TiB per capsule. Its raw rows also leave an outer commitment challenge to be enforced. This calculation rules out using that direct port at the claimed compact size on the test server.
+
+The full configuration also requires a correctly generated Groth16 verifying key. Having one honest PVUGC signer does not authenticate an unrelated SP1 setup ceremony. Deployment must pin and qualify that CRS separately.
 
 The full configuration would require end-to-end measurement and qualification of malicious setup, security across multiple related ciphertexts, and correctness for the application's witness distributions. The published construction uses classical bilinear groups. Its operation counts and ciphertext estimates do not describe this fixture's security or runtime.
 
