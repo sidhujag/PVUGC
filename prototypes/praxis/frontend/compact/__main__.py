@@ -88,6 +88,7 @@ def emit(statement, proof, which, sink=None, arithmetic="integer-limbs"):
         "factored": factored_bqs.FactoredBuilder,
         "packed-factored": factored_bqs.PackedFactoredBuilder,
         "min-bits-factored": factored_bqs.MinBitsFactoredBuilder,
+        "narrow-factored": factored_bqs.NarrowFactoredBuilder,
     }
     if which in CENTERED_PAIRINGS and arithmetic == "integer-limbs":
         raise ValueError("the fused pairing requires centered arithmetic")
@@ -214,6 +215,7 @@ def main():
             "factored",
             "packed-factored",
             "min-bits-factored",
+            "narrow-factored",
         ],
     )
     compile_.add_argument("--rows")

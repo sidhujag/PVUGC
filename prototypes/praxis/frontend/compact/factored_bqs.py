@@ -344,6 +344,7 @@ def evaluate(row, get):
 class FactoredBuilder(Builder):
     affine_limit = 16
     target_products = MAX_PRODUCTS
+    product_cap = MAX_PRODUCTS
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -354,7 +355,7 @@ class FactoredBuilder(Builder):
         return dict(super().shape(), recipe_bytes=self.public_bytes)
 
     def record(self, row, fmax):
-        if fmax > MAX_PRODUCTS:
+        if fmax > self.product_cap:
             raise ValueError("affine-product cap exceeded")
         s = json.dumps(row, separators=(",", ":")).encode() + b"\n"
         self.digest.update(s)
@@ -483,7 +484,7 @@ class PackedFactoredBuilder(FactoredBuilder):
             if combined >= R:
                 continue
             merged = forms | keys
-            if len(merged) > MAX_PRODUCTS:
+            if len(merged) > self.product_cap:
                 continue
             parts.append((base, row))
             self.pending[i] = (parts, combined, merged)
@@ -509,6 +510,13 @@ class MinBitsFactoredBuilder(PackedFactoredBuilder):
     """Retain the narrowest digits while folding the bounded low CRT rows."""
 
     target_products = MAX_PRODUCTS
+
+
+class NarrowFactoredBuilder(PackedFactoredBuilder):
+    """Trade some Boolean coordinates for shorter per-row FFT cosets."""
+
+    target_products = 255
+    product_cap = 255
 
 
 def _int(v):
