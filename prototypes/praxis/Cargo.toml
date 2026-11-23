@@ -1,0 +1,25 @@
+[package]
+name = "pvugc-praxis"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Keep the research backend independently buildable from the historical SP1 fork.
+[workspace]
+
+[dependencies]
+ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-serialize = { version = "0.5", features = ["derive"] }
+bitcoin = "0.31"
+chacha20poly1305 = "0.10"
+k256 = { version = "0.13", features = ["arithmetic", "schnorr"] }
+rand = "0.8"
+rand_chacha = "0.3"
+sha2 = "0.10"
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+musig2 = { version = "0.3", default-features = false, features = ["k256"] }

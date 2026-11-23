@@ -2,20 +2,24 @@
 
 **Status:** Experimental Research Implementation
 
-## 1. Overview
+## Praxis cancellation prototype
+
+The [Praxis prototype](prototypes/praxis/README.md) uses a reduced BN254 witness-encryption capsule in the PVUGC N-of-N Taproot adaptor flow. It supports a two-bit Boolean mismatch fixture. The integration test recovers the same fixed cancellation signature from two different witnesses after setup. The Syscoin AuxPoW verifier and the full Praxis parameters are outstanding.
+
+## 1. Historical Groth–Sahai design
 
 This repository contains an implementation of PVUGC, a cryptographic protocol for extracting Key Encapsulation Mechanism (KEM) secrets from zero-knowledge proofs in a statement-dependent, proof-agnostic manner. The protocol enables decentralized key extraction without requiring trusted committees or knowledge of the masking secret.
 
-The implementation specializes the Groth-Sahai commitment framework to Groth16 verification, yielding a simplified one-sided construction that achieves comparable security guarantees with reduced computational overhead.
+The implementation specializes the Groth-Sahai commitment framework to Groth16 verification, yielding an experimental one-sided construction. Its no-proof-no-spend claim depends on the key-hiding assumption in the specification.
 
 
 ## 2. Protocol Properties
 
-PVUGC satisfies the following cryptographic properties:
+The original design targets the following properties:
 
 - **Proof-Agnosticism:** Different valid proofs π₁, π₂ for the same statement extract identical keys K₁ = K₂
 - **Witness-Independence:** Extracted keys depend only on the statement (vk, public_inputs), not on witness values
-- **Gating:** Key extraction is impossible without a valid proof
+- **Gating:** Security requires the public capsule to hide its secret from a party lacking a valid proof
 - **Permissionless Extraction:** No committee, threshold cryptography, or additional coordination required at extraction time
 - **Statement-Independent Arming:** Armed bases depend only on VK (not on public inputs); statement dependence isolated to target R(vk, x)
 - **Offline Arming:** One-time setup phase; armer goes offline permanently
