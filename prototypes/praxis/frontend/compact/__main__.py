@@ -17,7 +17,14 @@ DUMMY = {
     "c": {"x": "1", "y": "2"},
 }
 ORDER = ("ax", "ay", "bx0", "bx1", "by0", "by1", "cx", "cy")
-CENTERED_PAIRINGS = ("ate-fused", "ate-moving", "ate-paired")
+CENTERED_PAIRINGS = (
+    "ate-fused",
+    "ate-moving",
+    "ate-paired",
+    "ate-moving-projected",
+    "ate-conic",
+    "ate-conic-window",
+)
 
 
 def load_json(path):
@@ -46,6 +53,18 @@ def encoder(which):
         from . import paired_torus
 
         return paired_torus.verify_dense
+    if which == "ate-moving-projected":
+        from . import paired_torus
+
+        return paired_torus.verify_moving_dense
+    if which == "ate-conic":
+        from . import conic
+
+        return conic.verify
+    if which == "ate-conic-window":
+        from . import conic_window
+
+        return conic_window.verify
     if which != "ate":
         raise ValueError(f"unknown pairing encoder {which}")
     from . import ate
@@ -54,18 +73,27 @@ def encoder(which):
 
 
 def emit(statement, proof, which, sink=None, arithmetic="integer-limbs"):
+    from . import factored_bqs
     from .residue_bqs import PackedResidueBuilder, ResidueBuilder
 
     builders = {
         "integer-limbs": Builder,
         "centered": ResidueBuilder,
         "packed-centered": PackedResidueBuilder,
+        "factored": factored_bqs.FactoredBuilder,
+        "packed-factored": factored_bqs.PackedFactoredBuilder,
+        "min-bits-factored": factored_bqs.MinBitsFactoredBuilder,
     }
     if which in CENTERED_PAIRINGS and arithmetic == "integer-limbs":
         raise ValueError("the fused pairing requires centered arithmetic")
     circuit = builders[arithmetic](sink, layout_only=proof is None)
     coords = encoder(which)(circuit, statement, DUMMY if proof is None else proof)
-    metadata = dict(format=FORMAT, fr=str(R), pairing=which, **circuit.shape())
+    fmt = (
+        factored_bqs.FORMAT
+        if isinstance(circuit, factored_bqs.FactoredBuilder)
+        else FORMAT
+    )
+    metadata = dict(format=fmt, fr=str(R), pairing=which, **circuit.shape())
     if arithmetic != "integer-limbs":
         metadata["arithmetic"] = arithmetic
     public_bytes = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode()
@@ -88,6 +116,9 @@ def compile_command(args):
         sink = files.enter_context(open_rows(args.rows, "xb")) if args.rows else None
         arithmetic = args.arithmetic or {
             "ate-paired": "packed-centered",
+            "ate-moving-projected": "factored",
+            "ate-conic": "min-bits-factored",
+            "ate-conic-window": "min-bits-factored",
             "ate-fused": "centered",
             "ate-moving": "centered",
         }.get(args.pairing, "integer-limbs")
@@ -117,13 +148,20 @@ def lift_command(args):
 
 
 def check_command(args):
+    from . import factored_bqs
+
     meta = load_json(args.manifest)
-    if meta["format"] != FORMAT or meta["fr"] != str(R):
+    if meta["format"] not in (FORMAT, factored_bqs.FORMAT) or meta["fr"] != str(R):
         raise ValueError("unexpected BQS format or field")
     data = Path(args.witness).read_bytes()
     n = meta["unknowns"]
     if len(data) != (n + 7) // 8 or (n % 8 and data[-1] >> (n % 8)):
         raise ValueError("invalid Boolean witness length or padding")
+    if meta["format"] == factored_bqs.FORMAT:
+        with open_rows(args.rows, "rb") as rows:
+            proof = factored_bqs.validate_stream(rows, data, meta)
+        print(json.dumps(proof))
+        return
     shape = hashlib.sha256(b"PVUGC Boolean quadratic rows v1\n")
     count = 0
 
@@ -157,10 +195,20 @@ def main():
     compile_ = cmds.add_parser("compile")
     compile_.add_argument("statement")
     compile_.add_argument(
-        "--pairing", choices=["tate", "ate", *CENTERED_PAIRINGS], default="ate-paired"
+        "--pairing",
+        choices=["tate", "ate", *CENTERED_PAIRINGS],
+        default="ate-conic-window",
     )
     compile_.add_argument(
-        "--arithmetic", choices=["integer-limbs", "centered", "packed-centered"]
+        "--arithmetic",
+        choices=[
+            "integer-limbs",
+            "centered",
+            "packed-centered",
+            "factored",
+            "packed-factored",
+            "min-bits-factored",
+        ],
     )
     compile_.add_argument("--rows")
     compile_.add_argument("--manifest")

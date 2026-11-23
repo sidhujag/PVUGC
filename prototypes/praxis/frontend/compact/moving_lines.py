@@ -12,7 +12,7 @@ from .condensed_curve import relation, steps
 from .tower import WIDTH
 
 
-def scaled_twist(b, pair):
+def scaled_twist(b, pair, digits=None, direct_groups=False):
     point, q = pair
     active = point[2] if len(point) == 3 else 1
     t0, z0 = ate_fused._normalized_position(b, point)
@@ -44,7 +44,7 @@ def scaled_twist(b, pair):
     q1 = ate._frob_point(b, q)
     q2 = ate._negative(b, ate._frob_point(b, q1))
     tail = tuple(transform(point) for point in (q1, q2, ate._frob_point(b, q2)))
-    return active, steps(b, transform(q), k, tail)
+    return active, steps(b, transform(q), k, tail, digits, direct_groups)
 
 
 def products(b, pairs):

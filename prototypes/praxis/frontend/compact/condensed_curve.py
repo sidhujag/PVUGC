@@ -28,7 +28,7 @@ def _advice(b, v, variable):
     return tuple(b.witness(x) for x in v) if variable else v
 
 
-def steps(b, q, metric=(1, 0), tail=None):
+def steps(b, q, metric=(1, 0), tail=None, digits=None, direct_groups=False):
     # The circuit shape depends only on BN254's public signed Miller digits.
     variable = b is not None and (
         any(not isinstance(x, int) for x in metric)
@@ -37,14 +37,14 @@ def steps(b, q, metric=(1, 0), tail=None):
     native_metric = _value2(b, metric)
     inv_metric = curve.inverse_nat2(native_metric)
     unscaled = metric == (1, 0)
-    x = q[0]
+    x, ordinate = q
     last = None
 
     def advance(other=None):
         nonlocal x, last
         old_x = _value2(b, x)
         if last is None:
-            old_y = _value2(b, q[1])
+            old_y = _value2(b, ordinate)
         else:
             last_s, last_i = (_value2(b, a) for a in last)
             old_y = curve.subtract2(
@@ -72,7 +72,9 @@ def steps(b, q, metric=(1, 0), tail=None):
         s, t = slope
 
         if last is None:
-            relation(b, [(1, slope, x), (-1, metric, intercept), (-1, metric, q[1])])
+            relation(
+                b, [(1, slope, x), (-1, metric, intercept), (-1, metric, ordinate)]
+            )
         else:
             relation(
                 b,
@@ -118,11 +120,62 @@ def steps(b, q, metric=(1, 0), tail=None):
         last = slope, intercept
         return last
 
-    negative_q = ate._negative(b, q)
-    for digit in ate.DIGITS[1:]:
-        yield advance()
-        if digit:
-            yield advance(q if digit == 1 else negative_q)
+    def snapshot():
+        if last is None:
+            return x, ordinate
+        s, i = last
+        product = curve.mul2(None, _value2(b, s), _value2(b, x))
+        v = curve.subtract2(None, _value2(b, i), curve.mul2(None, inv_metric, product))
+        y = _advice(b, v, variable)
+        relation(b, [(1, metric, y), (1, s, x), (-1, metric, i)])
+        return x, y
+
+    def composite(point):
+        nonlocal x, ordinate, last
+        p, y = snapshot()
+        (x, ordinate), coeffs = direct_conic.grouped(b, p, y, point, metric)
+        last = None
+        return coeffs
+
+    if direct_groups:
+        from . import direct_conic
+
+        direct_conic.certify(tuple(ate.DIGITS if digits is None else digits))
+
+    if digits is None:
+        negative_q = ate._negative(b, q)
+        for digit in ate.DIGITS[1:]:
+            if direct_groups and digit:
+                yield composite(q if digit == 1 else negative_q)
+                continue
+            yield advance()
+            if digit:
+                yield advance(q if digit == 1 else negative_q)
+    else:
+        # Emit the fixed window table, then the live line sequence. The main
+        # ladder's first doubling is exactly the precomputed [2]Q, so its
+        # point and line are shared without duplicate constraints.
+        maximum = max(abs(d) for d in digits)
+        twice_line = advance()
+        twice = snapshot()
+        odd = {1: q}
+        yield twice_line
+        for j in range(3, maximum + 1, 2):
+            line = advance(q if j == 3 else twice)
+            odd[j] = snapshot()
+            yield line
+        if digits[0] != 1 or digits[1] != 0:
+            raise ValueError("this window requires leading digits one and zero")
+        x, last = twice[0], twice_line
+        for index, digit in enumerate(digits[1:]):
+            if direct_groups and digit:
+                point = odd[abs(digit)]
+                yield composite(point if digit > 0 else ate._negative(b, point))
+                continue
+            yield twice_line if index == 0 else advance()
+            if digit:
+                point = odd[abs(digit)]
+                yield advance(point if digit > 0 else ate._negative(b, point))
     if tail is None:
         q1 = ate._frob_point(b, q)
         q2 = ate._negative(b, ate._frob_point(b, q1))
