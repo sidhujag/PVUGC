@@ -16,6 +16,7 @@ The default combines consecutive lines of the optimal Ate pairing on BN254 into 
 | Conic with affine-product rows (`ate-conic`) | 599,347 | 2,690 |
 | Conic with a signed width-four window (`ate-conic-window`) | 573,769 | 2,594 |
 | Leading-three window with direct conic checks (`ate-conic-optimized`, default) | 545,856 | 2,476 |
+| Leading-three window with row width capped at 255 (`--arithmetic narrow-factored`) | 588,373 | 3,305 |
 | Authors’ reported encoder | 391,693 | 1,692 |
 
 The default uses at most 2,036 products of linear forms per row. The packed witness is 68,232 bytes. The public constraint recipes occupy 2,638,762 bytes before gzip, with row digest `434494d311acdb55a844e99b595842f92fcd5879fbb8178853c4f6c1b91506f0`. Of the 545,856 bits, 477,520 encode 1,880 base-field coordinates and 68,336 cover exact arithmetic and selectors. Both proof fixtures lift to the layout obtained from public inputs alone. The raw recipe size excludes the cost of evaluating or publishing the full Praxis ciphertext.
@@ -73,4 +74,4 @@ The default v2 format describes ordinary quadratic rows over Fr. Each row contai
 
 In the earlier v1 format each row is a sum of product terms `[coefficient, left_start, left_width, right_start, right_width]` equated to zero in Fr. Each slice denotes `Σ 2^j w[start+j]`. The reserved pair `(−1,0)` denotes one. This is a compact encoding of ordinary products of public linear forms in Boolean variables. The manifest commits to the statement and row stream, records dimensions, and locates the proof coordinates. The receiver must pin that manifest. The standalone checker reads only the public rows, manifest and packed bits. It performs no elliptic-curve computation. The native Go verifier can independently check the decoded proof.
 
-This frontend runs without the historical gnark diagnostic hint for the outer commitment. Integration with a full-parameter Praxis QAP, adequate security parameters for this shape, corresponding encryption and decryption, and an actual Syscoin AuxPoW guest remain separate work. No ciphertext runtime or secrecy level follows from the frontend counts.
+This frontend runs without the historical gnark diagnostic hint for the outer commitment. The [SP1 signature capsule](../README.md#offline-signature-release) consumes the v2 rows. Its benchmark uses the narrow layout to reduce the QAP FFT to 2,097,152 points. The concrete-security parameters and the Syscoin AuxPoW guest require separate qualification.

@@ -1,6 +1,6 @@
 # Praxis cancellation prototype
 
-This crate replaces PVUGC's historical pairing-derived release key in an executable fixed-transaction experiment. It uses the existing PVUGC Bitcoin sighash code. A three-party MuSig2 adaptor pre-signature and a public setup archive let a challenger finish a native Taproot signature offline. The accepted statement is fixed in the binary to the Boolean relation `(x − y)² = 1`. A different policy digest is rejected. The test uses a synthetic Bitcoin output.
+This crate replaces PVUGC's historical pairing-derived release key in an executable fixed-transaction experiment. It uses the existing PVUGC Bitcoin sighash code. A three-party MuSig2 adaptor pre-signature and a public setup archive let a challenger finish a native Taproot signature offline. The Rust setup uses the Boolean relation `(x − y)² = 1` and a synthetic Bitcoin output. A separate [SP1 signature capsule](frontend/README.md#offline-signature-release) encrypts the resulting signature under a fixed SP1 v6.1.0 Groth16 verifier. This second experiment exercises offline recovery at the full verifier width with a six-copy development profile.
 
 ## Run
 
@@ -55,7 +55,7 @@ The Bitcoin test sets `M=2,d=1` to exercise the flow. A separate four-row test e
 
 ## Full Syscoin integration
 
-The authors report an SP1 v6.1.0 Groth16-verifier encoding with 391,693 Boolean unknowns and 1,692 constraints. Their public Lean repository formalizes parts of the security and correctness argument. The full executable encoder, witness lifting, and corresponding BN254 test vectors were unavailable for this prototype. The [independent compact Boolean frontend](frontend/compact/README.md) now derives and checks a larger encoding for that same verifier. The reduced Praxis ciphertext backend still requires a general QAP implementation and full-parameter support to consume those rows. An independently audited AuxPoW fork guest must also bind the withdrawal, ancestry, starting difficulty context and cumulative-work rule to that statement.
+The authors report an SP1 v6.1.0 Groth16-verifier encoding with 391,693 Boolean unknowns and 1,692 constraints. Their public Lean repository formalizes parts of the security and correctness argument. The full executable encoder, witness lifting, and corresponding BN254 test vectors were unavailable for this prototype. The [independent compact Boolean frontend](frontend/compact/README.md) now derives and checks a larger encoding for that same verifier. The Go backend consumes those rows, constructs their QAP and streams a BN254 ciphertext. It uses six copies to measure recovery. Evaluating secrecy requires selecting and justifying parameters for this verifier shape. An independently audited AuxPoW fork guest must also bind the withdrawal, ancestry, starting difficulty context and cumulative-work rule to that statement.
 
 We also measured an [independent gnark verifier frontend](frontend/README.md) with real SP1 keys. A uniform 254-bit expansion of its private and internal wires needs 513,074,158 Boolean unknowns. At the paper's left-factor width of 192, those two arrays alone would use 5.73 TiB per capsule. Its raw rows also leave an outer commitment challenge to be enforced. This calculation rules out using that direct port at the claimed compact size on the test server.
 

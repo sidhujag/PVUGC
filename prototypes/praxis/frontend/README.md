@@ -2,6 +2,64 @@
 
 The [independent compact frontend](compact/README.md) compiles a fixed SP1 v6.1.0 key and public inputs to a standalone Boolean quadratic system and lifts a real proof to a packed witness. The gnark executable below provides native validation and the earlier uniform-expansion baseline.
 
+## Offline signature release
+
+The `praxis-capsule` CLI encrypts a fixed 64- or 65-byte payload using the published verifier rows, fresh Praxis randomness and AES-256-GCM. The arming process takes the precomputed signature as input. Each opener supplies its own packed proof witness, the public artifacts and the arming receipt. The fixture uses the SP1 clock program and two Groth16 proofs for the same statement. The second proof is obtained by rescaling A and B in the first. Both independently pass native verification. The [three-signer adaptor experiment](../README.md) produces the fixture signature under a separate reduced policy. A setup party that obtains the completed signature in this single-capsule experiment can already spend the fixture output. Integrating the full verifier into each signer's share encryption is required to carry the one-honest-party design through to this path.
+
+Run these commands from `prototypes/praxis/frontend` with Go 1.26.8+, Python 3.10+ and Cargo. They create fresh outputs. Each opening reads the capsule from disk.
+
+```sh
+set -eu
+out=$(mktemp -d)
+go build -mod=readonly -o "$out/native" .
+go build -mod=readonly -o "$out/capsule-cli" ./cmd/praxis-capsule
+vk=testdata/sp1-v6.1.0.vk
+inputs=testdata/sp1-v6.1.0-inputs.json
+"$out/native" -statement "$vk" "$inputs" > "$out/statement.json"
+python3 -m compact compile "$out/statement.json" --arithmetic narrow-factored \
+  --manifest "$out/manifest.json" --rows "$out/rows.jsonl.gz"
+
+cargo build --locked --release --example cancel --manifest-path ../Cargo.toml
+signer=../target/release/examples/cancel
+bitcoin_receipt=$("$signer" arm "$out/bitcoin" 2)
+"$signer" recover "$out/bitcoin" "$bitcoin_receipt" 01 | \
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' > "$out/signature.bin"
+receipt=$("$out/capsule-cli" arm "$out/manifest.json" "$out/rows.jsonl.gz" \
+  "$out/signature.bin" "$out/capsule.bin")
+
+for i in 0 1; do
+  python3 -m compact lift "$out/statement.json" "$out/manifest.json" \
+    testdata/sp1-v6.1.0-pairing.json "$out/w$i.bin" --index "$i"
+  python3 -m compact check "$out/manifest.json" "$out/rows.jsonl.gz" "$out/w$i.bin" > "$out/proof$i.json"
+  "$out/native" -verify-decoded "$vk" "$inputs" < "$out/proof$i.json"
+  "$out/capsule-cli" open "$out/manifest.json" "$out/rows.jsonl.gz" \
+    "$out/capsule.bin" "$receipt" "$out/w$i.bin" "$out/opened$i.bin"
+  cmp "$out/signature.bin" "$out/opened$i.bin"
+done
+```
+
+The sender must authenticate the verifier key, public inputs and compilation used for arming. The opener must obtain the intended receipt through an authenticated channel. Each capsule header binds the exact manifest, whose digest of the uncompressed row stream is checked on load. Output paths must be fresh.
+
+The development profile uses BN254, six tied copies, extension degree 4, `K1=1`, `K2=2`, `g=8` and `J=J'=1`. Its key-encapsulation backend uses a 100-bit random seed. The experiment measures honest recovery and invalid-input handling. The unqualified profile supplies no security-bit or PoW estimate. The pairing-based construction is classical.
+
+### Measured CPU run
+
+On 2026-11-23, implementation commit `463ce76546a7a811b4225a4a05497ec475bcd9f6` processed 588,373 Boolean variables and 3,305 rows. At 255 products per row the exact QAP has 1,434,455 evaluation points. The Linux host had 16 CPUs, with Go limited to 12 workers. Each stage ran in a separate process.
+
+| Stage | Elapsed | Peak RSS |
+| --- | ---: | ---: |
+| Arm one 1,051,934,251-byte capsule | 43.63 s | 358.1 MiB |
+| Open with the original SP1 proof | 95.69 s | 820.6 MiB |
+| Open with the rescaled SP1 proof | 95.72 s | 821.9 MiB |
+
+Public compilation took 4.23 s. Witness lifting took 4.26 s and 4.30 s respectively, measured separately from opening. Both outputs matched the input signature byte-for-byte. A standalone BIP340 check reconstructed the synthetic transaction's BIP341 sighash from the separately pinned Bitcoin receipt and verified both outputs. Changing one witness bit or one nibble of the capsule receipt rejected the opening and left the output path empty.
+
+| Recorded value | SHA-256 |
+| --- | --- |
+| Public manifest | `7bd9b3f83d9f6537dc1f17f0946337611b66a9e9b1fe0559b63d66aeae9b4b90` |
+| Randomized capsule | `18ddc1a9515896c2485f6f8714dc10ec40179796728df3b09f72c652029b4c0e` |
+| Input and both recovered signatures | `ee2bc3e5859001b6b719f48133ca0d312a0ac49fc56042fbfcf5a58822b607c4` |
+
 ## Uniform wire expansion
 
 Run `GOMAXPROCS=2 GOMEMLIMIT=4GiB go run -mod=readonly .` from this directory with Go 1.26.8 or newer. The executable compiles gnark's BN254 Groth16 proof verifier over BN254's scalar field with subgroup checks enabled. It specializes the verification key and all five SP1 public inputs as constants. It generates no outer Groth16 setup.
