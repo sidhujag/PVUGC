@@ -22,6 +22,7 @@ import (
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/consensys/gnark/logger"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bn254"
 	"github.com/consensys/gnark/std/math/emulated"
 	rec "github.com/consensys/gnark/std/recursion/groth16"
@@ -53,16 +54,7 @@ func readKey(version string) (*native.VerifyingKey, [32]byte, error) {
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
-	id := sha256.Sum256(data)
-	var vk native.VerifyingKey
-	n, err := vk.ReadFrom(bytes.NewReader(data))
-	if err != nil {
-		return nil, id, err
-	}
-	if n != int64(len(data)) || len(vk.G1.K) != 6 || len(vk.CommitmentKeys) != 0 || len(vk.PublicAndCommitmentCommitted) != 0 {
-		return nil, id, fmt.Errorf("unexpected SP1 verification-key format")
-	}
-	return &vk, id, nil
+	return parseKey(data)
 }
 
 func readFixture(version string, keyID [32]byte) (*native.Proof, fr.Vector, error) {
@@ -222,13 +214,9 @@ func checkFixture(version string) (fr.Vector, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Scaling A and B inversely preserves the pairing and changes the proof bytes.
-	second := *proof
-	two := big.NewInt(2)
-	second.Ar.ScalarMultiplication(&proof.Ar, two)
-	second.Bs.ScalarMultiplication(&proof.Bs, new(big.Int).ModInverse(two, fr.Modulus()))
-	if second.Ar.Equal(&proof.Ar) || second.Bs.Equal(&proof.Bs) {
-		return nil, fmt.Errorf("proof did not change")
+	second, err := rescaled(proof)
+	if err != nil {
+		return nil, err
 	}
 	ccs, err := compile(key, inputs)
 	if err != nil {
@@ -237,7 +225,7 @@ func checkFixture(version string) (fr.Vector, error) {
 	if err = measure(version, ccs); err != nil {
 		return nil, err
 	}
-	for i, p := range []*native.Proof{proof, &second} {
+	for i, p := range []*native.Proof{proof, second} {
 		if err := native.Verify(p, key, inputs); err != nil {
 			return nil, fmt.Errorf("native proof %d: %w", i, err)
 		}
@@ -265,23 +253,31 @@ func checkFixture(version string) (fr.Vector, error) {
 }
 
 func run() error {
-	inputs, err := checkFixture("v6.0.0")
+	if len(os.Args) > 1 {
+		if len(os.Args) == 2 && os.Args[1] == "-export-v6.1" {
+			logger.Disable()
+			return exportPairings(os.Stdout, "v6.1.0")
+		}
+		if len(os.Args) == 4 && (os.Args[1] == "-statement" || os.Args[1] == "-verify-decoded") {
+			logger.Disable()
+			return runStatement(os.Args[1], os.Args[2], os.Args[3], os.Stdin, os.Stdout)
+		}
+		return fmt.Errorf("usage: frontend [-export-v6.1 | -statement RAW_VK INPUTS_JSON | -verify-decoded RAW_VK INPUTS_JSON]")
+	}
+	_, err := checkFixture("v6.0.0")
 	if err != nil {
 		return err
 	}
 	runtime.GC()
-	other, id, err := readKey("v6.1.0")
+	_, id, err := readKey("v6.1.0")
 	if err != nil {
 		return err
 	}
 	if _, _, err := readFixture("v6.0.0", id); err == nil {
 		return fmt.Errorf("version-mismatched selector accepted")
 	}
-	ccs, err := compile(other, inputs)
-	if err != nil {
-		return err
-	}
-	return measure("v6.1.0 (key-only shape; v6.0.0 fixture input constants)", ccs)
+	_, err = checkFixture("v6.1.0")
+	return err
 }
 func main() {
 	if err := run(); err != nil {

@@ -1,8 +1,12 @@
-# Fixed-key Groth16 frontend baseline
+# Fixed-key Groth16 frontends
+
+The [independent compact frontend](compact/README.md) compiles a fixed SP1 v6.1.0 key and public inputs to a standalone Boolean quadratic system and lifts a real proof to a packed witness. The gnark executable below provides native validation and the earlier uniform-expansion baseline.
+
+## Uniform wire expansion
 
 Run `GOMAXPROCS=2 GOMEMLIMIT=4GiB go run -mod=readonly .` from this directory with Go 1.26.8 or newer. The executable compiles gnark's BN254 Groth16 proof verifier over BN254's scalar field with subgroup checks enabled. It specializes the verification key and all five SP1 public inputs as constants. It generates no outer Groth16 setup.
 
-The v6.0.0 test uses Succinct's public Fibonacci proof and a second proof formed by replacing `(A, B)` with `(2A, B/2)`, which preserves the pairing. Both pass the native verifier and the circuit solver. The program encodes every solved field wire as 254 Boolean digits, recombines those digits in the scalar field, and checks every constraint row. Changing the expected public-values hash rejects the original proof in both verifiers. The second compilation measures the v6.1.0 key on the v6.0.0 fixture's public-input constants. The program checks the version selector and does not present the v6.0.0 proof to the v6.1.0 key as a valid witness.
+The tests use Succinct's v6.0.0 Fibonacci proof and Arcora's v6.1.0 clock proof. Each test derives a second proof by replacing `(A, B)` with `(2A, B/2)`, which preserves the pairing. Both pass the native verifier and the circuit solver. The program encodes every solved field wire as 254 Boolean digits, recombines those digits in the scalar field, and checks every constraint row. Changing the expected public-values hash rejects the original proof in both verifiers. Each proof is decoded under the key matching its version selector.
 
 | Measured quantity | v6.0.0 and v6.1.0 |
 | --- | ---: |
@@ -17,12 +21,30 @@ For each nonconstant scalar-field wire `v`, the baseline substitutes `v = Σ 2^j
 
 The diagnostic solver supplies a transcript-derived challenge for gnark's outer commitment hint. The rows by themselves do not enforce that challenge. The ordinary gnark proving protocol binds that commitment during proving and verification. Exporting these raw rows directly into a stand-alone Praxis Boolean system would require an equivalent binding or deterministic replacement for the dependent gadgets. This executable verifies the native proof, checks concrete traces and measures the direct frontend. It supplies no full-profile Praxis capsule and establishes no extractability theorem for the substituted rows. [gnark commitment interface](https://github.com/Consensys/gnark/blob/v0.16.5/std/multicommit/nativecommit.go) · [Praxis parameters](https://eprint.iacr.asia/2026/2971.pdf#page=36)
 
+## Specialize a trusted public statement and verify decoded coordinates
+
+Supply a gnark BN254 verifying key with six IC points and no commitment sections, plus exactly five canonical decimal strings in the BN254 scalar field. The key may use gnark's compressed or uncompressed binary point encoding. Each point is checked for curve and subgroup membership. Start from the recipient's authenticated key bytes and the intended public inputs.
+
+```sh
+go run -mod=readonly . -statement testdata/sp1-v6.1.0.vk testdata/sp1-v6.1.0-inputs.json
+go run -mod=readonly . -verify-decoded testdata/sp1-v6.1.0.vk testdata/sp1-v6.1.0-inputs.json < decoded-proof.json
+```
+
+The first command needs no proof. It derives the fixed key points, the public-input combination and the SHA-256 digest of the key directly from these files. The v6.1.0 expected output is `testdata/sp1-v6.1.0-statement.json`. The second command accepts exactly `a`, `b`, and `c` proof points on stdin in the coordinate format described below and runs the native verifier. It accepts the all-zero affine encoding for a neutral point according to gnark's convention. The pairing check still applies to the complete proof.
+
+## Pairing witness for the compact frontend
+
+Run `go run -mod=readonly . -export-v6.1` to emit the JSON in `testdata/sp1-v6.1.0-pairing.json`. The `statement` object contains the pinned key digest, five public inputs and fixed group constants. It includes the point `L = IC[0] + Σ xᵢ IC[i+1]`. Each entry of `witnesses` holds a proof's variable points `a,b,c`. Base-field coordinates are decimal integers. The twist coordinates use arrays in the order `[A0,A1]` for `A0 + A1·i`, with `i² = −1`.
+
+Before emitting the JSON, the exporter checks native Groth16 verification and the four-pair equation `e(A,B) e(−C,δ) e(−L,γ) e(−α,β) = 1` on both proofs. It recomputes `L` under a changed public input and checks rejection. The compact frontend must independently constrain the variable proof points and the pairing relation under the fixed constants.
+
 ## Public fixtures
 
 | File | SHA-256 | Upstream source |
 | --- | --- | --- |
 | `testdata/sp1-v6.0.0.json` | `ee35af16543ee044e6a9600251cc0767ebc268d2bd7530b82fbdb2dbca4de799` | [SP1 project template d1b0924](https://github.com/succinctlabs/sp1-project-template/blob/d1b0924587efd7f4b6c2797d6fdd8282da71d088/contracts/src/fixtures/groth16-fixture.json) |
 | `testdata/sp1-v6.0.0.vk` | `0e78f4db7a6771a3a6a7d9c3b0de6fe73d58781368967a7fe84d87aefffec896` | [SP1 v6.0.0 f87f8d6](https://github.com/succinctlabs/sp1/blob/f87f8d6ff005d542db22e241928319f5e96a4609/crates/verifier/vk-artifacts/groth16_vk.bin) |
+| `testdata/sp1-v6.1.0.json` | `d9920e2875863a23893f1ea2e232ee697305c3b6fafdfd34e6def68a352cd71a` | [Garaga proof fixture 86b6025](https://github.com/keep-starknet-strange/garaga/blob/86b6025567c5e2395947f9c6d40262c9ead2a54c/hydra/garaga/starknet/groth16_contract_generator/examples/proof_sp1.json) · [Original Arcora fixture bb16693](https://github.com/Arcora-labs/arcora-perp/tree/bb166930ac88f65537adc48bee4ffaf09d629d62/contracts/integration/fixtures/clock-pkg3-verified) |
 | `testdata/sp1-v6.1.0.vk` | `4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696` | [SP1 v6.1.0 d454975](https://github.com/succinctlabs/sp1/blob/d454975ac7c1126097e36eceda9bce2cb9899da4/crates/verifier/vk-artifacts/groth16_vk.bin) |
 
-Succinct Labs supplies the proof fixture and verification keys under the included MIT license notices in `testdata/LICENSE-TEMPLATE-MIT` and `testdata/LICENSE-SP1-MIT`. Go modules and checksums are pinned in `go.mod` and `go.sum`.
+Succinct Labs supplies the proof fixture and verification keys under the included MIT license notices in `testdata/LICENSE-TEMPLATE-MIT` and `testdata/LICENSE-SP1-MIT`. The v6.1.0 clock proof is distributed with Arcora Labs' MIT notice in `testdata/LICENSE-ARCORA-MIT`. Go modules and checksums are pinned in `go.mod` and `go.sum`.

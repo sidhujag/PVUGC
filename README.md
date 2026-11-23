@@ -4,7 +4,7 @@
 
 ## Praxis cancellation prototype
 
-The [Praxis prototype](prototypes/praxis/README.md) uses a reduced BN254 witness-encryption capsule in the PVUGC N-of-N Taproot adaptor flow. It supports a two-bit Boolean mismatch fixture. The integration test recovers the same fixed cancellation signature from two different witnesses after setup. The Syscoin AuxPoW verifier and the full Praxis parameters are outstanding.
+The [Praxis prototype](prototypes/praxis/README.md) uses a reduced BN254 witness-encryption capsule in the PVUGC N-of-N Taproot adaptor flow. It supports a two-bit Boolean mismatch fixture. The integration test recovers the same fixed cancellation signature from two different witnesses after setup. The [independent SP1 v6.1.0 encoder](prototypes/praxis/frontend/compact/README.md) compiles the production Groth16 verifier key and lifts proofs to Boolean witnesses. The Syscoin AuxPoW verifier and full-size Praxis capsule remain outstanding.
 
 ## 1. Historical Groth–Sahai design
 
