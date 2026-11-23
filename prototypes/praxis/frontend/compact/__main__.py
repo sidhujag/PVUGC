@@ -1,6 +1,7 @@
 """Compile fixed-statement rows, lift a proof, or verify the packed witness."""
 
 import argparse
+import gzip
 import hashlib
 import json
 from contextlib import ExitStack
@@ -16,6 +17,7 @@ DUMMY = {
     "c": {"x": "1", "y": "2"},
 }
 ORDER = ("ax", "ay", "bx0", "bx1", "by0", "by1", "cx", "cy")
+CENTERED_PAIRINGS = ("ate-fused", "ate-moving", "ate-paired")
 
 
 def load_json(path):
@@ -32,15 +34,40 @@ def same_public_statement(raw):
 def encoder(which):
     if which == "tate":
         return curve.verify
+    if which == "ate-fused":
+        from . import ate_fused
+
+        return ate_fused.verify
+    if which == "ate-moving":
+        from . import moving_lines
+
+        return moving_lines.verify
+    if which == "ate-paired":
+        from . import paired_torus
+
+        return paired_torus.verify_dense
+    if which != "ate":
+        raise ValueError(f"unknown pairing encoder {which}")
     from . import ate
 
     return ate.verify
 
 
-def emit(statement, proof, which, sink=None):
-    circuit = Builder(sink, layout_only=proof is None)
+def emit(statement, proof, which, sink=None, arithmetic="integer-limbs"):
+    from .residue_bqs import PackedResidueBuilder, ResidueBuilder
+
+    builders = {
+        "integer-limbs": Builder,
+        "centered": ResidueBuilder,
+        "packed-centered": PackedResidueBuilder,
+    }
+    if which in CENTERED_PAIRINGS and arithmetic == "integer-limbs":
+        raise ValueError("the fused pairing requires centered arithmetic")
+    circuit = builders[arithmetic](sink, layout_only=proof is None)
     coords = encoder(which)(circuit, statement, DUMMY if proof is None else proof)
     metadata = dict(format=FORMAT, fr=str(R), pairing=which, **circuit.shape())
+    if arithmetic != "integer-limbs":
+        metadata["arithmetic"] = arithmetic
     public_bytes = json.dumps(statement, sort_keys=True, separators=(",", ":")).encode()
     metadata["statement_sha256"] = hashlib.sha256(public_bytes).hexdigest()
     metadata["coordinates"] = {
@@ -49,11 +76,22 @@ def emit(statement, proof, which, sink=None):
     return circuit, metadata
 
 
+def open_rows(path, mode):
+    if Path(path).suffix == ".gz":
+        return gzip.open(path, mode, compresslevel=1)
+    return Path(path).open(mode)
+
+
 def compile_command(args):
     statement = same_public_statement(load_json(args.statement))
     with ExitStack() as files:
-        sink = files.enter_context(Path(args.rows).open("xb")) if args.rows else None
-        _, metadata = emit(statement, None, args.pairing, sink)
+        sink = files.enter_context(open_rows(args.rows, "xb")) if args.rows else None
+        arithmetic = args.arithmetic or {
+            "ate-paired": "packed-centered",
+            "ate-fused": "centered",
+            "ate-moving": "centered",
+        }.get(args.pairing, "integer-limbs")
+        _, metadata = emit(statement, None, args.pairing, sink, arithmetic)
     if args.manifest:
         with Path(args.manifest).open("x") as f:
             json.dump(metadata, f, indent=2)
@@ -66,7 +104,10 @@ def lift_command(args):
     raw = load_json(args.proof)
     witness = raw["witnesses"][args.index] if "witnesses" in raw else raw
     b, derived = emit(
-        same_public_statement(load_json(args.statement)), witness, metadata["pairing"]
+        same_public_statement(load_json(args.statement)),
+        witness,
+        metadata["pairing"],
+        arithmetic=metadata.get("arithmetic", "integer-limbs"),
     )
     if derived != metadata:
         raise ValueError("public layout differs from the pinned compilation")
@@ -91,7 +132,7 @@ def check_command(args):
             raise ValueError("row references bits outside the statement")
         return bit_value(data, atom)
 
-    with Path(args.rows).open("rb") as f:
+    with open_rows(args.rows, "rb") as f:
         for count, line in enumerate(f, 1):
             shape.update(line)
             if not check_row(json.loads(line), get):
@@ -115,7 +156,12 @@ def main():
     cmds = parser.add_subparsers(dest="op", required=True)
     compile_ = cmds.add_parser("compile")
     compile_.add_argument("statement")
-    compile_.add_argument("--pairing", choices=["tate", "ate"], default="ate")
+    compile_.add_argument(
+        "--pairing", choices=["tate", "ate", *CENTERED_PAIRINGS], default="ate-paired"
+    )
+    compile_.add_argument(
+        "--arithmetic", choices=["integer-limbs", "centered", "packed-centered"]
+    )
     compile_.add_argument("--rows")
     compile_.add_argument("--manifest")
     compile_.set_defaults(run=compile_command)

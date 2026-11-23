@@ -234,7 +234,11 @@ def _values(b, pairs):
 
 
 def verify(b, statement, proof):
-    """Emit BQS constraints or perform the same checks natively (b=None)."""
+    return verify_with_miller(b, statement, proof, _miller)
+
+
+def prepare(b, statement, proof):
+    """Constrain and prepare all original proof coordinates and public factors."""
     # Infinity is represented homogeneously at the place where the line is
     # evaluated. Every line at (0,1,0) is 1. The variable G2 point itself
     # remains in the loop for its subgroup check even if A is infinity.
@@ -265,10 +269,16 @@ def verify(b, statement, proof):
     ]
     factors = _fixed_factors(fixed)
     handles = a + bcoords + c
+    return handles, pairs, factors
+
+
+def verify_with_miller(b, statement, proof, miller):
+    """Emit BQS constraints or perform the same checks natively (b=None)."""
+    handles, pairs, factors = prepare(b, statement, proof)
     if b is not None and b.layout_only:
         native_z, selector = ONE, 0
     else:
-        raw = _miller(None, _values(b, pairs))
+        raw = miller(None, _values(b, pairs))
         raw = fp12_mul(None, raw, fp12_value(b, factors))
         native_z, selector = root_and_correction(raw)
     native_inv = fp12_pow(native_z, ORDER - 1)
@@ -287,7 +297,7 @@ def verify(b, statement, proof):
             curve.mod(b, linear=[(c1 - c0, sel1), (c2 - c0, sel2)], constant=c0)
             for c0, c1, c2 in zip(ONE, t[1], t[2])
         )
-    out = _miller(b, pairs, z, inv_z)
+    out = miller(b, pairs, z, inv_z)
     out = fp12_mul(b, out, factors)
     out = fp12_mul(b, out, correction)
     out = fp12_mul(b, out, fp12_frob(b, z, 1))

@@ -9,10 +9,13 @@ The default uses optimal Ate on BN254. A separate reduced Tate implementation se
 | Encoder | Boolean unknowns | Constraint rows |
 | --- | ---: | ---: |
 | Previous uniform gnark wire expansion | 513,074,158 | 1,264,008 plus a commitment to enforce |
-| Independent fused optimal Ate | 3,501,401 | 17,687 |
+| Optimal Ate with integer limbs (`ate`) | 3,501,401 | 17,687 |
+| Fused Miller steps with centered arithmetic (`ate-fused`) | 887,309 | 5,139 |
+| Scaled G2 line coefficients (`ate-moving`) | 808,018 | 4,471 |
+| Paired lines with packed exact arithmetic checks (`ate-paired`, default) | 778,861 | 3,837 |
 | Authors’ reported encoder | 391,693 | 1,692 |
 
-For this SP1 statement, the independent backend uses at most 76 products per row and the largest certified integer-limb residual bound is 209 bits. Its packed witness takes 437,676 bytes. The canonical row stream is 10,423,402 bytes, with manifest row digest `ad33ce60212f7d08770d4c13f685405a71211ef1055ceede2ec9d529f9bbc8bf`. Both committed fixture proofs lift to this same public layout. The earlier and new frontend counts represent the same fixed-key verifier using different constraint compilations. No full Praxis ciphertext was generated. At the illustrative old width `K1=192`, two unbatched G1 left-factor arrays with 32-byte elements would alone take approximately 40.1 GiB for this shape. Using the larger shape requires its own parameter analysis. Witness length is distinct from ciphertext size.
+The default uses at most 2,043 products per row. Its packed witness takes 97,358 bytes. Compiling from the public statement gives row digest `4c8af9b14060f1c7dca8c831f500c07e6ffd82d56f910b6735ed3caca6ec6c30`. This full layout uses 2,188 base-field coordinates, which account for 555,752 bits. Arithmetic checks and selectors account for the remaining 223,109. All comparison rows use the same fixed SP1 v6.1.0 verifier. Witness length measures the packed assignment. Estimating a full Praxis ciphertext also requires parameters for this shape.
 
 ## Reproduce from the frontend directory
 
@@ -22,9 +25,9 @@ Python 3.10+ runs the encoder with the standard library. The independent native 
 out=$(mktemp -d)
 go build -mod=readonly -o "$out/native" .
 "$out/native" -statement testdata/sp1-v6.1.0.vk testdata/sp1-v6.1.0-inputs.json > "$out/statement.json"
-python3 -m compact compile "$out/statement.json" --manifest "$out/manifest.json" --rows "$out/rows.jsonl"
+python3 -m compact compile "$out/statement.json" --manifest "$out/manifest.json" --rows "$out/rows.jsonl.gz"
 python3 -m compact lift "$out/statement.json" "$out/manifest.json" testdata/sp1-v6.1.0-pairing.json "$out/witness.bin" --index 0
-python3 -m compact check "$out/manifest.json" "$out/rows.jsonl" "$out/witness.bin" > "$out/proof.json"
+python3 -m compact check "$out/manifest.json" "$out/rows.jsonl.gz" "$out/witness.bin" > "$out/proof.json"
 "$out/native" -verify-decoded testdata/sp1-v6.1.0.vk testdata/sp1-v6.1.0-inputs.json < "$out/proof.json"
 ```
 
@@ -38,11 +41,18 @@ For a signed sum of products `S` and its output residue `z`, the lifter supplies
 
 The first row enforces `E = 0 mod r`. The compiler chooses `t` such that `r·2^t > B`, and enforces the low `t` bits of `E = 0 mod 2^t` with radix carries. It independently bounds each integer carry-row residual below `r` before emitting the field equation. Since `r` is odd, every satisfying assignment gives `E=0` over the integers. Small affine expressions are inlined. Neither this bound nor the row structure depends on the private witness. The native-alias regression demonstrates why the carry rows are necessary.
 
+
+The default first expands packed multiplication in binary digits and reduces each public digit coefficient to its centered representative modulo the base prime. This narrows the exact quotient and carry ranges. The compiler packs bounded integer check rows only when their combined absolute bound is strictly below the scalar prime and their product count fits the public cap. For two residuals with absolute bounds `B1,B2`, a zero packed value `E1 + (B1+1) E2` implies `E1=0` by reduction modulo `B1+1`, then `E2=0`. The public bounds establish that the integer packed value equals zero whenever its scalar-field row does. [Centered foreign-field coefficients](https://eprint.iacr.org/2025/695)
+
 ## Pairing equation
 
 Fix `L = IC[0] + Σ input[i]·IC[i+1]`. The four terms in the Groth16 pairing product use `(A,B), (−C,δ), (−L,γ), (−α,β)`. Only the first two pairs have variable operands. The encoder precomputes the two fixed pairs and fixed-G2 lines. It works in a power basis with `W^6=9+i` and `i²=−1`. Group membership, infinity selection, and intermediate line values are constrained. The main Miller loop also checks that the variable twist point is in G2, including when its G1 operand is infinity. [gnark subgroup criterion](https://github.com/Consensys/gnark/blob/v0.16.5/std/algebra/emulated/sw_bn254/precomputations.go)
 
-For the unreduced Miller product `f`, set `H = p^12−1`, `u = 4965661367192848881`, and `λ = 6u+2+p−p²+p³`. The BN254 constants satisfy `gcd(λ,H)=3r`. Fix an element `η` of order 27 generating the 3-primary subgroup. An accepting product satisfies `f^(H/r)=1`. Equivalently, there exist a nonzero `z` and a selector `e ∈ {0,1,2}` for which `f·η^e·z^λ=1`. In exponents of the cyclic multiplicative group, multiplying by one of the three corrections reaches the subgroup of λ-th powers precisely when the exponent of `f` is divisible by `r`. The implementation verifies the nonzero inverse and allowed selector and checks the final equation inside the rows. It initializes the signed Miller loop at `z` so that the `6u+2` powering is shared. Three Frobenius maps supply the remaining exponent terms. [On Proving Pairings](https://eprint.iacr.org/2024/640)
+The earlier full-field modes test the unreduced Miller product as follows. For the unreduced Miller product `f`, set `H = p^12−1`, `u = 4965661367192848881`, and `λ = 6u+2+p−p²+p³`. The BN254 constants satisfy `gcd(λ,H)=3r`. Fix an element `η` of order 27 generating the 3-primary subgroup. An accepting product satisfies `f^(H/r)=1`. Equivalently, there exist a nonzero `z` and a selector `e ∈ {0,1,2}` for which `f·η^e·z^λ=1`. In exponents of the cyclic multiplicative group, multiplying by one of the three corrections reaches the subgroup of λ-th powers precisely when the exponent of `f` is divisible by `r`. The implementation verifies the nonzero inverse and allowed selector and checks the final equation inside the rows. It initializes the signed Miller loop at `z` so that the `6u+2` powering is shared. Three Frobenius maps supply the remaining exponent terms. [On Proving Pairings](https://eprint.iacr.org/2024/640)
+
+The default checks the residue in the cyclic quotient of the nonzero extension-field elements by the nonzero elements of its degree-six subfield. This quotient has order `p^6+1`, with `gcd(λ,p^6+1)=r`. Every valid pairing product has a correcting root in the quotient. If the root is the identity, multiplying it by a fixed public element of order `r` gives another correcting root in the finite chart. This makes the selection available for every valid proof. The six odd coefficients of the final product enforce equality in the quotient.
+
+The paired-line encoder represents a finite line product by `A+W` with six base-field coordinates in `A`. If the original line product is neutral in the quotient, the encoder substitutes the class of `W`, of order two. Since `r` is odd, this class is an `r`-th power and the substitution preserves the reduced pairing. The fixed second line's nonzero norm constrains when the substitution is allowed. A scaled twist trace supplies the first line's evaluated coefficients and retains the G2 subgroup test. Each dense doubling uses `F_next · conjugate(line) = F_old²`; its subfield normalization also preserves the reduced pairing.
 
 For the shared subgroup check, write `ψ` for Frobenius on the untwisted curve. The final loop point obeys `[6u+2]Q + ψQ − ψ²Q = −ψ³Q` exactly on the required subgroup. The tests check the gcd of the Frobenius norm with the BN254 twist order, and verify that every affine prefix used without a denominator witness excludes exceptional divisors throughout that group. The G2 check still runs when the other pairing operand is infinity. [gnark fixed subgroup relation](https://github.com/Consensys/gnark/blob/v0.16.5/std/algebra/emulated/sw_bn254/precomputations.go) · [Subgroup membership analysis](https://eprint.iacr.org/2022/348)
 
