@@ -164,15 +164,18 @@ def steps(b, q, metric=(1, 0), tail=None, digits=None, direct_groups=False):
             line = advance(q if j == 3 else twice)
             odd[j] = snapshot()
             yield line
-        if digits[0] != 1 or digits[1] != 0:
-            raise ValueError("this window requires leading digits one and zero")
-        x, last = twice[0], twice_line
+        reuse_twice = digits[0] == 1 and digits[1] == 0
+        if reuse_twice:
+            x, last = twice[0], twice_line
+        else:
+            x, ordinate = odd[digits[0]]
+            last = None
         for index, digit in enumerate(digits[1:]):
             if direct_groups and digit:
                 point = odd[abs(digit)]
                 yield composite(point if digit > 0 else ate._negative(b, point))
                 continue
-            yield twice_line if index == 0 else advance()
+            yield twice_line if index == 0 and reuse_twice else advance()
             if digit:
                 point = odd[abs(digit)]
                 yield advance(point if digit > 0 else ate._negative(b, point))

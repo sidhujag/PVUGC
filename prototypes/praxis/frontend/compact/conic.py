@@ -206,7 +206,7 @@ def _ops(b, pairs, digits=None, direct_groups=False):
                 previous = line
             yield False, None, line
         for index, d in enumerate(digits[1:]):
-            if index == 0:
+            if index == 0 and digits[0] == 1 and digits[1] == 0:
                 next(variable)
                 next(fixed)
                 yield True, 0, previous

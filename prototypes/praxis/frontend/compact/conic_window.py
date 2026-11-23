@@ -34,14 +34,14 @@ def _ops(b, pairs, digits, direct_groups=False):
     return table, updates
 
 
-def _raw(table, updates, fixed):
+def _raw(table, updates, fixed, initial=1):
     # F_j is the product of the two Miller functions at scalar j. Vertical
     # divisors, including f_{-j}f_j, lie in the discarded subfield Fp6*.
     base = {1: ate.ONE, 2: paired_torus._flat(table[0])}
     for j, line in zip(range(3, 2 * len(table), 2), table[1:]):
         earlier = base[2] if j == 3 else fp12_mul(None, base[2], base[j - 2])
         base[j] = fp12_mul(None, earlier, paired_torus._flat(line))
-    value = ate.ONE
+    value = base[initial]
     for square, d, line in updates:
         if square:
             value = fp12_square(None, value)
@@ -52,7 +52,7 @@ def _raw(table, updates, fixed):
     return fp12_mul(None, value, fixed)
 
 
-def _fold(b, table, updates, root):
+def _powers(b, table, root):
     # D_j = F_j*z^j. The static curve table supplies the actual line through
     # [j-2]Q and [2]Q, except j=3, whose inputs are [2]Q and Q.
     mul = torus.finite_multiply
@@ -60,6 +60,13 @@ def _fold(b, table, updates, root):
     for j, line in zip(range(3, 2 * len(table), 2), table[1:]):
         earlier = mul(b, powers[2], powers[1 if j == 3 else j - 2])
         powers[j] = mul(b, earlier, line)
+    return powers
+
+
+def _fold(b, table, updates, root, powers=None):
+    if powers is None:
+        powers = _powers(b, table, root)
+    mul = torus.finite_multiply
     for square, d, line in updates:
         if d:
             factor = powers[abs(d)]
@@ -68,22 +75,34 @@ def _fold(b, table, updates, root):
 
 
 def verify_width(b, statement, proof, width, direct_groups=False):
-    digits = schedule(width)
+    return _verify_schedule(b, statement, proof, schedule(width), direct_groups)
+
+
+def _verify_schedule(
+    b, statement, proof, digits, direct_groups, projective_finish=False
+):
     handles, pairs, fixed = ate.prepare(b, statement, proof)
     if b is not None and b.layout_only:
         root = torus.Class(torus.ONE, 0)
     else:
         table, iterator = _ops(None, ate._values(b, pairs), digits, direct_groups)
         ops = tuple(iterator)
-        f = fp12_pow(_raw(table, ops, fixed), ate_torus.LIFT)
+        f = fp12_pow(_raw(table, ops, fixed, digits[0]), ate_torus.LIFT)
         # The seed itself, z², D_2, both intermediate powers for each odd
         # digit, and every signed main-loop factor must be finite. Each is
         # a nonzero power of z modulo r times a seed-independent line.
-        forbidden = 3 + 2 * (len(table) - 1) + sum(bool(d) for d in digits[1:])
+        forbidden = (
+            3
+            + 2 * (len(table) - 1)
+            + sum(bool(d) for d in digits[1:])
+            + 2 * projective_finish
+        )
         for _ in range(forbidden + 1):
             try:
                 root = torus.finite_witness(None, torus.from_fp12(None, f))
                 tuple(_fold(None, table, ops, root))
+                if projective_finish:
+                    _rhs(None, root)
                 break
             except torus.InfiniteChart:
                 f = fp12_mul(None, f, ate_torus._generator())
@@ -91,10 +110,52 @@ def verify_width(b, statement, proof, width, direct_groups=False):
             raise AssertionError("window root chart exhausted")
     root = torus.finite_witness(b, root)
     table, ops = _ops(b, pairs, digits, direct_groups)
-    out = conic._dense(b, _fold(b, table, ops, root), root)
-    conic._finish(b, out, paired_torus._flat(root), fixed)
+    if digits[0] == 1:
+        out = conic._dense(b, _fold(b, table, ops, root), root)
+    else:
+        powers = _powers(b, table, root)
+        out = conic._dense(b, _fold(b, table, ops, root, powers), powers[digits[0]])
+    if projective_finish:
+        rhs = _rhs(b, root)
+        lhs = fp12_mul(b, out, fixed)
+        torus._equals_zero(
+            b, (1, 0, rhs.a, tuple(lhs[1::2])), (-1, 0, torus.ONE, tuple(lhs[::2]))
+        )
+    else:
+        conic._finish(b, out, paired_torus._flat(root), fixed)
     return handles
 
 
 def verify(b, statement, proof):
     return verify_width(b, statement, proof, 4)
+
+
+def _rhs(b, root):
+    f2 = torus.frobenius(b, root, 2)
+    f3 = torus.inverse(b, torus.frobenius(b, root, 3))
+    f1 = torus.inverse(b, torus.frobenius(b, root, 1))
+    return torus.finite_multiply(b, torus.finite_multiply(b, f2, f3), f1)
+
+
+def optimized_schedule():
+    # Signed expansion with 62 doublings and 11 additions using the same
+    # odd table. Initialize at [3]Q and F_3*z³ from that table.
+    nonzero = {
+        62: 3,
+        61: 7,
+        55: -5,
+        48: -7,
+        44: 7,
+        35: 7,
+        30: 7,
+        23: -3,
+        17: -5,
+        11: 7,
+        7: 7,
+        3: 5,
+    }
+    return tuple(nonzero.get(j, 0) for j in range(62, -1, -1))
+
+
+def verify_optimized(b, statement, proof):
+    return _verify_schedule(b, statement, proof, optimized_schedule(), True, True)

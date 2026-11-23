@@ -24,6 +24,7 @@ CENTERED_PAIRINGS = (
     "ate-moving-projected",
     "ate-conic",
     "ate-conic-window",
+    "ate-conic-optimized",
 )
 
 
@@ -65,6 +66,10 @@ def encoder(which):
         from . import conic_window
 
         return conic_window.verify
+    if which == "ate-conic-optimized":
+        from . import conic_window
+
+        return conic_window.verify_optimized
     if which != "ate":
         raise ValueError(f"unknown pairing encoder {which}")
     from . import ate
@@ -119,6 +124,7 @@ def compile_command(args):
             "ate-moving-projected": "factored",
             "ate-conic": "min-bits-factored",
             "ate-conic-window": "min-bits-factored",
+            "ate-conic-optimized": "min-bits-factored",
             "ate-fused": "centered",
             "ate-moving": "centered",
         }.get(args.pairing, "integer-limbs")
@@ -197,7 +203,7 @@ def main():
     compile_.add_argument(
         "--pairing",
         choices=["tate", "ate", *CENTERED_PAIRINGS],
-        default="ate-conic-window",
+        default="ate-conic-optimized",
     )
     compile_.add_argument(
         "--arithmetic",

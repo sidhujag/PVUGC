@@ -14,12 +14,13 @@ The default combines consecutive lines of the optimal Ate pairing on BN254 into 
 | Scaled G2 line coefficients (`ate-moving`) | 808,018 | 4,471 |
 | Paired lines with packed exact arithmetic checks (`ate-paired`) | 778,861 | 3,837 |
 | Conic with affine-product rows (`ate-conic`) | 599,347 | 2,690 |
-| Conic with a signed width-four window (`ate-conic-window`, default) | 573,769 | 2,594 |
+| Conic with a signed width-four window (`ate-conic-window`) | 573,769 | 2,594 |
+| Leading-three window with direct conic checks (`ate-conic-optimized`, default) | 545,856 | 2,476 |
 | Authors’ reported encoder | 391,693 | 1,692 |
 
-The default uses at most 2,036 products of linear forms per row. The packed witness is 71,722 bytes. The public constraint recipes occupy 2,821,525 bytes before gzip, with row digest `21824bc0c96c27b65c01f21492ac50a03b1cfd538e64909d77113428f27adf48`. Both proof fixtures lift to the layout obtained from public inputs alone. The raw recipe size excludes the cost of evaluating or publishing the full Praxis ciphertext.
+The default uses at most 2,036 products of linear forms per row. The packed witness is 68,232 bytes. The public constraint recipes occupy 2,638,762 bytes before gzip, with row digest `434494d311acdb55a844e99b595842f92fcd5879fbb8178853c4f6c1b91506f0`. Of the 545,856 bits, 477,520 encode 1,880 base-field coordinates and 68,336 cover exact arithmetic and selectors. Both proof fixtures lift to the layout obtained from public inputs alone. The raw recipe size excludes the cost of evaluating or publishing the full Praxis ciphertext.
 
-The width-four schedule has 65 doublings and 11 signed additions. A short table supplies the actual curve points and Miller-function factors for odd digits up to seven. Both the point table and the factors are constrained. Larger windows incur additional table costs. The tests check nonzero divisors in the curve prefix calculations and verify that the reduced pairing agrees with the independent reference loop.
+The width-four comparison schedule has 65 doublings and 11 signed additions. The default begins at the already constrained point `[3]Q` and uses 62 doublings and 11 additions. A short table supplies the actual curve points and Miller-function factors for odd digits up to seven. Both the point table and the factors are constrained. Larger windows incur additional table costs. The tests check nonzero divisors in the curve prefix calculations and verify that the reduced pairing agrees with the independent reference loop.
 
 ## Reproduce from the frontend directory
 
@@ -63,6 +64,8 @@ For the shared subgroup check, write `ψ` for Frobenius on the untwisted curve. 
 ## Conic updates
 
 For a signed addition, the tangent and the following chord share an intermediate point. Their product divided by that point's vertical line is a conic. The factor removed belongs to the degree-six subfield, so its removal preserves the reduced pairing. The encoder checks the three degree-two equations for the conic coefficients and retains the original G2 trace and subgroup check. It also groups the last two Frobenius chords. The prefix and Frobenius scalar checks in `test_conic.py` rule out the zero slope sums on valid subgroup inputs. Disabled inputs and neutral paired lines retain their reduced-pairing semantics.
+
+The default checks a tangent and chord directly using the conic's intersections with the twist. The sum and pairwise products of the four intersection abscissas enforce the repeated tangent root. A nonzero normalization coefficient rules out a degenerate vertical conic. For the final pairing comparison it computes the right-hand Frobenius product in the finite degree-six chart and checks the even and odd halves of the dense result by cross multiplication. The two additional forbidden root choices have nonzero exponents modulo `r`. Rotating the correcting root over its order-`r` choices therefore preserves a lift for each accepting input.
 
 ## Using the rows
 
