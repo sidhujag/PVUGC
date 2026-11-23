@@ -7,10 +7,9 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
-use support::{receipt_hash, setup, DemoResult, Receipt, RECEIPT_LEN};
+use support::{cancellation, receipt_hash, setup, verify, DemoResult, Receipt, RECEIPT_LEN};
 
-const USAGE: &str =
-    "usage: cancel arm NEW_DIRECTORY [ROWS] | cancel recover DIRECTORY RECEIPT_SHA256 BITS";
+const USAGE: &str = "usage: cancel arm NEW_DIRECTORY [ROWS] | cancel recover DIRECTORY RECEIPT_SHA256 BITS | cancel verify DIRECTORY RECEIPT_SHA256 SIGNATURE_FILE";
 
 fn save_new(path: &Path, bytes: &[u8]) -> DemoResult<()> {
     let mut file = File::options().create_new(true).write(true).open(path)?;
@@ -46,6 +45,19 @@ fn arm_command(path: &Path, rows: usize) -> DemoResult<()> {
     Ok(())
 }
 
+fn load_receipt(path: &Path, hash: &str) -> DemoResult<Receipt> {
+    let pinned = <[u8; 32]>::from_hex(hash)?;
+    Receipt::parse(&load_exact(&path.join("receipt.bin"), RECEIPT_LEN)?, pinned)
+}
+
+fn verify_command(path: &Path, hash: &str, signature_file: &Path) -> DemoResult<()> {
+    let receipt = load_receipt(path, hash)?;
+    let wire = load_exact(signature_file, 65)?;
+    let signature = bitcoin::taproot::Signature::from_slice(&wire)?;
+    let (cancel, prevout) = cancellation(receipt.output_key);
+    verify(&cancel, &prevout, &signature)
+}
+
 fn recover_command(path: &Path, hash: &str, bits: &str) -> DemoResult<()> {
     let witness = match bits {
         "00" => [false, false],
@@ -54,8 +66,7 @@ fn recover_command(path: &Path, hash: &str, bits: &str) -> DemoResult<()> {
         "11" => [true, true],
         _ => return Err("BITS must be exactly two binary digits".into()),
     };
-    let pinned = <[u8; 32]>::from_hex(hash)?;
-    let receipt = Receipt::parse(&load_exact(&path.join("receipt.bin"), RECEIPT_LEN)?, pinned)?;
+    let receipt = load_receipt(path, hash)?;
     let archive = load_exact(&path.join("archive.bin"), receipt.archive_len)?;
     let shares = receipt.shares(&archive, witness)?;
     let signature = receipt.signature(&shares)?;
@@ -69,6 +80,9 @@ fn run() -> DemoResult<()> {
         [cmd, path] if cmd == "arm" => arm_command(Path::new(path), 2),
         [cmd, path, rows] if cmd == "arm" => arm_command(Path::new(path), rows.parse()?),
         [cmd, path, hash, bits] if cmd == "recover" => recover_command(Path::new(path), hash, bits),
+        [cmd, path, hash, signature_file] if cmd == "verify" => {
+            verify_command(Path::new(path), hash, Path::new(signature_file))
+        }
         _ => Err(USAGE.into()),
     }
 }

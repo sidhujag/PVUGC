@@ -2,7 +2,18 @@
 
 This crate replaces PVUGC's historical pairing-derived release key in an executable fixed-transaction experiment. It uses the existing PVUGC Bitcoin sighash code. A three-party MuSig2 adaptor pre-signature and a public setup archive let a challenger finish a native Taproot signature offline. The Rust setup uses the Boolean relation `(x − y)² = 1` and a synthetic Bitcoin output. A separate [SP1 signature capsule](frontend/README.md#offline-signature-release) encrypts the resulting signature under a fixed SP1 v6.1.0 Groth16 verifier. This second experiment exercises offline recovery at the full verifier width with a six-copy development profile.
 
-## Run
+## Run the SP1 experiment
+
+From the repository root, run the following command with Python 3.10+, Go 1.26.8+ and Cargo on your path. Choose a new output directory on a filesystem with at least 1.1 GB free for the artifacts. Initial toolchain builds need additional cache space.
+
+```sh
+work=$(mktemp -d)
+python3 prototypes/praxis/run_sp1_demo.py "$work/sp1"
+```
+
+The runner compiles the public verifier, arms one capsule and launches two independent opening processes. It checks each recovered signature against the pinned Bitcoin fixture receipt and checks rejection for a modified witness, capsule receipt and signature. A successful run writes `result.json` with the exact byte size, timings and SHA-256 receipts. The `public/` directory contains the shareable capsule and verifier artifacts. The `arming/` directory contains the synthetic input signature. [Measured CPU run and parameter sizes](frontend/README.md#measured-cpu-run)
+
+## Run the three-signer fixture
 
 From the repository root, run the locked release test suite.
 
@@ -13,7 +24,7 @@ cargo test --release --locked --manifest-path prototypes/praxis/Cargo.toml
 To run the three-signer experiment in separate processes, build the example. Use a new directory and keep the public receipt hash printed at setup. Supply that hash to both recovery processes.
 
 ```sh
-cargo build --release --locked --example cancel --manifest-path prototypes/praxis/Cargo.toml
+cargo build --release --locked --example cancel --target-dir prototypes/praxis/target --manifest-path prototypes/praxis/Cargo.toml
 binary=prototypes/praxis/target/release/examples/cancel
 receipt=$("$binary" arm ./praxis-fixture 2)
 "$binary" recover ./praxis-fixture "$receipt" 01

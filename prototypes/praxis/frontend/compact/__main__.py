@@ -4,8 +4,10 @@ import argparse
 import gzip
 import hashlib
 import json
-from contextlib import ExitStack
+import os
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from . import curve
 from .bqs import Builder, P, R, bit_value, check_row
@@ -116,24 +118,58 @@ def open_rows(path, mode):
     return Path(path).open(mode)
 
 
+def remove_published_link(staged, destination):
+    try:
+        if os.path.samestat(staged.stat(), destination.lstat()):
+            destination.unlink()
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def compile_outputs(*destinations):
+    """Stage completed files on each destination's filesystem before publishing."""
+    with ExitStack() as scratch:
+        staged = []
+        for path in destinations:
+            if not path:
+                staged.append(None)
+                continue
+            dest = Path(path)
+            if os.path.lexists(dest):
+                raise FileExistsError(f"output already exists: {dest}")
+            directory = scratch.enter_context(TemporaryDirectory(dir=dest.parent))
+            staged.append(Path(directory) / dest.name)
+        yield staged
+        with ExitStack() as rollback:
+            for source, path in zip(staged, destinations):
+                if source is None:
+                    continue
+                dest = Path(path)
+                # link() refuses to overwrite a file created after our preflight.
+                rollback.callback(remove_published_link, source, dest)
+                os.link(source, dest)
+            rollback.pop_all()
+
+
 def compile_command(args):
     statement = same_public_statement(load_json(args.statement))
-    with ExitStack() as files:
-        sink = files.enter_context(open_rows(args.rows, "xb")) if args.rows else None
-        arithmetic = args.arithmetic or {
-            "ate-paired": "packed-centered",
-            "ate-moving-projected": "factored",
-            "ate-conic": "min-bits-factored",
-            "ate-conic-window": "min-bits-factored",
-            "ate-conic-optimized": "min-bits-factored",
-            "ate-fused": "centered",
-            "ate-moving": "centered",
-        }.get(args.pairing, "integer-limbs")
-        _, metadata = emit(statement, None, args.pairing, sink, arithmetic)
-    if args.manifest:
-        with Path(args.manifest).open("x") as f:
-            json.dump(metadata, f, indent=2)
-            f.write("\n")
+    arithmetic = args.arithmetic or {
+        "ate-paired": "packed-centered",
+        "ate-moving-projected": "factored",
+        "ate-conic": "min-bits-factored",
+        "ate-conic-window": "min-bits-factored",
+        "ate-conic-optimized": "min-bits-factored",
+        "ate-fused": "centered",
+        "ate-moving": "centered",
+    }.get(args.pairing, "integer-limbs")
+    with compile_outputs(args.rows, args.manifest) as (rows, manifest):
+        with (open_rows(rows, "xb") if rows else nullcontext()) as sink:
+            _, metadata = emit(statement, None, args.pairing, sink, arithmetic)
+        if manifest:
+            with manifest.open("x") as f:
+                json.dump(metadata, f, indent=2)
+                f.write("\n")
     print(json.dumps(metadata))
 
 

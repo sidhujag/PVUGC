@@ -6,36 +6,12 @@ The [independent compact frontend](compact/README.md) compiles a fixed SP1 v6.1.
 
 The `praxis-capsule` CLI encrypts a fixed 64- or 65-byte payload using the published verifier rows, fresh Praxis randomness and AES-256-GCM. The arming process takes the precomputed signature as input. Each opener supplies its own packed proof witness, the public artifacts and the arming receipt. The fixture uses the SP1 clock program and two Groth16 proofs for the same statement. The second proof is obtained by rescaling A and B in the first. Both independently pass native verification. The [three-signer adaptor experiment](../README.md) produces the fixture signature under a separate reduced policy. A setup party that obtains the completed signature in this single-capsule experiment can already spend the fixture output. Integrating the full verifier into each signer's share encryption is required to carry the one-honest-party design through to this path.
 
-Run these commands from `prototypes/praxis/frontend` with Go 1.26.8+, Python 3.10+ and Cargo. They create fresh outputs. Each opening reads the capsule from disk.
+Use the [end-to-end runner](../README.md#run-the-sp1-experiment) for a fresh fixture, both proof lifts and Bitcoin signature verification. For an existing experiment, build the CLI from this directory and supply the files and independently pinned receipt directly.
 
 ```sh
-set -eu
-out=$(mktemp -d)
-go build -mod=readonly -o "$out/native" .
 go build -mod=readonly -o "$out/capsule-cli" ./cmd/praxis-capsule
-vk=testdata/sp1-v6.1.0.vk
-inputs=testdata/sp1-v6.1.0-inputs.json
-"$out/native" -statement "$vk" "$inputs" > "$out/statement.json"
-python3 -m compact compile "$out/statement.json" --arithmetic narrow-factored \
-  --manifest "$out/manifest.json" --rows "$out/rows.jsonl.gz"
-
-cargo build --locked --release --example cancel --manifest-path ../Cargo.toml
-signer=../target/release/examples/cancel
-bitcoin_receipt=$("$signer" arm "$out/bitcoin" 2)
-"$signer" recover "$out/bitcoin" "$bitcoin_receipt" 01 | \
-  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' > "$out/signature.bin"
-receipt=$("$out/capsule-cli" arm "$out/manifest.json" "$out/rows.jsonl.gz" \
-  "$out/signature.bin" "$out/capsule.bin")
-
-for i in 0 1; do
-  python3 -m compact lift "$out/statement.json" "$out/manifest.json" \
-    testdata/sp1-v6.1.0-pairing.json "$out/w$i.bin" --index "$i"
-  python3 -m compact check "$out/manifest.json" "$out/rows.jsonl.gz" "$out/w$i.bin" > "$out/proof$i.json"
-  "$out/native" -verify-decoded "$vk" "$inputs" < "$out/proof$i.json"
-  "$out/capsule-cli" open "$out/manifest.json" "$out/rows.jsonl.gz" \
-    "$out/capsule.bin" "$receipt" "$out/w$i.bin" "$out/opened$i.bin"
-  cmp "$out/signature.bin" "$out/opened$i.bin"
-done
+receipt=$("$out/capsule-cli" arm "$manifest" "$rows" "$signature_file" "$new_capsule")
+"$out/capsule-cli" open "$manifest" "$rows" "$new_capsule" "$receipt" "$packed_witness" "$new_output"
 ```
 
 The sender must authenticate the verifier key, public inputs and compilation used for arming. The opener must obtain the intended receipt through an authenticated channel. Each capsule header binds the exact manifest, whose digest of the uncompressed row stream is checked on load. Output paths must be fresh.
@@ -59,6 +35,10 @@ Public compilation took 4.23 s. Witness lifting took 4.26 s and 4.30 s respectiv
 | Public manifest | `7bd9b3f83d9f6537dc1f17f0946337611b66a9e9b1fe0559b63d66aeae9b4b90` |
 | Randomized capsule | `18ddc1a9515896c2485f6f8714dc10ec40179796728df3b09f72c652029b4c0e` |
 | Input and both recovered signatures | `ee2bc3e5859001b6b719f48133ca0d312a0ac49fc56042fbfcf5a58822b607c4` |
+
+### Size at the paper's parameters
+
+The 1,051,934,251-byte measurement covers one full-width capsule at the six-copy development parameters. Praxis reports **7.88 GiB** compressed for its own 391,693-variable encoder and its 100-bit target. Applying Proposition 5.7 to our 588,373-variable layout with the paper's grid predicts **11.83 GiB** for the group-element arrays with standard compressed points. For this estimate the 3,305 rows are padded to 3,311 to divide evenly across 11 chunks. There are 226,731,290 G1 points at 32 bytes and 85,149,848 G2 points at 64 bytes. This is a storage estimate for a larger backend. Its runtime and security on this verifier shape require separate evaluation. [Praxis, Proposition 5.7 and Table 4](https://eprint.iacr.org/2026/2971.pdf)
 
 ## Uniform wire expansion
 

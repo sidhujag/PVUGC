@@ -89,6 +89,25 @@ func TestSignatureEnvelope(t *testing.T) {
 			t.Fatalf("packed witness %d recovered different bytes", v)
 		}
 	}
+	t.Run("64-byte default sighash payload", func(t *testing.T) {
+		// The envelope transports opaque bytes. A default-length payload carries
+		// no trailing sighash byte, including when its final byte is zero.
+		payload := bytes.Repeat([]byte{0x80, 0xff, 0x01, 0x00}, 16)
+		put(t, path("default-payload"), payload)
+		capsule := path("default-capsule")
+		defaultPin, err := arm(s, path("default-payload"), capsule)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(t, witness, []byte{3})
+		output := path("default-output")
+		if err := openCLI(capsule, defaultPin, output); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(read(t, output), payload) {
+			t.Fatal("64-byte payload changed during recovery")
+		}
+	})
 	// Wrong receipt, then changed GCM tag with a matching new file receipt.
 	wrong := append([]byte(nil), pin...)
 	wrong[0] ^= 1
