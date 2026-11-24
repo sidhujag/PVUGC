@@ -17,9 +17,9 @@ import (
 // at height h, BIP68 permits Pay in block h+100. A release requiring 100
 // already-mined descendants at evaluation time must verify them separately.
 type Pay struct {
-	Reserve, Close                                wire.OutPoint
-	ReserveValue, CloseValue, RecipientValue, Fee int64
-	RecipientScript, ChangeScript, CloseScript    []byte
+	Reserve, Close                                              wire.OutPoint
+	ReserveValue, CloseValue, RecipientValue, Fee               int64
+	RecipientScript, ChangeScript, FeeChangeScript, CloseScript []byte
 }
 
 type spend struct {
@@ -36,12 +36,15 @@ func (p Pay) spend(id Identity) (*spend, error) {
 	}
 	if p.ReserveValue <= 0 || p.ReserveValue > btcutil.MaxSatoshi ||
 		p.CloseValue < 0 || p.CloseValue > btcutil.MaxSatoshi-p.ReserveValue ||
-		p.RecipientValue <= 0 || p.RecipientValue > p.ReserveValue+p.CloseValue ||
-		p.Fee < 0 || p.Fee > p.ReserveValue+p.CloseValue-p.RecipientValue {
+		p.RecipientValue <= 0 || p.RecipientValue > p.ReserveValue ||
+		p.Fee < 0 || p.Fee > p.CloseValue {
 		return nil, errors.New("invalid Pay amounts")
 	}
-	change := p.ReserveValue + p.CloseValue - p.RecipientValue - p.Fee
-	if len(p.RecipientScript) == 0 || len(p.CloseScript) == 0 || (change > 0) != (len(p.ChangeScript) > 0) {
+	reserveChange := p.ReserveValue - p.RecipientValue
+	feeChange := p.CloseValue - p.Fee
+	if len(p.RecipientScript) == 0 || len(p.CloseScript) == 0 ||
+		(reserveChange > 0) != (len(p.ChangeScript) > 0) ||
+		(feeChange > 0) != (len(p.FeeChangeScript) > 0) {
 		return nil, errors.New("inconsistent Pay scripts")
 	}
 	if _, err := schnorr.ParsePubKey(id.Key[:]); err != nil {
@@ -78,9 +81,14 @@ func (p Pay) spend(id Identity) (*spend, error) {
 	closeInput := wire.NewTxIn(&p.Close, nil, nil)
 	closeInput.Sequence = 100
 	tx.AddTxIn(closeInput)
+	// The burn recipient is paid solely from the reserve. Any remaining
+	// reserve principal and any unused fee contribution are distinct outputs.
 	tx.AddTxOut(wire.NewTxOut(p.RecipientValue, p.RecipientScript))
-	if change > 0 {
-		tx.AddTxOut(wire.NewTxOut(change, p.ChangeScript))
+	if reserveChange > 0 {
+		tx.AddTxOut(wire.NewTxOut(reserveChange, p.ChangeScript))
+	}
+	if feeChange > 0 {
+		tx.AddTxOut(wire.NewTxOut(feeChange, p.FeeChangeScript))
 	}
 	prevouts := txscript.NewMultiPrevOutFetcher(map[wire.OutPoint]*wire.TxOut{
 		p.Reserve: wire.NewTxOut(p.ReserveValue, reserveScript),

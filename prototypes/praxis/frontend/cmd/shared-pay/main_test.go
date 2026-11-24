@@ -57,3 +57,12 @@ func TestArchivePublicationAndTruncation(t *testing.T) {
 		t.Fatal("truncated header accepted")
 	}
 }
+
+func TestPinnedReserveChange(t *testing.T) {
+	pay := fixturePay()
+	pay.ChangeScript = pay.FeeChangeScript
+	_, _, _, _, err := layout(specification{Pay: pay})
+	if err == nil || err.Error() != "change destination differs from the pinned fixture policy" {
+		t.Fatalf("reserve-change substitution should fail at the policy check: %v", err)
+	}
+}

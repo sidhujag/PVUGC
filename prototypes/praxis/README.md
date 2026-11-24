@@ -2,6 +2,8 @@
 
 This crate replaces PVUGC's historical pairing-derived release key in an executable fixed-transaction experiment. It uses the existing PVUGC Bitcoin sighash code. A three-party MuSig2 adaptor pre-signature and a public setup archive let a challenger finish a native Taproot signature offline. The Rust setup uses the Boolean relation `(x − y)² = 1` and a synthetic Bitcoin output. A separate [SP1 signature capsule](frontend/README.md#offline-signature-release) encrypts the resulting signature under a fixed SP1 v6.1.0 Groth16 verifier. This second experiment exercises offline recovery at the full verifier width with a six-copy development profile.
 
+The Bitcoin payout experiment uses one native table to select signing packets for a pinned receipt. Its measurements cover offline signature recovery and reserve-input verification. [Single-table payout and security scope](SHARED_PAY.md)
+
 ## Run the SP1 experiment
 
 From the repository root, run the following command with Python 3.10+, Go 1.26.8+ and Cargo on your path. Choose a new output directory on a filesystem with at least 1.1 GB free for the artifacts. Initial toolchain builds need additional cache space.

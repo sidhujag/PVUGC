@@ -1,6 +1,6 @@
 # Single-table Bitcoin payout experiment
 
-The prototype opens one native Praxis factor table, selects packets for one exact Bitcoin payout and assembles a 64-byte BIP340 signature. Its Bitcoin script test verifies that the reserve signature commits to John's recipient, amount, change, fee and the winning Close outpoint. The experiment pins the payout during arming. The deposit-time bridge requires those terms to come from a future authenticated Syscoin burn.
+The prototype opens one native Praxis factor table, selects packets for one exact Bitcoin payout and assembles a 64-byte BIP340 signature. Its Bitcoin script test verifies that the reserve signature commits to John's recipient, amount, change, fee and the winning Close outpoint. The payout builder puts every satoshi of unused reserve principal in a separate change output, and the command checks that output against its pinned fixture policy. The Close input covers the fee and returns its unused contribution separately. The experiment pins the payout during arming. The deposit-time bridge requires those terms to come from a future authenticated Syscoin burn.
 
 ## Run from a clean checkout
 
@@ -40,6 +40,10 @@ The opener checks the pin, authenticates the eligible packets, interpolates exac
 | Authors' full Groth16 capsule | 7.88 GiB | Authors' published 100-bit parameter estimate for fixed-message Praxis |
 | This repository's full-width SP1 fixture | 1,051,934,251 bytes | Previously measured at the smaller development grid |
 
+At the reviewed revision `c5ede4b`, arming wrote 2,089,486 bytes in 0.139 seconds on an Apple M5 Max. Two separate opener processes using the arming pin each selected 129 packets and performed 388 native searches. They returned byte-identical reserve signatures in 48.962 and 49.990 seconds. A different archive pin was rejected. Each search processes the factor table again. One physical copy does not imply one decoding pass.
+
+The updated fixture uses archive format `PXSPAY02` for separate principal and fee change. It produced a 2,089,541-byte archive in 0.108 seconds. An independent opener selected 140 packets, performed 421 native searches and verified the reserve signature in 51.195 seconds. The file size can vary slightly with JSON metadata, and the number of selected packets depends on the random signer's challenge. Its synthetic transaction pays 0.75 BTC from a 1 BTC reserve, returns 0.25 BTC to the pinned reserve-change script, and pays a 2,000 satoshi fee from the 10,000 satoshi Close input. The remaining 8,000 satoshis return to the fee contributor.
+
 The new fixture has 1,060 Boolean unknowns. It contains no SP1 Groth16 verifier, AuxPoW ancestry or underlying NEVM burn proof. At the authors' published illustrative grid, 795 extra variable columns alone would occupy 17,121,120 bytes. Eligibility constraints, the full verifier, QAP powers, arming and confirmation of the parameter inequalities need independent accounting. This repository's earlier 588,373-variable SP1 layout estimated 11.83 GiB for group arrays at the larger grid. A compact selector fixture therefore establishes the one-table storage layout while leaving deployment size open. [Praxis paper](https://eprint.iacr.org/2026/2971) · [Full-width fixture measurement](frontend/README.md#measured-cpu-run)
 
 ## Security and transaction boundaries
@@ -52,4 +56,10 @@ The new fixture has 1,060 Boolean unknowns. It contains no SP1 Groth16 verifier,
 
 **Deposit setup.** The armer in this fixture knows the signing secrets, polynomial and wrapping coordinates. Separate opening proves it needs no armer online. One-honest-party safety requires private, verifiable arming with up to N−1 corrupt participants and erasure by the honest participant. The implementation has no such ceremony. Stock Praxis uses classical bilinear groups and the native payout uses Schnorr. A post-quantum payout has separate requirements.
 
-The full bridge additionally needs a proof that binds the NEVM burn, contextual work and AuxPoW ancestry to the exact payout fields, eligibility bits and live Bitcoin control output. The two-input fixture exercises ordinary Bitcoin signature semantics. A protected marker role and real chain observations would have to enter the protocol and its security argument before a reserve could rely on this design.
+For John's future payout, the source proof must authorize the burn amount and recipient, assign the reserve, identify the winning Close and its previous-output script and value, and constrain the fee and change destination. Its verifier must bind those fields to the exact BIP341 message and all 265 flags. The arming pin in the fixture authenticates known bytes. It cannot certify that a future withdrawal happened. The two-input test exercises ordinary Bitcoin signature semantics. A protected marker role and real chain observations would have to enter the protocol and its security argument before a reserve could rely on this design.
+
+## A separate design for two eligible histories
+
+A candidate for two authorized messages derives the public nonce point from the complete Pay using two precommitted nonce points. It replaces the single polynomial's evaluation packets with masked contributions over an XOR circuit. Within an ideal interface that releases only the eligible packets, the connected set of changed wires makes the second view disclose just the second authorized total. Independent labels for each binary wire state permit smaller per-gate ciphertexts. The legal patterns of one XOR gate differ in exactly two of its three positions, so the labels from two local openings can reconstruct only those two legal patterns.
+
+This proposal changes the signing encoder. The existing executable exercises the single-message polynomial. A two-view bridge would still need to show that an evaluator with the complete public archive can obtain only the authorized wire labels, prove security for adaptively chosen Bitcoin messages under the public nonce commitments, and implement the one-honest-party ceremony. The size measured above belongs to the single-message experiment.

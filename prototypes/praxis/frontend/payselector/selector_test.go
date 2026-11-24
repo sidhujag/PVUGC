@@ -77,8 +77,8 @@ func TestBothInputsWithClaimantKey(t *testing.T) {
 	}
 	pay := Pay{
 		Reserve: wire.OutPoint{Hash: [32]byte{1}, Index: 3}, Close: wire.OutPoint{Hash: [32]byte{2}},
-		ReserveValue: 100_000, CloseValue: 1_000, RecipientValue: 100_500, Fee: 500,
-		RecipientScript: closeScript, CloseScript: closeScript,
+		ReserveValue: 100_000, CloseValue: 1_000, RecipientValue: 100_000, Fee: 500,
+		RecipientScript: closeScript, FeeChangeScript: closeScript, CloseScript: closeScript,
 	}
 	digest, err := pay.Digest(id)
 	if err != nil {
@@ -130,7 +130,7 @@ func TestExactPayScriptSpend(t *testing.T) {
 		Reserve:      wire.OutPoint{Hash: [32]byte{1}, Index: 3},
 		Close:        wire.OutPoint{Hash: [32]byte{2}, Index: 0},
 		ReserveValue: 100_000, CloseValue: 1_000, RecipientValue: 90_000, Fee: 500,
-		RecipientScript: outputScript(3), ChangeScript: outputScript(4), CloseScript: outputScript(5),
+		RecipientScript: outputScript(3), ChangeScript: outputScript(4), CloseScript: outputScript(5), FeeChangeScript: outputScript(6),
 	}
 	digest, err := pay.Digest(id)
 	if err != nil {
@@ -163,8 +163,11 @@ func TestExactPayScriptSpend(t *testing.T) {
 		func(p *Pay) { p.RecipientValue++ },
 		func(p *Pay) { p.Fee++ },
 		func(p *Pay) { p.CloseValue++ },
+		func(p *Pay) { p.ReserveValue++ },
 		func(p *Pay) { p.RecipientScript = outputScript(6) },
 		func(p *Pay) { p.ChangeScript = outputScript(7) },
+		func(p *Pay) { p.FeeChangeScript = outputScript(8) },
+		func(p *Pay) { p.CloseScript = outputScript(9) },
 	} {
 		other := pay
 		change(&other)

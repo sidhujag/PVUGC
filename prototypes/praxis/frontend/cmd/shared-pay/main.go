@@ -24,7 +24,7 @@ import (
 	"pvugc.example/praxis-frontend/scratch"
 )
 
-const archiveTag = "PXSPAY01"
+const archiveTag = "PXSPAY02"
 const width = 3
 const metadataLimit = 1 << 17
 
@@ -38,21 +38,26 @@ type envelope struct {
 	Packets [payselector.PacketCount][]byte
 }
 
+func fixtureScript(name string) []byte {
+	hash := sha256.Sum256([]byte(name))
+	return append([]byte{0x00, 0x14}, hash[:20]...)
+}
+
 func fixturePay() payselector.Pay {
 	reserve := chainhash.DoubleHashH([]byte("PVUGC shared Pay fixture reserve"))
 	closeHash := chainhash.DoubleHashH([]byte("PVUGC shared Pay fixture close"))
-	script := func(name string) []byte {
-		hash := sha256.Sum256([]byte(name))
-		return append([]byte{0x00, 0x14}, hash[:20]...)
-	}
 	return payselector.Pay{
 		Reserve: wire.OutPoint{Hash: reserve, Index: 1}, Close: wire.OutPoint{Hash: closeHash, Index: 0},
 		ReserveValue: 100000000, CloseValue: 10000, RecipientValue: 75000000, Fee: 2000,
-		RecipientScript: script("regtest John"), ChangeScript: script("regtest change"), CloseScript: script("regtest close"),
+		RecipientScript: fixtureScript("regtest John"), ChangeScript: fixtureScript("regtest approved reserve change"),
+		FeeChangeScript: fixtureScript("regtest fee payer"), CloseScript: fixtureScript("regtest close"),
 	}
 }
 
 func layout(spec specification) (*scratch.Relation, []int, []byte, [32]byte, error) {
+	if spec.Pay.ReserveValue > spec.Pay.RecipientValue && !bytes.Equal(spec.Pay.ChangeScript, fixtureScript("regtest approved reserve change")) {
+		return nil, nil, nil, [32]byte{}, errors.New("change destination differs from the pinned fixture policy")
+	}
 	digest, err := spec.Pay.Digest(spec.Signer)
 	if err != nil {
 		return nil, nil, nil, digest, err
@@ -88,7 +93,7 @@ func context(spec specification, table []byte) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	h := sha256.New()
-	h.Write([]byte("PVUGC/shared-pay/fixture-v1/regtest/reserve-input-0"))
+	h.Write([]byte("PVUGC/shared-pay/fixture-v2/regtest/reserve-input-0"))
 	tableHash := sha256.Sum256(table)
 	h.Write(tableHash[:])
 	h.Write(desc)
@@ -110,7 +115,7 @@ func packetCipher(ctx [32]byte, slot int, tuple []byte) (cipher.AEAD, []byte, er
 	}
 	aad := binary.BigEndian.AppendUint16(append([]byte(nil), ctx[:]...), uint16(slot))
 	h := sha256.New()
-	h.Write([]byte("PVUGC/shared-pay/fixture-v1/packet-key"))
+	h.Write([]byte("PVUGC/shared-pay/fixture-v2/packet-key"))
 	h.Write(aad)
 	h.Write(tuple)
 	key := h.Sum(nil)
