@@ -100,18 +100,21 @@ func TestFixedBases(t *testing.T) {
 func TestBoundedSearch(t *testing.T) {
 	const ones = 356481
 	for _, n := range []int{2 * ones, 3*ones + 355, 9 * ones} {
-		v, err := findSearchExponent(gtBase, gtInt(gtBase, n), ones)
+		v, err := findSearchExponent(gtBase, gtInt(gtBase, n), ones, false)
 		if err != nil || v != n {
 			t.Fatalf("search %d returned %d (%v)", n, v, err)
 		}
 	}
-	if _, err := findSearchExponent(gtBase, gtInt(gtBase, 9*ones+1), ones); err == nil {
+	if _, err := findSearchExponent(gtBase, gtInt(gtBase, 9*ones+1), ones, false); err == nil {
 		t.Fatal("accepted outside range")
 	}
 	var id bn254.GT
 	id.SetOne()
-	if v, err := findSearchExponent(id, id, ones); err != nil || v != 2*ones {
+	if v, err := findSearchExponent(id, id, ones, false); err != nil || v != 2*ones {
 		t.Fatalf("identity search %d %v", v, err)
+	}
+	if _, err := findSearchExponent(id, id, ones, true); err == nil {
+		t.Fatal("unique-coordinate search accepted an ambiguous exponent")
 	}
 }
 

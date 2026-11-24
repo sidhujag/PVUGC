@@ -99,7 +99,15 @@ func column(start, i int, m [][2]scalar) (z [4]scalar) {
 func eval(z [4]scalar, x scalar) scalar {
 	return add(z[0], mul(x, add(z[1], mul(x, add(z[2], mul(x, z[3]))))))
 }
-func writeColumns(w io.Writer, start, n int, e Evaluations, c coins, f factorScales) error {
+
+// scratchCapture holds only the requested wire positions, excluding the constant
+// column. This is private setup state and is never serialized with the table.
+type scratchCapture struct {
+	positions map[int]int
+	values    []byte
+}
+
+func writeColumns(w io.Writer, start, n int, e Evaluations, c coins, f factorScales, scratch *scratchCapture) error {
 	matrix := make([][2]scalar, matrixCount(start, n))
 	for i := range matrix {
 		for j := range matrix[i] {
@@ -128,7 +136,13 @@ func writeColumns(w io.Writer, start, n int, e Evaluations, c coins, f factorSca
 			return err
 		}
 		a, b := e.A[start+i], e.B[start+i]
-		r := fromInt(2 + int(small[i]&7))
+		value := 2 + (small[i] & 7)
+		if scratch != nil {
+			if pos, ok := scratch.positions[start+i-1]; ok {
+				scratch.values[pos] = value
+			}
+		}
+		r := fromInt(int(value))
 		left[3*i] = mul(f.piLeft, y)
 		left[3*i+1] = mul(f.piLeft, add(mul(c.omega12, y), mul(c.omega22, a)))
 		left[3*i+2] = mul(c.zeta[2], y)
@@ -220,6 +234,34 @@ func extraScalars(c coins, f factorScales, e Evaluations) []scalar {
 // the public relation enters evaluate. Its argument and results are secret
 // ephemeral encryption material, never part of the capsule.
 func Encrypt(dst io.Writer, s Shape, evaluate func(fr.Element) (Evaluations, error)) ([32]byte, error) {
+	return encrypt(dst, s, evaluate, nil)
+}
+
+// EncryptWithScratch writes one ordinary development table and returns the
+// sampled coefficients of the designated Boolean wires to the setup caller.
+// The entries range from 2 to 9. They are suitable for correctness fixtures
+// only. An index is zero-based in the witness, without the constant column.
+func EncryptWithScratch(dst io.Writer, s Shape, evaluate func(fr.Element) (Evaluations, error), wireIndices []int) ([]byte, error) {
+	scratch := scratchCapture{positions: make(map[int]int, len(wireIndices)), values: make([]byte, len(wireIndices))}
+	for pos, wire := range wireIndices {
+		if wire < 0 || wire >= s.N {
+			return nil, errors.New("scratch wire out of range")
+		}
+		if _, exists := scratch.positions[wire]; exists {
+			return nil, errors.New("duplicate scratch wire")
+		}
+		scratch.positions[wire] = pos
+	}
+	key, err := encrypt(dst, s, evaluate, &scratch)
+	clear(key[:])
+	if err != nil {
+		clear(scratch.values)
+		return nil, err
+	}
+	return scratch.values, nil
+}
+
+func encrypt(dst io.Writer, s Shape, evaluate func(fr.Element) (Evaluations, error), scratch *scratchCapture) ([32]byte, error) {
 	var none [32]byte
 	if err := s.validate(); err != nil {
 		return none, err
@@ -255,7 +297,7 @@ func Encrypt(dst io.Writer, s Shape, evaluate func(fr.Element) (Evaluations, err
 	if _, err = out.Write(s.header()); err != nil {
 		return none, err
 	}
-	if err = blocks(s.N, func(start, n int) error { return writeColumns(out, start, n, e, c, f) }); err != nil {
+	if err = blocks(s.N, func(start, n int) error { return writeColumns(out, start, n, e, c, f, scratch) }); err != nil {
 		return none, err
 	}
 	if err = writePowers(out, s.D, 0, c.tau, c.zeta[0]); err != nil {

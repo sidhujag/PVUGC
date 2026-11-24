@@ -384,6 +384,10 @@ func Open(manifestPath, recipePath string) (*System, error) {
 		defer z.Close()
 		in = z
 	}
+	return parseRows(raw, m, expected, in)
+}
+
+func parseRows(raw []byte, m manifest, expected []byte, in io.Reader) (*System, error) {
 	data, err := io.ReadAll(io.LimitReader(in, m.RecipeBytes+1))
 	if err != nil {
 		return nil, err

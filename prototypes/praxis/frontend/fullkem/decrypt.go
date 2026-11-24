@@ -178,6 +178,21 @@ func combine(a *accum, cp int, extras []bn254.G2Affine, t cancellation, keyQ, ot
 // Boolean witness and the corresponding QAP openings. Regardless of bit value,
 // every serialized source point undergoes decoding and subgroup validation.
 func Decrypt(src io.Reader, s Shape, witness []bool, o Openings) ([32]byte, error) {
+	return decode(src, s, witness, o, nil)
+}
+
+// SearchSum reads an ordinary development table and returns the unique bounded
+// search integer for these witness and QAP openings. For an honest valid
+// assignment it equals r_constant + sum_i r_i*w_i. The caller obtains the
+// openings from its authenticated QAP. It rejects an ambiguous search even
+// when the ordinary fixed-message decoder can still recover its payload.
+func SearchSum(src io.Reader, s Shape, witness []bool, o Openings) (int, error) {
+	var sum int
+	_, err := decode(src, s, witness, o, &sum)
+	return sum, err
+}
+
+func decode(src io.Reader, s Shape, witness []bool, o Openings, searchSum *int) ([32]byte, error) {
 	var none [32]byte
 	if err := s.validate(); err != nil {
 		return none, err
@@ -242,10 +257,6 @@ func Decrypt(src io.Reader, s Shape, witness []bool, o Openings) ([32]byte, erro
 	if err := eoi(r); err != nil {
 		return none, err
 	}
-	lambda, psi, err := combine(&a, 0, extras[:extraCount], t, qs[0], qs[1], rs[0])
-	if err != nil {
-		return none, err
-	}
 	alphaLambda, alphaPsi, err := combine(&a, 1, extras[extraCount:], t, qs[0], qs[1], rs[0])
 	if err != nil {
 		return none, err
@@ -259,7 +270,15 @@ func Decrypt(src io.Reader, s Shape, witness []bool, o Openings) ([32]byte, erro
 			ones++
 		}
 	}
-	rw, err := findSearchExponent(alphaPsi, target, ones)
+	rw, err := findSearchExponent(alphaPsi, target, ones, searchSum != nil)
+	if err != nil {
+		return none, err
+	}
+	if searchSum != nil {
+		*searchSum = rw
+		return none, nil
+	}
+	lambda, psi, err := combine(&a, 0, extras[:extraCount], t, qs[0], qs[1], rs[0])
 	if err != nil {
 		return none, err
 	}

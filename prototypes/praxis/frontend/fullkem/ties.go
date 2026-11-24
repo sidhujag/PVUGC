@@ -89,9 +89,17 @@ func makeTies(z poly4) (t cancellation, err error) {
 
 // The g=8 honest search interval contains 7*ones+1 candidate exponents.
 // Baby-step/giant-step is exact. A full canonical GT string is the map key.
-func findSearchExponent(base, target bn254.GT, ones int) (int, error) {
+func findSearchExponent(base, target bn254.GT, ones int, requireUnique bool) (int, error) {
+	// Every representable interval here is far shorter than the BN254 prime
+	// subgroup order, so its integer representative is unique for a nonidentity base.
+	if ones < 1 || ones > math.MaxInt/(g+1) {
+		return 0, errors.New("invalid bounded search interval")
+	}
 	lower, span := 2*ones, (g-1)*ones
 	if base.IsOne() {
+		if requireUnique {
+			return 0, errors.New("identity search base has no unique exponent")
+		}
 		if target.IsOne() {
 			return lower, nil
 		}
