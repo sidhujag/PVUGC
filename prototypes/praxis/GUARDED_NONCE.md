@@ -86,6 +86,8 @@ In the classical programmable-random-oracle model, the simulator can post a unif
 
 ## What the public archive must prove
 
+A [follow-up analysis of wire-label disclosure](SELECTIVE_LABELS.md) derives bounds for authorized search equations and for adaptive affine equality tests. It identifies the high-total-rank case that remains unclassified.
+
 A single fixed-message Praxis ciphertext gives the same plaintext to every valid witness. For a two-stage signer, the archive must supply different eligible values while concealing the others. The existing shared-table fixture wraps packets under particular search-coefficient triples. The actual evaluator has the full pairing table, scratch toggles, search equations, ciphertexts and the public checks for all previous openings. A real proof must cover this entire joint view and malicious setup participants' information.
 
 Praxis Lemma B.6 gives one partial result. A usable stack of total row-space dimension at most three and with no hash-kernel vector decomposes into honest witness stacks. A nonzero column on a target scratch bit then implies at least one witness whose target bit is set. The conclusion needs **total** dimension at most three. A high-dimensional global stack may have low dimension on the closed target's three coordinates, and the stock fixed-message extraction theorem can return a previously authorized witness. This leaves an unproved case for the shared table. Generating a new table or adding extra scratch coordinates requires a new argument about those actual public factors. [Praxis, Theorem 5.9 and Lemma B.6](https://arxiv.org/pdf/2611.28552)
