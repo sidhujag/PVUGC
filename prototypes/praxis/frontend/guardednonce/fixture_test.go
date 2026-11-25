@@ -79,6 +79,10 @@ func TestTwoExactPayoutsAndRepeatedView(t *testing.T) {
 		if err != nil || repeatedSig != sig {
 			t.Fatal("retry changed the Bitcoin signature")
 		}
+		first[m] = false
+		if _, err := d.Second(m, open); err == nil {
+			t.Fatal("second stage ignored the source policy on a cached guard opening")
+		}
 		digests[i], signatures[i] = m, sig
 	}
 	if digests[0] == digests[1] || signatures[0] == signatures[1] {

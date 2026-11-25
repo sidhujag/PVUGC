@@ -241,7 +241,7 @@ func (s Setup) Nonce(digest [32]byte, open Opening) (Nonce, error) {
 // Second releases one native signature only under the fixture's separate
 // second-stage policy. A valid guard opening alone is not an authorization.
 func (d *Dealer) Second(digest [32]byte, open Opening) ([64]byte, error) {
-	if !d.nextAllowed(d.setup.Context, digest) {
+	if !d.firstAllowed(d.setup.Context, digest) || !d.nextAllowed(d.setup.Context, digest) {
 		return [64]byte{}, errors.New("second-stage policy did not authorize this digest")
 	}
 	nonce, err := d.setup.Nonce(digest, open)
